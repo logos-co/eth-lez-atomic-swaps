@@ -103,4 +103,48 @@ contract EthHTLCTest is Test {
         assertFalse(h.claimed);
         assertFalse(h.refunded);
     }
+
+    // -------------------------------------------------------------------------
+    // Happy-path: refund
+    // -------------------------------------------------------------------------
+
+    function test_refund_succeedsAfterTimelock() public {
+        bytes32 swapId = _lockDefault();
+
+        uint256 takerBalBefore = taker.balance;
+
+        vm.warp(TIMELOCK + 1);
+
+        vm.expectEmit(true, false, false, false);
+        emit EthHTLC.Refunded(swapId);
+
+        vm.prank(taker);
+        htlc.refund(swapId);
+
+        assertEq(taker.balance, takerBalBefore + AMOUNT);
+
+        EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
+        assertTrue(h.refunded);
+        assertFalse(h.claimed);
+    }
+
+    function test_refund_succeedsAtExactTimelock() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.warp(TIMELOCK);
+
+        vm.prank(taker);
+        htlc.refund(swapId);
+
+        EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
+        assertTrue(h.refunded);
+    }
+
+    function test_refund_revertsBeforeTimelock() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.TimelockNotExpired.selector);
+        htlc.refund(swapId);
+    }
 }
