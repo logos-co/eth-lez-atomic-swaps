@@ -147,4 +147,165 @@ contract EthHTLCTest is Test {
         vm.expectRevert(EthHTLC.TimelockNotExpired.selector);
         htlc.refund(swapId);
     }
+
+    // -------------------------------------------------------------------------
+    // Failure cases: lock
+    // -------------------------------------------------------------------------
+
+    function test_lock_revertsWithZeroValue() public {
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.InvalidAmount.selector);
+        htlc.lock{value: 0}(HASHLOCK, TIMELOCK, maker);
+    }
+
+    function test_lock_revertsWithPastTimelock() public {
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.InvalidTimelock.selector);
+        htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp, maker);
+    }
+
+    function test_lock_revertsWithZeroRecipient() public {
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.InvalidRecipient.selector);
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, payable(address(0)));
+    }
+
+    function test_lock_revertsOnDuplicate() public {
+        _lockDefault();
+
+        vm.deal(taker, 10 ether);
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.SwapAlreadyExists.selector);
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker);
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure cases: claim
+    // -------------------------------------------------------------------------
+
+    function test_claim_revertsWithWrongPreimage() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.prank(maker);
+        vm.expectRevert(EthHTLC.InvalidPreimage.selector);
+        htlc.claim(swapId, bytes32("wrong_preimage_value_here_!!!!!!"));
+    }
+
+    function test_claim_revertsWhenNotRecipient() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.NotRecipient.selector);
+        htlc.claim(swapId, PREIMAGE);
+    }
+
+    function test_claim_revertsWhenAlreadyClaimed() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.prank(maker);
+        htlc.claim(swapId, PREIMAGE);
+
+        vm.prank(maker);
+        vm.expectRevert(EthHTLC.AlreadyClaimed.selector);
+        htlc.claim(swapId, PREIMAGE);
+    }
+
+    function test_claim_revertsWhenAlreadyRefunded() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.warp(TIMELOCK);
+        vm.prank(taker);
+        htlc.refund(swapId);
+
+        vm.prank(maker);
+        vm.expectRevert(EthHTLC.AlreadyRefunded.selector);
+        htlc.claim(swapId, PREIMAGE);
+    }
+
+    function test_claim_revertsForNonexistentSwap() public {
+        vm.prank(maker);
+        vm.expectRevert(EthHTLC.SwapNotFound.selector);
+        htlc.claim(bytes32(uint256(0xdead)), PREIMAGE);
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure cases: refund
+    // -------------------------------------------------------------------------
+
+    function test_refund_revertsWhenNotSender() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.warp(TIMELOCK);
+
+        vm.prank(maker);
+        vm.expectRevert(EthHTLC.NotSender.selector);
+        htlc.refund(swapId);
+    }
+
+    function test_refund_revertsWhenAlreadyRefunded() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.warp(TIMELOCK);
+        vm.prank(taker);
+        htlc.refund(swapId);
+
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.AlreadyRefunded.selector);
+        htlc.refund(swapId);
+    }
+
+    function test_refund_revertsWhenAlreadyClaimed() public {
+        bytes32 swapId = _lockDefault();
+
+        vm.prank(maker);
+        htlc.claim(swapId, PREIMAGE);
+
+        vm.warp(TIMELOCK);
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.AlreadyClaimed.selector);
+        htlc.refund(swapId);
+    }
+
+    function test_refund_revertsForNonexistentSwap() public {
+        vm.warp(TIMELOCK);
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.SwapNotFound.selector);
+        htlc.refund(bytes32(uint256(0xdead)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge case: multiple concurrent swaps
+    // -------------------------------------------------------------------------
+
+    function test_multipleConcurrentSwaps() public {
+        // Swap 1: taker -> maker, default params
+        bytes32 swapId1 = _lockDefault();
+
+        // Swap 2: different params (different timelock)
+        uint256 timelock2 = TIMELOCK + 300;
+        vm.prank(taker);
+        bytes32 swapId2 = htlc.lock{value: 2 ether}(HASHLOCK, timelock2, maker);
+
+        assertTrue(swapId1 != swapId2);
+
+        // Claim swap 1
+        vm.prank(maker);
+        htlc.claim(swapId1, PREIMAGE);
+
+        EthHTLC.HTLC memory h1 = htlc.getHTLC(swapId1);
+        assertTrue(h1.claimed);
+
+        // Swap 2 should be unaffected
+        EthHTLC.HTLC memory h2 = htlc.getHTLC(swapId2);
+        assertFalse(h2.claimed);
+        assertFalse(h2.refunded);
+
+        // Refund swap 2
+        vm.warp(timelock2);
+        vm.prank(taker);
+        htlc.refund(swapId2);
+
+        h2 = htlc.getHTLC(swapId2);
+        assertTrue(h2.refunded);
+    }
 }
