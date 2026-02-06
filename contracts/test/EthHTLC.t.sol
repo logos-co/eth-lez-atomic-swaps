@@ -72,8 +72,7 @@ contract EthHTLCTest is Test {
         assertEq(maker.balance, makerBalBefore + AMOUNT);
 
         EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
-        assertTrue(h.claimed);
-        assertFalse(h.refunded);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.CLAIMED));
     }
 
     function test_claim_emitsPreimageInEvent() public {
@@ -100,8 +99,7 @@ contract EthHTLCTest is Test {
         assertEq(h.amount, AMOUNT);
         assertEq(h.hashlock, HASHLOCK);
         assertEq(h.timelock, TIMELOCK);
-        assertFalse(h.claimed);
-        assertFalse(h.refunded);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.OPEN));
     }
 
     // -------------------------------------------------------------------------
@@ -124,8 +122,7 @@ contract EthHTLCTest is Test {
         assertEq(taker.balance, takerBalBefore + AMOUNT);
 
         EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
-        assertTrue(h.refunded);
-        assertFalse(h.claimed);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.REFUNDED));
     }
 
     function test_refund_succeedsAtExactTimelock() public {
@@ -137,7 +134,7 @@ contract EthHTLCTest is Test {
         htlc.refund(swapId);
 
         EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
-        assertTrue(h.refunded);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.REFUNDED));
     }
 
     function test_refund_revertsBeforeTimelock() public {
@@ -206,7 +203,7 @@ contract EthHTLCTest is Test {
         htlc.claim(swapId, PREIMAGE);
 
         vm.prank(maker);
-        vm.expectRevert(EthHTLC.AlreadyClaimed.selector);
+        vm.expectRevert(EthHTLC.SwapNotOpen.selector);
         htlc.claim(swapId, PREIMAGE);
     }
 
@@ -218,13 +215,13 @@ contract EthHTLCTest is Test {
         htlc.refund(swapId);
 
         vm.prank(maker);
-        vm.expectRevert(EthHTLC.AlreadyRefunded.selector);
+        vm.expectRevert(EthHTLC.SwapNotOpen.selector);
         htlc.claim(swapId, PREIMAGE);
     }
 
     function test_claim_revertsForNonexistentSwap() public {
         vm.prank(maker);
-        vm.expectRevert(EthHTLC.SwapNotFound.selector);
+        vm.expectRevert(EthHTLC.SwapNotOpen.selector);
         htlc.claim(bytes32(uint256(0xdead)), PREIMAGE);
     }
 
@@ -250,7 +247,7 @@ contract EthHTLCTest is Test {
         htlc.refund(swapId);
 
         vm.prank(taker);
-        vm.expectRevert(EthHTLC.AlreadyRefunded.selector);
+        vm.expectRevert(EthHTLC.SwapNotOpen.selector);
         htlc.refund(swapId);
     }
 
@@ -262,14 +259,14 @@ contract EthHTLCTest is Test {
 
         vm.warp(TIMELOCK);
         vm.prank(taker);
-        vm.expectRevert(EthHTLC.AlreadyClaimed.selector);
+        vm.expectRevert(EthHTLC.SwapNotOpen.selector);
         htlc.refund(swapId);
     }
 
     function test_refund_revertsForNonexistentSwap() public {
         vm.warp(TIMELOCK);
         vm.prank(taker);
-        vm.expectRevert(EthHTLC.SwapNotFound.selector);
+        vm.expectRevert(EthHTLC.SwapNotOpen.selector);
         htlc.refund(bytes32(uint256(0xdead)));
     }
 
@@ -293,12 +290,11 @@ contract EthHTLCTest is Test {
         htlc.claim(swapId1, PREIMAGE);
 
         EthHTLC.HTLC memory h1 = htlc.getHTLC(swapId1);
-        assertTrue(h1.claimed);
+        assertEq(uint8(h1.state), uint8(EthHTLC.SwapState.CLAIMED));
 
         // Swap 2 should be unaffected
         EthHTLC.HTLC memory h2 = htlc.getHTLC(swapId2);
-        assertFalse(h2.claimed);
-        assertFalse(h2.refunded);
+        assertEq(uint8(h2.state), uint8(EthHTLC.SwapState.OPEN));
 
         // Refund swap 2
         vm.warp(timelock2);
@@ -306,6 +302,6 @@ contract EthHTLCTest is Test {
         htlc.refund(swapId2);
 
         h2 = htlc.getHTLC(swapId2);
-        assertTrue(h2.refunded);
+        assertEq(uint8(h2.state), uint8(EthHTLC.SwapState.REFUNDED));
     }
 }

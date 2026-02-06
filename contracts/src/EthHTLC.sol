@@ -2,14 +2,20 @@
 pragma solidity ^0.8.28;
 
 contract EthHTLC {
+    enum SwapState {
+        EMPTY,
+        OPEN,
+        CLAIMED,
+        REFUNDED
+    }
+
     struct HTLC {
         address payable sender;
         address payable recipient;
         uint256 amount;
         bytes32 hashlock;
         uint256 timelock;
-        bool claimed;
-        bool refunded;
+        SwapState state;
     }
 
     mapping(bytes32 => HTLC) public htlcs;
@@ -31,9 +37,7 @@ contract EthHTLC {
     error InvalidTimelock();
     error InvalidRecipient();
     error SwapAlreadyExists();
-    error SwapNotFound();
-    error AlreadyClaimed();
-    error AlreadyRefunded();
+    error SwapNotOpen();
     error InvalidPreimage();
     error TimelockNotExpired();
     error NotRecipient();
@@ -58,7 +62,7 @@ contract EthHTLC {
             abi.encodePacked(msg.sender, recipient, msg.value, hashlock, timelock)
         );
 
-        if (htlcs[swapId].amount != 0) revert SwapAlreadyExists();
+        if (htlcs[swapId].state != SwapState.EMPTY) revert SwapAlreadyExists();
 
         htlcs[swapId] = HTLC({
             sender: payable(msg.sender),
@@ -66,8 +70,7 @@ contract EthHTLC {
             amount: msg.value,
             hashlock: hashlock,
             timelock: timelock,
-            claimed: false,
-            refunded: false
+            state: SwapState.OPEN
         });
 
         emit Locked(swapId, msg.sender, recipient, msg.value, hashlock, timelock);
@@ -79,13 +82,11 @@ contract EthHTLC {
     function claim(bytes32 swapId, bytes32 preimage) external {
         HTLC storage htlc = htlcs[swapId];
 
-        if (htlc.amount == 0) revert SwapNotFound();
-        if (htlc.claimed) revert AlreadyClaimed();
-        if (htlc.refunded) revert AlreadyRefunded();
+        if (htlc.state != SwapState.OPEN) revert SwapNotOpen();
         if (msg.sender != htlc.recipient) revert NotRecipient();
         if (sha256(abi.encodePacked(preimage)) != htlc.hashlock) revert InvalidPreimage();
 
-        htlc.claimed = true;
+        htlc.state = SwapState.CLAIMED;
 
         emit Claimed(swapId, preimage);
 
@@ -98,13 +99,11 @@ contract EthHTLC {
     function refund(bytes32 swapId) external {
         HTLC storage htlc = htlcs[swapId];
 
-        if (htlc.amount == 0) revert SwapNotFound();
-        if (htlc.claimed) revert AlreadyClaimed();
-        if (htlc.refunded) revert AlreadyRefunded();
+        if (htlc.state != SwapState.OPEN) revert SwapNotOpen();
         if (block.timestamp < htlc.timelock) revert TimelockNotExpired();
         if (msg.sender != htlc.sender) revert NotSender();
 
-        htlc.refunded = true;
+        htlc.state = SwapState.REFUNDED;
 
         emit Refunded(swapId);
 
