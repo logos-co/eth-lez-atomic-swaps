@@ -1,0 +1,10 @@
+[package]
+name = "lez_htlc_program"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nssa_core = { path = "../../../../../lssa/nssa/core" }
+risc0-zkvm = { version = "3.0.3", features = ["std"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+bytemuck = "1.24.0"
