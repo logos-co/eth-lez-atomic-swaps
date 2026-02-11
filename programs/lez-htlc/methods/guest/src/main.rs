@@ -35,6 +35,7 @@ fn execute_lock(
     taker_id: AccountId,
     amount: u128,
 ) -> Vec<AccountPostState> {
+    assert!(pre_states.len() == 2, "lock requires 2 accounts: [maker, escrow]");
     let maker = &pre_states[0];
     let escrow_pda = &pre_states[1];
 
@@ -44,8 +45,8 @@ fn execute_lock(
         "escrow PDA must be unclaimed"
     );
     assert!(
-        escrow_pda.account.balance >= amount,
-        "escrow PDA must be pre-funded"
+        escrow_pda.account.balance == amount,
+        "escrow PDA balance must exactly match lock amount"
     );
 
     let escrow = HTLCEscrow {
@@ -73,6 +74,7 @@ fn execute_claim(
     pre_states: &[AccountWithMetadata],
     preimage: &[u8],
 ) -> Vec<AccountPostState> {
+    assert!(pre_states.len() == 2, "claim requires 2 accounts: [taker, escrow]");
     let taker = &pre_states[0];
     let escrow_pda = &pre_states[1];
 
@@ -95,6 +97,10 @@ fn execute_claim(
     // Transfer from escrow to taker
     let mut taker_account = taker.account.clone();
     let mut escrow_account = escrow_pda.account.clone();
+    assert!(
+        escrow_account.balance >= escrow.amount,
+        "escrow balance insufficient for claim"
+    );
     escrow_account.balance -= escrow.amount;
     taker_account.balance += escrow.amount;
 
@@ -113,6 +119,7 @@ fn execute_claim(
 }
 
 fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
+    assert!(pre_states.len() == 2, "refund requires 2 accounts: [maker, escrow]");
     let maker = &pre_states[0];
     let escrow_pda = &pre_states[1];
 
@@ -128,6 +135,10 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
     // Transfer from escrow back to maker
     let mut maker_account = maker.account.clone();
     let mut escrow_account = escrow_pda.account.clone();
+    assert!(
+        escrow_account.balance >= escrow.amount,
+        "escrow balance insufficient for refund"
+    );
     escrow_account.balance -= escrow.amount;
     maker_account.balance += escrow.amount;
 
@@ -319,10 +330,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "escrow PDA must be pre-funded")]
+    #[should_panic(expected = "escrow PDA balance must exactly match lock amount")]
     fn test_lock_insufficient_balance() {
         let mut pre = lock_pre_states();
         pre[1].account.balance = AMOUNT - 1;
+        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "escrow PDA balance must exactly match lock amount")]
+    fn test_lock_overfunded_balance() {
+        let mut pre = lock_pre_states();
+        pre[1].account.balance = AMOUNT + 1;
         execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
     }
 
