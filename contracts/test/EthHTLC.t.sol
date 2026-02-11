@@ -16,7 +16,7 @@ contract EthHTLCTest is Test {
     uint256 constant AMOUNT = 1 ether;
 
     function setUp() public {
-        htlc = new EthHTLC();
+        htlc = new EthHTLC(300);
         taker = payable(makeAddr("taker"));
         maker = payable(makeAddr("maker"));
         vm.deal(taker, 10 ether);
@@ -159,6 +159,13 @@ contract EthHTLCTest is Test {
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidTimelock.selector);
         htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp, maker);
+    }
+
+    function test_lock_revertsWithInsufficientTimelockDelta() public {
+        uint256 delta = htlc.minTimelockDelta();
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.InvalidTimelock.selector);
+        htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp + delta, maker);
     }
 
     function test_lock_revertsWithZeroRecipient() public {

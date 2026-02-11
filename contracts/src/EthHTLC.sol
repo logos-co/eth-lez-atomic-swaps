@@ -18,6 +18,8 @@ contract EthHTLC {
         SwapState state;
     }
 
+    uint256 public immutable minTimelockDelta;
+
     mapping(bytes32 => HTLC) public htlcs;
 
     event Locked(
@@ -45,6 +47,10 @@ contract EthHTLC {
     error NotSender();
     error TransferFailed();
 
+    constructor(uint256 _minTimelockDelta) {
+        minTimelockDelta = _minTimelockDelta;
+    }
+
     /// @notice Lock ETH into an HTLC.
     /// @param hashlock SHA-256 hash of the secret preimage.
     /// @param timelock Absolute Unix timestamp after which the sender can refund.
@@ -56,7 +62,7 @@ contract EthHTLC {
         address payable recipient
     ) external payable returns (bytes32 swapId) {
         if (msg.value == 0) revert InvalidAmount();
-        if (timelock <= block.timestamp) revert InvalidTimelock();
+        if (timelock <= block.timestamp + minTimelockDelta) revert InvalidTimelock();
         if (recipient == address(0)) revert InvalidRecipient();
         if (hashlock == bytes32(0)) revert InvalidHashLock();
 

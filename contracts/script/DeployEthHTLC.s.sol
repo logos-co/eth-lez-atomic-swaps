@@ -10,7 +10,8 @@ contract DeployEthHTLC is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        EthHTLC htlc = new EthHTLC();
+        uint256 minTimelockDelta = vm.envOr("MIN_TIMELOCK_DELTA", uint256(300));
+        EthHTLC htlc = new EthHTLC(minTimelockDelta);
 
         vm.stopBroadcast();
 
