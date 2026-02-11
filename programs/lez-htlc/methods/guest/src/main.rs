@@ -7,6 +7,9 @@ use nssa_core::{
 };
 use risc0_zkvm::sha::{Impl, Sha256};
 
+/// An account whose program_owner matches this value has not been claimed by any program.
+const UNCLAIMED_OWNER: [u32; 8] = DEFAULT_PROGRAM_ID;
+
 fn main() {
     let (
         ProgramInput {
@@ -41,7 +44,11 @@ fn execute_lock(
 
     assert!(maker.is_authorized, "maker must be authorized");
     assert!(
-        escrow_pda.account.program_owner == DEFAULT_PROGRAM_ID,
+        maker.account_id != taker_id,
+        "maker and taker must differ"
+    );
+    assert!(
+        escrow_pda.account.program_owner == UNCLAIMED_OWNER,
         "escrow PDA must be unclaimed"
     );
     assert!(
@@ -327,6 +334,13 @@ mod tests {
         let mut pre = lock_pre_states();
         pre[1].account.program_owner = PROGRAM_ID;
         execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+    }
+
+    #[test]
+    #[should_panic(expected = "maker and taker must differ")]
+    fn test_lock_self_swap() {
+        let pre = lock_pre_states();
+        execute_lock(&pre, hashlock(), maker_id(), AMOUNT);
     }
 
     #[test]
