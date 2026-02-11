@@ -34,6 +34,7 @@ contract EthHTLC {
     event Refunded(bytes32 indexed swapId);
 
     error InvalidAmount();
+    error InvalidHashLock();
     error InvalidTimelock();
     error InvalidRecipient();
     error SwapAlreadyExists();
@@ -57,6 +58,7 @@ contract EthHTLC {
         if (msg.value == 0) revert InvalidAmount();
         if (timelock <= block.timestamp) revert InvalidTimelock();
         if (recipient == address(0)) revert InvalidRecipient();
+        if (hashlock == bytes32(0)) revert InvalidHashLock();
 
         swapId = keccak256(
             abi.encodePacked(msg.sender, recipient, msg.value, hashlock, timelock)
