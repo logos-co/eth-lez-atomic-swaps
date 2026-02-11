@@ -168,6 +168,12 @@ contract EthHTLCTest is Test {
         htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp + delta, maker);
     }
 
+    function test_lock_revertsWithZeroHashlock() public {
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.InvalidHashLock.selector);
+        htlc.lock{value: AMOUNT}(bytes32(0), TIMELOCK, maker);
+    }
+
     function test_lock_revertsWithZeroRecipient() public {
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidRecipient.selector);
@@ -278,8 +284,38 @@ contract EthHTLCTest is Test {
     }
 
     // -------------------------------------------------------------------------
-    // Edge case: multiple concurrent swaps
+    // Failure case: TransferFailed
     // -------------------------------------------------------------------------
+
+    function test_claim_revertsWhenRecipientRejectsETH() public {
+        RejectETH rejector = new RejectETH();
+        address payable badRecipient = payable(address(rejector));
+
+        vm.prank(taker);
+        bytes32 swapId = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, badRecipient);
+
+        vm.prank(badRecipient);
+        vm.expectRevert(EthHTLC.TransferFailed.selector);
+        htlc.claim(swapId, PREIMAGE);
+    }
+
+    function test_refund_revertsWhenSenderRejectsETH() public {
+        RejectETH rejector = new RejectETH();
+        address payable badSender = payable(address(rejector));
+        vm.deal(badSender, 10 ether);
+
+        vm.prank(badSender);
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker);
+
+        bytes32 swapId = keccak256(
+            abi.encodePacked(badSender, maker, AMOUNT, HASHLOCK, TIMELOCK)
+        );
+
+        vm.warp(TIMELOCK);
+        vm.prank(badSender);
+        vm.expectRevert(EthHTLC.TransferFailed.selector);
+        htlc.refund(swapId);
+    }
 
     // -------------------------------------------------------------------------
     // Cross-chain compatibility: shared test vectors with LEZ HTLC
@@ -366,5 +402,62 @@ contract EthHTLCTest is Test {
 
         h2 = htlc.getHTLC(swapId2);
         assertEq(uint8(h2.state), uint8(EthHTLC.SwapState.REFUNDED));
+    }
+
+    // -------------------------------------------------------------------------
+    // Fuzz tests
+    // -------------------------------------------------------------------------
+
+    function testFuzz_lockClaimRoundtrip(uint256 amount, uint256 timelockDelta, bytes32 preimage) public {
+        amount = bound(amount, 1, 10 ether);
+        timelockDelta = bound(timelockDelta, 301, 365 days);
+        vm.assume(preimage != bytes32(0));
+
+        bytes32 fuzzHashlock = sha256(abi.encodePacked(preimage));
+        uint256 fuzzTimelock = block.timestamp + timelockDelta;
+
+        vm.deal(taker, amount);
+        vm.prank(taker);
+        bytes32 swapId = htlc.lock{value: amount}(fuzzHashlock, fuzzTimelock, maker);
+
+        EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
+        assertEq(h.amount, amount);
+        assertEq(h.hashlock, fuzzHashlock);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.OPEN));
+
+        uint256 makerBalBefore = maker.balance;
+        vm.prank(maker);
+        htlc.claim(swapId, preimage);
+
+        assertEq(maker.balance, makerBalBefore + amount);
+        h = htlc.getHTLC(swapId);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.CLAIMED));
+    }
+
+    function testFuzz_lockRefundRoundtrip(uint256 amount, uint256 timelockDelta) public {
+        amount = bound(amount, 1, 10 ether);
+        timelockDelta = bound(timelockDelta, 301, 365 days);
+
+        uint256 fuzzTimelock = block.timestamp + timelockDelta;
+
+        vm.deal(taker, amount);
+        vm.prank(taker);
+        bytes32 swapId = htlc.lock{value: amount}(HASHLOCK, fuzzTimelock, maker);
+
+        uint256 takerBalBefore = taker.balance;
+        vm.warp(fuzzTimelock);
+        vm.prank(taker);
+        htlc.refund(swapId);
+
+        assertEq(taker.balance, takerBalBefore + amount);
+        EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.REFUNDED));
+    }
+}
+
+/// @dev Helper contract that rejects all ETH transfers.
+contract RejectETH {
+    receive() external payable {
+        revert();
     }
 }
