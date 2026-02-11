@@ -16,6 +16,7 @@ pub enum HTLCInstruction {
     /// Taker reveals the preimage to claim the locked λ.
     Claim {
         /// The secret whose SHA-256 hash matches the hashlock.
+        /// Must be exactly 32 bytes for cross-chain compatibility with the Ethereum HTLC (bytes32).
         preimage: Vec<u8>,
     },
     /// Maker reclaims λ from the escrow.
@@ -101,11 +102,14 @@ impl HTLCEscrow {
 
         let preimage_len = u32::from_le_bytes(data[113..117].try_into().unwrap()) as usize;
         let preimage = if preimage_len > 0 {
+            let required = 117usize
+                .checked_add(preimage_len)
+                .expect("preimage length overflow");
             assert!(
-                data.len() >= 117 + preimage_len,
+                data.len() >= required,
                 "escrow data truncated: expected preimage"
             );
-            Some(data[117..117 + preimage_len].to_vec())
+            Some(data[117..required].to_vec())
         } else {
             None
         };
