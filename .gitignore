@@ -1,4 +1,6 @@
 .vscode
+.claude
+target/
 
 plan.md
 furps.md
