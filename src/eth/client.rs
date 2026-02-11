@@ -1,6 +1,6 @@
 use alloy::{
     primitives::{Address, FixedBytes, U256},
-    providers::{Provider, ProviderBuilder},
+    providers::{Provider, ProviderBuilder, WsConnect},
     signers::local::PrivateKeySigner,
     sol,
 };
@@ -47,20 +47,19 @@ pub struct EthClient {
 }
 
 impl EthClient {
-    pub fn new(config: &SwapConfig) -> Result<Self> {
+    pub async fn new(config: &SwapConfig) -> Result<Self> {
         let signer: PrivateKeySigner = config
             .eth_private_key
             .parse()
             .map_err(|e| SwapError::InvalidConfig(format!("invalid ETH private key: {e}")))?;
 
-        let rpc_url = config
-            .eth_rpc_url
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid ETH_RPC_URL: {e}")))?;
+        let ws = WsConnect::new(&config.eth_rpc_url);
 
         let provider = ProviderBuilder::new()
             .wallet(signer)
-            .connect_http(rpc_url)
+            .connect_ws(ws)
+            .await
+            .map_err(|e| SwapError::EthRpc(format!("WebSocket connect failed: {e}")))?
             .erased();
 
         let contract = EthHTLC::new(config.eth_htlc_address, provider);

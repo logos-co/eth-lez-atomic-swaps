@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # Ethereum
 alloy = { version = "1", features = [
-    "provider-http",
+    "provider-ws",
     "signer-local",
     "contract",
     "sol-types",
@@ -14,8 +14,9 @@ alloy = { version = "1", features = [
     "rpc-types",
     "node-bindings",
 ] }
+futures-util = "0.3"
 
-# LEZ 
+# LEZ
 nssa = { path = "../lssa/nssa" }
 nssa_core = { path = "../lssa/nssa/core", features = ["host"] }
 common = { path = "../lssa/common" }
@@ -46,7 +47,7 @@ borsh = "1.5"
 
 [dev-dependencies]
 alloy = { version = "1", features = [
-    "provider-http",
+    "provider-ws",
     "signer-local",
     "contract",
     "sol-types",
