@@ -274,6 +274,62 @@ contract EthHTLCTest is Test {
     // Edge case: multiple concurrent swaps
     // -------------------------------------------------------------------------
 
+    // -------------------------------------------------------------------------
+    // Cross-chain compatibility: shared test vectors with LEZ HTLC
+    // -------------------------------------------------------------------------
+    // These constants must match the Rust test suite in
+    // programs/lez-htlc/methods/guest/src/main.rs (mod tests).
+    // If either side changes SHA-256 behavior, one of these tests will break.
+
+    bytes32 constant XCHAIN_PREIMAGE = "secret_preimage_for_testing_1234";
+    bytes32 constant XCHAIN_HASHLOCK = 0x0ef69611a91e0805079387fee0b89fb7d6fcd505220d407bacaa40ce031745df;
+
+    function test_crossChain_sha256Compatibility() public pure {
+        // Verify that Solidity's sha256 of our shared preimage matches
+        // the hardcoded hashlock (same value asserted in the Rust tests).
+        bytes32 computed = sha256(abi.encodePacked(XCHAIN_PREIMAGE));
+        assertEq(computed, XCHAIN_HASHLOCK);
+    }
+
+    function test_crossChain_lockAndClaimWithSharedPreimage() public {
+        // Simulate the Ethereum side of a cross-chain atomic swap.
+        // Taker locks ETH using the Maker's hashlock.
+        // Maker claims ETH by revealing the preimage.
+        // The same preimage is used on the LEZ side to claim lambda.
+        uint256 timelock = block.timestamp + 600;
+
+        vm.prank(taker);
+        bytes32 swapId = htlc.lock{value: AMOUNT}(XCHAIN_HASHLOCK, timelock, maker);
+
+        // Maker claims by revealing the preimage (as they would after locking on LEZ)
+        vm.prank(maker);
+        htlc.claim(swapId, XCHAIN_PREIMAGE);
+
+        EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.CLAIMED));
+    }
+
+    function test_crossChain_refundAfterTimeout() public {
+        // Taker locks ETH, but Maker never claims (disappeared).
+        // After timelock, Taker refunds. On LEZ side, Maker also refunds.
+        uint256 timelock = block.timestamp + 600;
+
+        vm.prank(taker);
+        bytes32 swapId = htlc.lock{value: AMOUNT}(XCHAIN_HASHLOCK, timelock, maker);
+
+        // Timelock expires, Taker reclaims ETH
+        vm.warp(timelock);
+        vm.prank(taker);
+        htlc.refund(swapId);
+
+        EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
+        assertEq(uint8(h.state), uint8(EthHTLC.SwapState.REFUNDED));
+    }
+
+    // -------------------------------------------------------------------------
+    // Edge case: multiple concurrent swaps
+    // -------------------------------------------------------------------------
+
     function test_multipleConcurrentSwaps() public {
         // Swap 1: taker -> maker, default params
         bytes32 swapId1 = _lockDefault();
