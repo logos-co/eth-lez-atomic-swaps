@@ -2,7 +2,7 @@ use nssa_core::account::AccountId;
 use serde::{Deserialize, Serialize};
 
 /// Instructions the HTLC program can execute.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum HTLCInstruction {
     /// Maker locks λ into an escrow PDA.
     Lock {
@@ -24,7 +24,7 @@ pub enum HTLCInstruction {
 }
 
 /// Lifecycle states of an HTLC escrow.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum HTLCState {
     Locked = 0,
@@ -33,7 +33,7 @@ pub enum HTLCState {
 }
 
 /// Data stored in the escrow PDA account.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct HTLCEscrow {
     /// SHA-256 hash of the secret preimage.
     pub hashlock: [u8; 32],
@@ -118,5 +118,63 @@ impl HTLCEscrow {
             state,
             preimage,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nssa_core::account::AccountId;
+
+    fn sample_escrow() -> HTLCEscrow {
+        HTLCEscrow {
+            hashlock: [0xAA; 32],
+            maker_id: AccountId::new([1u8; 32]),
+            taker_id: AccountId::new([2u8; 32]),
+            amount: 1_000,
+            state: HTLCState::Locked,
+            preimage: None,
+        }
+    }
+
+    #[test]
+    fn test_escrow_roundtrip() {
+        let escrow = sample_escrow();
+        let bytes = escrow.to_bytes();
+        let decoded = HTLCEscrow::from_bytes(&bytes);
+        assert_eq!(escrow, decoded);
+    }
+
+    #[test]
+    fn test_escrow_roundtrip_with_preimage() {
+        let mut escrow = sample_escrow();
+        escrow.state = HTLCState::Claimed;
+        escrow.preimage = Some(b"supersecret".to_vec());
+        let bytes = escrow.to_bytes();
+        let decoded = HTLCEscrow::from_bytes(&bytes);
+        assert_eq!(escrow, decoded);
+    }
+
+    #[test]
+    #[should_panic(expected = "escrow data too short")]
+    fn test_escrow_from_bytes_too_short() {
+        HTLCEscrow::from_bytes(&[0u8; 50]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid escrow state")]
+    fn test_escrow_from_bytes_invalid_state() {
+        let mut bytes = sample_escrow().to_bytes();
+        bytes[112] = 99; // invalid state byte
+        HTLCEscrow::from_bytes(&bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "escrow data truncated")]
+    fn test_escrow_from_bytes_truncated_preimage() {
+        let mut bytes = sample_escrow().to_bytes();
+        // Set preimage length to 10 but don't append any preimage data
+        bytes[113..117].copy_from_slice(&10u32.to_le_bytes());
+        HTLCEscrow::from_bytes(&bytes);
     }
 }
