@@ -1,5 +1,6 @@
 {
   "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
     "programs/lez-htlc/methods/Cargo.toml",
     "programs/lez-htlc/methods/guest/Cargo.toml"
   ]

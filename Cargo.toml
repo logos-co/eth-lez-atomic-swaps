@@ -35,6 +35,9 @@ thiserror = "2"
 # Logging
 tracing = "0.1"
 
+# Environment
+dotenvy = "0.15"
+
 # Utilities
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
