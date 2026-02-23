@@ -32,7 +32,7 @@ pub async fn run_maker(
 
     // 2. Lock LEZ.
     let lez_lock_tx = lez_client
-        .lock(hashlock, config.counterparty_lez_account_id, config.lez_amount)
+        .lock(hashlock, config.lez_taker_account_id, config.lez_amount)
         .await?;
     info!(tx_hash = %lez_lock_tx, "maker: LEZ locked");
 
@@ -56,7 +56,7 @@ pub async fn run_maker(
                 {
                     // Match: correct hashlock, maker is the recipient, sufficient amount.
                     if event_hashlock.0 == hashlock
-                        && recipient == config.counterparty_eth_address
+                        && recipient == config.eth_recipient_address
                         && amount >= U256::from(config.eth_amount)
                     {
                         info!(%swap_id, "maker: matched ETH Locked event");
@@ -87,7 +87,7 @@ pub async fn run_maker(
 
     Ok(SwapOutcome::Completed {
         preimage,
-        eth_claim_tx,
-        lez_claim_tx: lez_lock_tx,
+        eth_tx: eth_claim_tx,
+        lez_tx: lez_lock_tx,
     })
 }

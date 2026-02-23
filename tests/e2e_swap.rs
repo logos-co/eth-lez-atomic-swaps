@@ -119,9 +119,9 @@ async fn test_atomic_swap_happy_path() {
     let eth_timelock = now + 300; // 5 min
 
     // ── Build SwapConfigs ──
-    // Both configs share the same counterparty addresses:
-    //   counterparty_eth_address  = maker's ETH address (ETH HTLC recipient)
-    //   counterparty_lez_account_id = taker's LEZ account (LEZ HTLC taker)
+    // Both configs share the same addresses:
+    //   eth_recipient_address = maker's ETH address (ETH HTLC recipient)
+    //   lez_taker_account_id  = taker's LEZ account (LEZ HTLC taker)
     let base_config = |eth_pk: &str, lez_key: &PrivateKey, lez_id: AccountId| -> SwapConfig {
         SwapConfig {
             eth_rpc_url: anvil.ws_endpoint(),
@@ -135,8 +135,8 @@ async fn test_atomic_swap_happy_path() {
             eth_amount: 1_000_000, // wei
             lez_timelock,
             eth_timelock,
-            counterparty_eth_address: maker_eth_addr,
-            counterparty_lez_account_id: taker_lez_id,
+            eth_recipient_address: maker_eth_addr,
+            lez_taker_account_id: taker_lez_id,
             poll_interval: Duration::from_millis(500),
         }
     };

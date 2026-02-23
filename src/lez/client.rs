@@ -19,6 +19,7 @@ pub struct LezClient {
     private_key: PrivateKey,
     account_id: AccountId,
     program_id: ProgramId,
+    poll_interval: std::time::Duration,
 }
 
 impl LezClient {
@@ -45,6 +46,7 @@ impl LezClient {
             private_key,
             account_id,
             program_id: config.lez_htlc_program_id,
+            poll_interval: config.poll_interval,
         })
     }
 
@@ -133,11 +135,15 @@ impl LezClient {
         debug!(tx_hash = %lock_hash, "LEZ HTLC lock submitted");
 
         // Wait for the lock to be committed before funding.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             if self.get_escrow(&hashlock).await?.is_some() {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SwapError::Timeout("LEZ lock confirmation".into()));
+            }
+            tokio::time::sleep(self.poll_interval).await;
         }
 
         // Step 2: Fund the escrow PDA (now owned by the HTLC program).
@@ -145,12 +151,16 @@ impl LezClient {
         debug!(tx_hash = %transfer_hash, "escrow PDA funded");
 
         // Wait for the transfer to be committed.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            let balance = self.get_balance(&pda).await.unwrap_or(0);
+            let balance = self.get_balance(&pda).await?;
             if balance >= amount {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SwapError::Timeout("LEZ escrow funding confirmation".into()));
+            }
+            tokio::time::sleep(self.poll_interval).await;
         }
 
         info!(lock_tx = %lock_hash, fund_tx = %transfer_hash, "LEZ HTLC locked and funded");

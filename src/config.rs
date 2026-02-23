@@ -27,8 +27,8 @@ pub struct SwapConfig {
     pub eth_timelock: u64,
 
     // --- Counterparty ---
-    pub counterparty_eth_address: Address,
-    pub counterparty_lez_account_id: AccountId,
+    pub eth_recipient_address: Address,
+    pub lez_taker_account_id: AccountId,
 
     // --- Polling ---
     pub poll_interval: Duration,
@@ -67,16 +67,16 @@ impl SwapConfig {
             .parse()
             .map_err(|e| SwapError::InvalidConfig(format!("invalid ETH_HTLC_ADDRESS: {e}")))?;
 
-        let counterparty_eth_address: Address = required_env("COUNTERPARTY_ETH_ADDRESS")?
+        let eth_recipient_address: Address = required_env("ETH_RECIPIENT_ADDRESS")?
             .parse()
             .map_err(|e| {
-                SwapError::InvalidConfig(format!("invalid COUNTERPARTY_ETH_ADDRESS: {e}"))
+                SwapError::InvalidConfig(format!("invalid ETH_RECIPIENT_ADDRESS: {e}"))
             })?;
 
         let lez_account_id = parse_account_id(&required_env("LEZ_ACCOUNT_ID")?)?;
         let lez_htlc_program_id = parse_program_id(&required_env("LEZ_HTLC_PROGRAM_ID")?)?;
-        let counterparty_lez_account_id =
-            parse_account_id(&required_env("COUNTERPARTY_LEZ_ACCOUNT_ID")?)?;
+        let lez_taker_account_id =
+            parse_account_id(&required_env("LEZ_TAKER_ACCOUNT_ID")?)?;
 
         let lez_amount: u128 = required_env("LEZ_AMOUNT")?
             .parse()
@@ -108,8 +108,8 @@ impl SwapConfig {
             eth_amount,
             lez_timelock,
             eth_timelock,
-            counterparty_eth_address,
-            counterparty_lez_account_id,
+            eth_recipient_address,
+            lez_taker_account_id,
             poll_interval: Duration::from_millis(poll_interval_ms),
         })
     }

@@ -65,7 +65,7 @@ impl TestEnv {
             lez_sequencer_url: self.sequencer_url.clone(),
             lez_htlc_program_id: self.program_id,
             lez_account_id: AccountId::new([0; 32]),
-            counterparty_lez_account_id: counterparty_lez,
+            lez_taker_account_id: counterparty_lez,
             // Unused by LezClient::new:
             eth_rpc_url: String::new(),
             eth_private_key: String::new(),
@@ -74,7 +74,7 @@ impl TestEnv {
             eth_amount: 0,
             lez_timelock: 0,
             eth_timelock: 0,
-            counterparty_eth_address: alloy::primitives::Address::ZERO,
+            eth_recipient_address: alloy::primitives::Address::ZERO,
             poll_interval: Duration::from_millis(500),
         };
         LezClient::new(&config).unwrap()

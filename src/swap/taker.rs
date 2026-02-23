@@ -51,7 +51,7 @@ pub async fn run_taker(
         .lock(
             hashlock,
             config.eth_timelock,
-            config.counterparty_eth_address,
+            config.eth_recipient_address,
             U256::from(config.eth_amount),
         )
         .await?;
@@ -112,7 +112,7 @@ pub async fn run_taker(
 
     Ok(SwapOutcome::Completed {
         preimage,
-        eth_claim_tx: swap_id, // The swap_id doubles as the ETH lock tx reference
-        lez_claim_tx,
+        eth_tx: swap_id,
+        lez_tx: lez_claim_tx,
     })
 }
