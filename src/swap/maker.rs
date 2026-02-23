@@ -16,13 +16,17 @@ use crate::{
 ///
 /// The maker generates a secret preimage, locks LEZ first, waits for the
 /// taker to lock ETH, then claims ETH (revealing the preimage on-chain).
+///
+/// If `override_preimage` is `Some`, uses it instead of generating a random one.
+/// This is useful for testing where the taker needs to know the hashlock upfront.
 pub async fn run_maker(
     config: &SwapConfig,
     eth_client: &EthClient,
     lez_client: &LezClient,
+    override_preimage: Option<[u8; 32]>,
 ) -> Result<SwapOutcome> {
     // 1. Generate random preimage and compute hashlock.
-    let preimage: [u8; 32] = rand::random();
+    let preimage: [u8; 32] = override_preimage.unwrap_or_else(rand::random);
     let hashlock: [u8; 32] = Sha256::digest(preimage).into();
     info!(hashlock = hex::encode(hashlock), "maker: generated preimage");
 

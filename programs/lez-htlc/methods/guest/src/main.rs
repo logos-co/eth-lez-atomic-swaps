@@ -1,14 +1,11 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
 use nssa_core::{
-    account::{AccountId, AccountWithMetadata},
+    account::{Account, AccountId, AccountWithMetadata},
     program::{
-        read_nssa_inputs, write_nssa_outputs, AccountPostState, ProgramInput, DEFAULT_PROGRAM_ID,
+        read_nssa_inputs, write_nssa_outputs, AccountPostState, ProgramInput,
     },
 };
 use risc0_zkvm::sha::{Impl, Sha256};
-
-/// An account whose program_owner matches this value has not been claimed by any program.
-const UNCLAIMED_OWNER: [u32; 8] = DEFAULT_PROGRAM_ID;
 
 fn main() {
     let (
@@ -48,12 +45,8 @@ fn execute_lock(
         "maker and taker must differ"
     );
     assert!(
-        escrow_pda.account.program_owner == UNCLAIMED_OWNER,
-        "escrow PDA must be unclaimed"
-    );
-    assert!(
-        escrow_pda.account.balance == amount,
-        "escrow PDA balance must exactly match lock amount"
+        escrow_pda.account == Account::default(),
+        "escrow PDA must be uninitialized"
     );
 
     let escrow = HTLCEscrow {
@@ -216,7 +209,7 @@ mod tests {
         .to_bytes()
     }
 
-    /// Build pre-states for Lock: [maker, empty escrow PDA (pre-funded)]
+    /// Build pre-states for Lock: [maker, uninitialized escrow PDA]
     fn lock_pre_states() -> Vec<AccountWithMetadata> {
         vec![
             AccountWithMetadata {
@@ -230,12 +223,7 @@ mod tests {
                 account_id: maker_id(),
             },
             AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: AMOUNT,
-                    data: Default::default(),
-                    nonce: 0,
-                },
+                account: Account::default(),
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
             },
@@ -329,10 +317,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "escrow PDA must be unclaimed")]
-    fn test_lock_escrow_already_owned() {
+    #[should_panic(expected = "escrow PDA must be uninitialized")]
+    fn test_lock_escrow_already_initialized() {
         let mut pre = lock_pre_states();
-        pre[1].account.program_owner = PROGRAM_ID;
+        pre[1].account.balance = AMOUNT; // non-default account
         execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
     }
 
@@ -341,22 +329,6 @@ mod tests {
     fn test_lock_self_swap() {
         let pre = lock_pre_states();
         execute_lock(&pre, hashlock(), maker_id(), AMOUNT);
-    }
-
-    #[test]
-    #[should_panic(expected = "escrow PDA balance must exactly match lock amount")]
-    fn test_lock_insufficient_balance() {
-        let mut pre = lock_pre_states();
-        pre[1].account.balance = AMOUNT - 1;
-        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
-    }
-
-    #[test]
-    #[should_panic(expected = "escrow PDA balance must exactly match lock amount")]
-    fn test_lock_overfunded_balance() {
-        let mut pre = lock_pre_states();
-        pre[1].account.balance = AMOUNT + 1;
-        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
     }
 
     // ── Claim tests ─────────────────────────────────────────────────
@@ -517,12 +489,7 @@ mod tests {
                 account_id: maker_id(),
             },
             AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: AMOUNT,
-                    data: Default::default(),
-                    nonce: 0,
-                },
+                account: Account::default(),
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
             },
@@ -530,6 +497,10 @@ mod tests {
 
         let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
         assert!(lock_post[1].requires_claim());
+
+        // Simulate the transfer that happens after Lock (funds the PDA).
+        let mut funded_escrow = lock_post[1].account().clone();
+        funded_escrow.balance = AMOUNT;
 
         // Now simulate claim: taker uses the preimage revealed on Ethereum.
         let claim_pre = vec![
@@ -544,7 +515,7 @@ mod tests {
                 account_id: taker_id(),
             },
             AccountWithMetadata {
-                account: lock_post[1].account().clone(),
+                account: funded_escrow,
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
             },
@@ -574,18 +545,17 @@ mod tests {
                 account_id: maker_id(),
             },
             AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: AMOUNT,
-                    data: Default::default(),
-                    nonce: 0,
-                },
+                account: Account::default(),
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
             },
         ];
 
         let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
+
+        // Simulate the transfer that happens after Lock (funds the PDA).
+        let mut funded_escrow = lock_post[1].account().clone();
+        funded_escrow.balance = AMOUNT;
 
         // Maker refunds (CLI enforced timelock off-chain)
         let refund_pre = vec![
@@ -600,7 +570,7 @@ mod tests {
                 account_id: maker_id(),
             },
             AccountWithMetadata {
-                account: lock_post[1].account().clone(),
+                account: funded_escrow,
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
             },

@@ -107,9 +107,8 @@ impl LezClient {
 
     /// Lock LEZ into the HTLC escrow PDA.
     ///
-    /// Two-step: first transfers funds to the PDA (the on-chain Lock instruction
-    /// requires the PDA to already hold the exact amount), then submits the Lock
-    /// instruction to the HTLC program.
+    /// Two-step: first submits the Lock instruction (which claims the PDA and
+    /// stores escrow metadata), then transfers funds to the PDA.
     pub async fn lock(
         &self,
         hashlock: [u8; 32],
@@ -118,26 +117,44 @@ impl LezClient {
     ) -> Result<String> {
         let pda = self.escrow_pda(&hashlock);
 
-        // Step 1: Pre-fund the escrow PDA.
-        let transfer_hash = self.transfer(pda, amount).await?;
-        debug!(tx_hash = %transfer_hash, "escrow PDA pre-funded");
-
-        // Step 2: Submit Lock instruction to the HTLC program.
+        // Step 1: Lock — claims the uninitialized PDA and stores escrow data.
         let instruction = HTLCInstruction::Lock {
             hashlock,
             taker_id,
             amount,
         };
 
-        let tx_hash = self
+        let lock_hash = self
             .send_htlc_instruction(
                 vec![self.account_id, pda],
                 instruction,
             )
             .await?;
+        debug!(tx_hash = %lock_hash, "LEZ HTLC lock submitted");
 
-        info!(tx_hash = %tx_hash, "LEZ HTLC locked");
-        Ok(tx_hash)
+        // Wait for the lock to be committed before funding.
+        loop {
+            if self.get_escrow(&hashlock).await?.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // Step 2: Fund the escrow PDA (now owned by the HTLC program).
+        let transfer_hash = self.transfer(pda, amount).await?;
+        debug!(tx_hash = %transfer_hash, "escrow PDA funded");
+
+        // Wait for the transfer to be committed.
+        loop {
+            let balance = self.get_balance(&pda).await.unwrap_or(0);
+            if balance >= amount {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        info!(lock_tx = %lock_hash, fund_tx = %transfer_hash, "LEZ HTLC locked and funded");
+        Ok(lock_hash)
     }
 
     /// Claim LEZ from the HTLC escrow by revealing the preimage.
@@ -214,5 +231,33 @@ impl LezClient {
             .map_err(|e| SwapError::LezSequencer(format!("get_accounts_nonces failed: {e}")))?;
 
         Ok(resp.nonces)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_program_id() -> ProgramId {
+        [1u32, 2, 3, 4, 5, 6, 7, 8]
+    }
+
+    #[test]
+    fn pda_derivation_is_deterministic() {
+        let program_id = test_program_id();
+        let hashlock = [0xABu8; 32];
+        let seed = PdaSeed::new(hashlock);
+
+        let pda1 = AccountId::from((&program_id, &seed));
+        let pda2 = AccountId::from((&program_id, &seed));
+        assert_eq!(pda1, pda2);
+    }
+
+    #[test]
+    fn pda_differs_for_different_hashlocks() {
+        let program_id = test_program_id();
+        let pda_a = AccountId::from((&program_id, &PdaSeed::new([0xAAu8; 32])));
+        let pda_b = AccountId::from((&program_id, &PdaSeed::new([0xBBu8; 32])));
+        assert_ne!(pda_a, pda_b);
     }
 }
