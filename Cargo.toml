@@ -39,6 +39,9 @@ tracing = "0.1"
 # Environment
 dotenvy = "0.15"
 
+# URL parsing
+url = "2"
+
 # Utilities
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }

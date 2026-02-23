@@ -29,6 +29,9 @@ pub enum SwapError {
     #[error("invalid preimage")]
     InvalidPreimage,
 
+    #[error("timelock not expired: {0} seconds remaining")]
+    TimelockNotExpired(u64),
+
     // --- Config ---
     #[error("missing environment variable: {0}")]
     MissingEnvVar(String),
