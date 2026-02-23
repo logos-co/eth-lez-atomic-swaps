@@ -60,3 +60,10 @@ alloy = { version = "1", features = [
     "provider-anvil-node",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
+
+# LEZ test sequencer
+sequencer_runner = { path = "../lssa/sequencer_runner" }
+sequencer_core = { path = "../lssa/sequencer_core", features = ["testnet"] }
+lez_htlc_methods = { path = "programs/lez-htlc/methods" }
+tempfile = "3"
+jsonrpsee = { version = "0.26", features = ["server"] }
