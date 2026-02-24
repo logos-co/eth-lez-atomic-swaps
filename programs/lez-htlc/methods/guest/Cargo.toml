@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
-risc0-zkvm = { version = "3.0.3", features = ["std"] }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa", branch = "main" }
+risc0-zkvm = { version = "=3.0.5", features = ["std"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
+lez-framework = { git = "https://github.com/jimmy-claw/nssa-framework.git" }

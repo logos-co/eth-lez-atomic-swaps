@@ -1723,9 +1723,10 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "bedrock_client"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "anyhow",
+ "common",
  "futures",
  "log",
  "logos-blockchain-chain-broadcast-service",
@@ -2182,7 +2183,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "anyhow",
  "base64",
@@ -2195,6 +2196,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_with",
  "sha2",
  "thiserror 2.0.18",
  "url",
@@ -3691,17 +3693,21 @@ checksum = "4ee796ad498c8d9a1d68e477df8f754ed784ef875de1414ebdaf169f70a6a784"
 [[package]]
 name = "indexer_service_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
+ "anyhow",
+ "base58",
  "base64",
+ "hex",
  "schemars 1.2.1",
  "serde",
+ "serde_with",
 ]
 
 [[package]]
 name = "indexer_service_rpc"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "indexer_service_protocol",
  "jsonrpsee",
@@ -4125,6 +4131,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "lez-framework"
+version = "0.1.0"
+source = "git+https://github.com/jimmy-claw/nssa-framework.git#aa6f64b717e2f3dc56cb4601eca712b32adc21cf"
+dependencies = [
+ "borsh",
+ "lez-framework-core",
+ "lez-framework-macros",
+ "nssa_core",
+]
+
+[[package]]
+name = "lez-framework-core"
+version = "0.1.0"
+source = "git+https://github.com/jimmy-claw/nssa-framework.git#aa6f64b717e2f3dc56cb4601eca712b32adc21cf"
+dependencies = [
+ "borsh",
+ "nssa_core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "lez-framework-macros"
+version = "0.1.0"
+source = "git+https://github.com/jimmy-claw/nssa-framework.git#aa6f64b717e2f3dc56cb4601eca712b32adc21cf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "lez_htlc_methods"
 version = "0.1.0"
 dependencies = [
@@ -4135,6 +4174,7 @@ dependencies = [
 name = "lez_htlc_program"
 version = "0.1.0"
 dependencies = [
+ "lez-framework",
  "nssa_core",
  "risc0-zkvm",
  "serde",
@@ -4847,7 +4887,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "mempool"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "tokio",
 ]
@@ -5006,10 +5046,9 @@ dependencies = [
 [[package]]
 name = "nssa"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "borsh",
- "bytemuck",
  "hex",
  "log",
  "nssa_core",
@@ -5026,9 +5065,8 @@ dependencies = [
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
- "anyhow",
  "base58",
  "borsh",
  "bytemuck",
@@ -5036,6 +5074,7 @@ dependencies = [
  "k256",
  "risc0-zkvm",
  "serde",
+ "serde_with",
  "thiserror 2.0.18",
 ]
 
@@ -6561,7 +6600,7 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 [[package]]
 name = "sequencer_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "anyhow",
  "base58",
@@ -6577,7 +6616,6 @@ dependencies = [
  "nssa",
  "nssa_core",
  "rand 0.8.5",
- "reqwest",
  "serde",
  "serde_json",
  "storage",
@@ -6589,7 +6627,7 @@ dependencies = [
 [[package]]
 name = "sequencer_rpc"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -6614,7 +6652,7 @@ dependencies = [
 [[package]]
 name = "sequencer_runner"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "actix",
  "actix-web",
@@ -6623,7 +6661,6 @@ dependencies = [
  "common",
  "env_logger",
  "futures",
- "indexer_service_protocol",
  "indexer_service_rpc",
  "log",
  "sequencer_core",
@@ -6956,7 +6993,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "storage"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?branch=main#767b5afd388c7981bcdf6f5b5c80159607e07e5b"
 dependencies = [
  "borsh",
  "common",

@@ -60,7 +60,7 @@ impl LezClient {
         let pda = self.escrow_pda(hashlock);
         let resp = self
             .sequencer
-            .get_account(pda.to_string())
+            .get_account(pda)
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_account failed: {e}")))?;
 
@@ -77,7 +77,7 @@ impl LezClient {
     pub async fn get_balance(&self, account_id: &AccountId) -> Result<u128> {
         let resp = self
             .sequencer
-            .get_account_balance(account_id.to_string())
+            .get_account_balance(*account_id)
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_account_balance failed: {e}")))?;
 
@@ -104,7 +104,7 @@ impl LezClient {
             .map_err(|e| SwapError::LezTransaction(format!("transfer failed: {e}")))?;
 
         info!(tx_hash = %resp.tx_hash, amount, "LEZ transfer submitted");
-        Ok(resp.tx_hash)
+        Ok(resp.tx_hash.to_string())
     }
 
     /// Lock LEZ into the HTLC escrow PDA.
@@ -172,6 +172,7 @@ impl LezClient {
         let pda = self.escrow_pda(hashlock);
 
         let instruction = HTLCInstruction::Claim {
+            hashlock: *hashlock,
             preimage: preimage.to_vec(),
         };
 
@@ -187,11 +188,12 @@ impl LezClient {
     pub async fn refund(&self, hashlock: &[u8; 32]) -> Result<String> {
         let pda = self.escrow_pda(hashlock);
 
+        let instruction = HTLCInstruction::Refund {
+            hashlock: *hashlock,
+        };
+
         let tx_hash = self
-            .send_htlc_instruction(
-                vec![self.account_id, pda],
-                HTLCInstruction::Refund,
-            )
+            .send_htlc_instruction(vec![self.account_id, pda], instruction)
             .await?;
 
         info!(tx_hash = %tx_hash, "LEZ HTLC refunded");
@@ -228,12 +230,12 @@ impl LezClient {
             .await
             .map_err(|e| SwapError::LezTransaction(format!("send_tx_public failed: {e}")))?;
 
-        Ok(resp.tx_hash)
+        Ok(resp.tx_hash.to_string())
     }
 
     /// Fetch current nonces for the given signer accounts.
     async fn get_nonces(&self, signers: &[AccountId]) -> Result<Vec<u128>> {
-        let ids: Vec<String> = signers.iter().map(|id| id.to_string()).collect();
+        let ids: Vec<AccountId> = signers.to_vec();
         let resp = self
             .sequencer
             .get_accounts_nonces(ids)

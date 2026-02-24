@@ -1,55 +1,71 @@
-use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
-use nssa_core::{
-    account::{Account, AccountId, AccountWithMetadata},
-    program::{
-        read_nssa_inputs, write_nssa_outputs, AccountPostState, ProgramInput,
-    },
-};
+#![cfg_attr(not(test), no_main)]
+
+#[cfg(not(test))]
+use lez_htlc_program::HTLCInstruction;
+use lez_htlc_program::{HTLCEscrow, HTLCState};
+use nssa_core::account::{AccountId, AccountWithMetadata};
+use nssa_core::program::AccountPostState;
+use lez_framework::prelude::*;
 use risc0_zkvm::sha::{Impl, Sha256};
 
-fn main() {
-    let (
-        ProgramInput {
-            pre_states,
-            instruction,
-        },
-        instruction_data,
-    ) = read_nssa_inputs::<HTLCInstruction>();
+#[cfg(not(test))]
+risc0_zkvm::guest::entry!(main);
 
-    let post_states = match instruction {
-        HTLCInstruction::Lock {
-            hashlock,
-            taker_id,
-            amount,
-        } => execute_lock(&pre_states, hashlock, taker_id, amount),
-        HTLCInstruction::Claim { preimage } => execute_claim(&pre_states, &preimage),
-        HTLCInstruction::Refund => execute_refund(&pre_states),
-    };
+#[cfg(not(test))]
+#[lez_program(instruction = "HTLCInstruction")]
+mod lez_htlc {
+    use super::*;
 
-    write_nssa_outputs(instruction_data, pre_states, post_states);
+    #[instruction]
+    pub fn lock(
+        #[account(signer)]
+        maker: AccountWithMetadata,
+        #[account(init, pda = arg("hashlock"))]
+        escrow: AccountWithMetadata,
+        hashlock: [u8; 32],
+        taker_id: AccountId,
+        amount: u128,
+    ) -> LezResult {
+        lock_impl(maker, escrow, hashlock, taker_id, amount)
+    }
+
+    #[instruction]
+    pub fn claim(
+        #[account(signer)]
+        taker: AccountWithMetadata,
+        #[account(mut, pda = arg("hashlock"))]
+        escrow: AccountWithMetadata,
+        hashlock: [u8; 32],
+        preimage: Vec<u8>,
+    ) -> LezResult {
+        claim_impl(taker, escrow, hashlock, preimage)
+    }
+
+    #[instruction]
+    pub fn refund(
+        #[account(signer)]
+        maker: AccountWithMetadata,
+        #[account(mut, pda = arg("hashlock"))]
+        escrow: AccountWithMetadata,
+        hashlock: [u8; 32],
+    ) -> LezResult {
+        refund_impl(maker, escrow, hashlock)
+    }
 }
 
-fn execute_lock(
-    pre_states: &[AccountWithMetadata],
+// Domain logic extracted so it's testable on host (without risc0 guest env).
+// The #[lez_program] handlers above delegate to these functions.
+
+fn lock_impl(
+    maker: AccountWithMetadata,
+    escrow: AccountWithMetadata,
     hashlock: [u8; 32],
     taker_id: AccountId,
     amount: u128,
-) -> Vec<AccountPostState> {
-    assert!(pre_states.len() == 2, "lock requires 2 accounts: [maker, escrow]");
-    let maker = &pre_states[0];
-    let escrow_pda = &pre_states[1];
+) -> LezResult {
+    assert!(maker.account_id != taker_id, "maker and taker must differ");
 
-    assert!(maker.is_authorized, "maker must be authorized");
-    assert!(
-        maker.account_id != taker_id,
-        "maker and taker must differ"
-    );
-    assert!(
-        escrow_pda.account == Account::default(),
-        "escrow PDA must be uninitialized"
-    );
-
-    let escrow = HTLCEscrow {
+    let escrow_data = HTLCEscrow {
         hashlock,
         maker_id: maker.account_id,
         taker_id,
@@ -58,102 +74,94 @@ fn execute_lock(
         preimage: None,
     };
 
-    let mut escrow_account = escrow_pda.account.clone();
-    escrow_account.data = escrow
+    let mut escrow_account = escrow.account.clone();
+    escrow_account.data = escrow_data
         .to_bytes()
         .try_into()
         .expect("escrow data fits in Data");
 
-    vec![
+    Ok(LezOutput::states_only(vec![
         AccountPostState::new(maker.account.clone()),
         AccountPostState::new_claimed(escrow_account),
-    ]
+    ]))
 }
 
-fn execute_claim(
-    pre_states: &[AccountWithMetadata],
-    preimage: &[u8],
-) -> Vec<AccountPostState> {
-    assert!(pre_states.len() == 2, "claim requires 2 accounts: [taker, escrow]");
+fn claim_impl(
+    taker: AccountWithMetadata,
+    escrow: AccountWithMetadata,
+    _hashlock: [u8; 32],
+    preimage: Vec<u8>,
+) -> LezResult {
     assert!(preimage.len() == 32, "preimage must be exactly 32 bytes");
-    let taker = &pre_states[0];
-    let escrow_pda = &pre_states[1];
 
-    assert!(taker.is_authorized, "taker must be authorized");
-
-    let mut escrow = HTLCEscrow::from_bytes(&escrow_pda.account.data);
-    assert!(escrow.state == HTLCState::Locked, "escrow must be Locked");
+    let mut escrow_data = HTLCEscrow::from_bytes(&escrow.account.data);
+    assert!(escrow_data.state == HTLCState::Locked, "escrow must be Locked");
     assert!(
-        taker.account_id == escrow.taker_id,
+        taker.account_id == escrow_data.taker_id,
         "only designated taker can claim"
     );
 
     // Verify SHA-256(preimage) == hashlock
-    let computed: [u8; 32] = Impl::hash_bytes(preimage)
-        .as_bytes()
-        .try_into()
-        .unwrap();
-    assert!(computed == escrow.hashlock, "invalid preimage");
+    let computed: [u8; 32] = Impl::hash_bytes(&preimage).as_bytes().try_into().unwrap();
+    assert!(computed == escrow_data.hashlock, "invalid preimage");
 
     // Transfer from escrow to taker
     let mut taker_account = taker.account.clone();
-    let mut escrow_account = escrow_pda.account.clone();
+    let mut escrow_account = escrow.account.clone();
     assert!(
-        escrow_account.balance >= escrow.amount,
+        escrow_account.balance >= escrow_data.amount,
         "escrow balance insufficient for claim"
     );
-    escrow_account.balance -= escrow.amount;
-    taker_account.balance += escrow.amount;
+    escrow_account.balance -= escrow_data.amount;
+    taker_account.balance += escrow_data.amount;
 
     // Update escrow state
-    escrow.state = HTLCState::Claimed;
-    escrow.preimage = Some(preimage.to_vec());
-    escrow_account.data = escrow
+    escrow_data.state = HTLCState::Claimed;
+    escrow_data.preimage = Some(preimage.to_vec());
+    escrow_account.data = escrow_data
         .to_bytes()
         .try_into()
         .expect("escrow data fits in Data");
 
-    vec![
+    Ok(LezOutput::states_only(vec![
         AccountPostState::new(taker_account),
         AccountPostState::new(escrow_account),
-    ]
+    ]))
 }
 
-fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
-    assert!(pre_states.len() == 2, "refund requires 2 accounts: [maker, escrow]");
-    let maker = &pre_states[0];
-    let escrow_pda = &pre_states[1];
-
-    assert!(maker.is_authorized, "maker must be authorized");
-
-    let mut escrow = HTLCEscrow::from_bytes(&escrow_pda.account.data);
-    assert!(escrow.state == HTLCState::Locked, "escrow must be Locked");
+fn refund_impl(
+    maker: AccountWithMetadata,
+    escrow: AccountWithMetadata,
+    _hashlock: [u8; 32],
+) -> LezResult {
+    let mut escrow_data = HTLCEscrow::from_bytes(&escrow.account.data);
+    assert!(escrow_data.state == HTLCState::Locked, "escrow must be Locked");
     assert!(
-        maker.account_id == escrow.maker_id,
+        maker.account_id == escrow_data.maker_id,
         "only maker can refund"
     );
 
     // Transfer from escrow back to maker
     let mut maker_account = maker.account.clone();
-    let mut escrow_account = escrow_pda.account.clone();
+    let mut escrow_account = escrow.account.clone();
     assert!(
-        escrow_account.balance >= escrow.amount,
+        escrow_account.balance >= escrow_data.amount,
         "escrow balance insufficient for refund"
     );
-    escrow_account.balance -= escrow.amount;
-    maker_account.balance += escrow.amount;
+    escrow_account.balance -= escrow_data.amount;
+    maker_account.balance += escrow_data.amount;
 
     // Update escrow state
-    escrow.state = HTLCState::Refunded;
-    escrow_account.data = escrow
+    escrow_data.state = HTLCState::Refunded;
+    escrow_account.data = escrow_data
         .to_bytes()
         .try_into()
         .expect("escrow data fits in Data");
 
-    vec![
+    Ok(LezOutput::states_only(vec![
         AccountPostState::new(maker_account),
         AccountPostState::new(escrow_account),
-    ]
+    ]))
 }
 
 #[cfg(test)]
@@ -210,256 +218,215 @@ mod tests {
         .to_bytes()
     }
 
-    /// Build pre-states for Lock: [maker, uninitialized escrow PDA]
-    fn lock_pre_states() -> Vec<AccountWithMetadata> {
-        vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 0,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: maker_id(),
+    fn maker_account() -> AccountWithMetadata {
+        AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 0,
+                data: Default::default(),
+                nonce: 0,
             },
-            AccountWithMetadata {
-                account: Account::default(),
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
-            },
-        ]
+            is_authorized: true,
+            account_id: maker_id(),
+        }
     }
 
-    /// Build pre-states for Claim: [taker, locked escrow PDA (program-owned)]
-    fn claim_pre_states() -> Vec<AccountWithMetadata> {
-        vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 500,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: taker_id(),
-            },
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: PROGRAM_ID,
-                    balance: AMOUNT,
-                    data: locked_escrow_data()
-                        .try_into()
-                        .expect("escrow data fits"),
-                    nonce: 0,
-                },
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
-            },
-        ]
+    fn uninit_escrow() -> AccountWithMetadata {
+        AccountWithMetadata {
+            account: Account::default(),
+            is_authorized: false,
+            account_id: AccountId::new([0xEE; 32]),
+        }
     }
 
-    /// Build pre-states for Refund: [maker, locked escrow PDA (program-owned)]
-    fn refund_pre_states() -> Vec<AccountWithMetadata> {
-        vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 500,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: maker_id(),
+    fn taker_account() -> AccountWithMetadata {
+        AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 500,
+                data: Default::default(),
+                nonce: 0,
             },
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: PROGRAM_ID,
-                    balance: AMOUNT,
-                    data: locked_escrow_data()
-                        .try_into()
-                        .expect("escrow data fits"),
-                    nonce: 0,
-                },
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
+            is_authorized: true,
+            account_id: taker_id(),
+        }
+    }
+
+    fn locked_escrow() -> AccountWithMetadata {
+        AccountWithMetadata {
+            account: Account {
+                program_owner: PROGRAM_ID,
+                balance: AMOUNT,
+                data: locked_escrow_data().try_into().expect("escrow data fits"),
+                nonce: 0,
             },
-        ]
+            is_authorized: false,
+            account_id: AccountId::new([0xEE; 32]),
+        }
+    }
+
+    fn maker_account_with_balance() -> AccountWithMetadata {
+        AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 500,
+                data: Default::default(),
+                nonce: 0,
+            },
+            is_authorized: true,
+            account_id: maker_id(),
+        }
     }
 
     // ── Lock tests ──────────────────────────────────────────────────
 
     #[test]
     fn test_lock_happy_path() {
-        let pre = lock_pre_states();
-        let post = execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+        let maker = maker_account();
+        let escrow = uninit_escrow();
+        let result = lock_impl(maker.clone(), escrow, hashlock(), taker_id(), AMOUNT).unwrap();
 
         // Maker account unchanged
-        assert_eq!(post[0].account().balance, pre[0].account.balance);
-        assert!(!post[0].requires_claim());
+        assert_eq!(result.post_states[0].account().balance, maker.account.balance);
+        assert!(!result.post_states[0].requires_claim());
 
         // Escrow PDA claimed by program, data populated
-        assert!(post[1].requires_claim());
-        let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
-        assert_eq!(escrow.hashlock, hashlock());
-        assert_eq!(escrow.maker_id, maker_id());
-        assert_eq!(escrow.taker_id, taker_id());
-        assert_eq!(escrow.amount, AMOUNT);
-        assert_eq!(escrow.state, HTLCState::Locked);
-        assert_eq!(escrow.preimage, None);
-    }
-
-    #[test]
-    #[should_panic(expected = "maker must be authorized")]
-    fn test_lock_unauthorized_maker() {
-        let mut pre = lock_pre_states();
-        pre[0].is_authorized = false;
-        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
-    }
-
-    #[test]
-    #[should_panic(expected = "escrow PDA must be uninitialized")]
-    fn test_lock_escrow_already_initialized() {
-        let mut pre = lock_pre_states();
-        pre[1].account.balance = AMOUNT; // non-default account
-        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+        assert!(result.post_states[1].requires_claim());
+        let escrow_data = HTLCEscrow::from_bytes(&result.post_states[1].account().data);
+        assert_eq!(escrow_data.hashlock, hashlock());
+        assert_eq!(escrow_data.maker_id, maker_id());
+        assert_eq!(escrow_data.taker_id, taker_id());
+        assert_eq!(escrow_data.amount, AMOUNT);
+        assert_eq!(escrow_data.state, HTLCState::Locked);
+        assert_eq!(escrow_data.preimage, None);
     }
 
     #[test]
     #[should_panic(expected = "maker and taker must differ")]
     fn test_lock_self_swap() {
-        let pre = lock_pre_states();
-        execute_lock(&pre, hashlock(), maker_id(), AMOUNT);
+        let maker = maker_account();
+        let escrow = uninit_escrow();
+        let _ = lock_impl(maker, escrow, hashlock(), maker_id(), AMOUNT);
     }
 
     // ── Claim tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_claim_happy_path() {
-        let pre = claim_pre_states();
-        let post = execute_claim(&pre, SECRET);
+        let taker = taker_account();
+        let escrow = locked_escrow();
+        let result = claim_impl(taker, escrow, hashlock(), SECRET.to_vec()).unwrap();
 
         // Taker received funds
-        assert_eq!(post[0].account().balance, 500 + AMOUNT);
-        assert!(!post[0].requires_claim());
+        assert_eq!(result.post_states[0].account().balance, 500 + AMOUNT);
+        assert!(!result.post_states[0].requires_claim());
 
         // Escrow drained, state updated
-        assert_eq!(post[1].account().balance, 0);
-        assert!(!post[1].requires_claim());
-        let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
-        assert_eq!(escrow.state, HTLCState::Claimed);
-        assert_eq!(escrow.preimage, Some(SECRET.to_vec()));
+        assert_eq!(result.post_states[1].account().balance, 0);
+        assert!(!result.post_states[1].requires_claim());
+        let escrow_data = HTLCEscrow::from_bytes(&result.post_states[1].account().data);
+        assert_eq!(escrow_data.state, HTLCState::Claimed);
+        assert_eq!(escrow_data.preimage, Some(SECRET.to_vec()));
     }
 
     #[test]
     #[should_panic(expected = "invalid preimage")]
     fn test_claim_wrong_preimage() {
-        let pre = claim_pre_states();
-        execute_claim(&pre, b"wrong_secret_preimage_padding_01");
+        let taker = taker_account();
+        let escrow = locked_escrow();
+        let _ = claim_impl(taker, escrow, hashlock(), b"wrong_secret_preimage_padding_01".to_vec());
     }
 
     #[test]
     #[should_panic(expected = "preimage must be exactly 32 bytes")]
     fn test_claim_wrong_preimage_length() {
-        let pre = claim_pre_states();
-        execute_claim(&pre, b"too_short");
+        let taker = taker_account();
+        let escrow = locked_escrow();
+        let _ = claim_impl(taker, escrow, hashlock(), b"too_short".to_vec());
     }
 
     #[test]
     #[should_panic(expected = "only designated taker can claim")]
     fn test_claim_wrong_taker() {
-        let mut pre = claim_pre_states();
-        pre[0].account_id = wrong_id();
-        execute_claim(&pre, SECRET);
-    }
-
-    #[test]
-    #[should_panic(expected = "taker must be authorized")]
-    fn test_claim_not_authorized() {
-        let mut pre = claim_pre_states();
-        pre[0].is_authorized = false;
-        execute_claim(&pre, SECRET);
+        let mut taker = taker_account();
+        taker.account_id = wrong_id();
+        let escrow = locked_escrow();
+        let _ = claim_impl(taker, escrow, hashlock(), SECRET.to_vec());
     }
 
     #[test]
     #[should_panic(expected = "escrow must be Locked")]
     fn test_claim_already_claimed() {
-        let mut pre = claim_pre_states();
-        pre[1].account.data = escrow_data_with_state(HTLCState::Claimed)
+        let taker = taker_account();
+        let mut escrow = locked_escrow();
+        escrow.account.data = escrow_data_with_state(HTLCState::Claimed)
             .try_into()
             .expect("fits");
-        execute_claim(&pre, SECRET);
+        let _ = claim_impl(taker, escrow, hashlock(), SECRET.to_vec());
     }
 
     #[test]
     #[should_panic(expected = "escrow must be Locked")]
     fn test_claim_already_refunded() {
-        let mut pre = claim_pre_states();
-        pre[1].account.data = escrow_data_with_state(HTLCState::Refunded)
+        let taker = taker_account();
+        let mut escrow = locked_escrow();
+        escrow.account.data = escrow_data_with_state(HTLCState::Refunded)
             .try_into()
             .expect("fits");
-        execute_claim(&pre, SECRET);
+        let _ = claim_impl(taker, escrow, hashlock(), SECRET.to_vec());
     }
 
     // ── Refund tests ────────────────────────────────────────────────
 
     #[test]
     fn test_refund_happy_path() {
-        let pre = refund_pre_states();
-        let post = execute_refund(&pre);
+        let maker = maker_account_with_balance();
+        let escrow = locked_escrow();
+        let result = refund_impl(maker, escrow, hashlock()).unwrap();
 
         // Maker received funds back
-        assert_eq!(post[0].account().balance, 500 + AMOUNT);
-        assert!(!post[0].requires_claim());
+        assert_eq!(result.post_states[0].account().balance, 500 + AMOUNT);
+        assert!(!result.post_states[0].requires_claim());
 
         // Escrow drained, state updated
-        assert_eq!(post[1].account().balance, 0);
-        assert!(!post[1].requires_claim());
-        let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
-        assert_eq!(escrow.state, HTLCState::Refunded);
+        assert_eq!(result.post_states[1].account().balance, 0);
+        assert!(!result.post_states[1].requires_claim());
+        let escrow_data = HTLCEscrow::from_bytes(&result.post_states[1].account().data);
+        assert_eq!(escrow_data.state, HTLCState::Refunded);
     }
 
     #[test]
     #[should_panic(expected = "only maker can refund")]
     fn test_refund_wrong_maker() {
-        let mut pre = refund_pre_states();
-        pre[0].account_id = wrong_id();
-        execute_refund(&pre);
-    }
-
-    #[test]
-    #[should_panic(expected = "maker must be authorized")]
-    fn test_refund_not_authorized() {
-        let mut pre = refund_pre_states();
-        pre[0].is_authorized = false;
-        execute_refund(&pre);
+        let mut maker = maker_account_with_balance();
+        maker.account_id = wrong_id();
+        let escrow = locked_escrow();
+        let _ = refund_impl(maker, escrow, hashlock());
     }
 
     #[test]
     #[should_panic(expected = "escrow must be Locked")]
     fn test_refund_already_claimed() {
-        let mut pre = refund_pre_states();
-        pre[1].account.data = escrow_data_with_state(HTLCState::Claimed)
+        let maker = maker_account_with_balance();
+        let mut escrow = locked_escrow();
+        escrow.account.data = escrow_data_with_state(HTLCState::Claimed)
             .try_into()
             .expect("fits");
-        execute_refund(&pre);
+        let _ = refund_impl(maker, escrow, hashlock());
     }
 
     #[test]
     #[should_panic(expected = "escrow must be Locked")]
     fn test_refund_already_refunded() {
-        let mut pre = refund_pre_states();
-        pre[1].account.data = escrow_data_with_state(HTLCState::Refunded)
+        let maker = maker_account_with_balance();
+        let mut escrow = locked_escrow();
+        escrow.account.data = escrow_data_with_state(HTLCState::Refunded)
             .try_into()
             .expect("fits");
-        execute_refund(&pre);
+        let _ = refund_impl(maker, escrow, hashlock());
     }
 
     // ── Cross-chain compatibility tests ─────────────────────────────
-    // These constants must match the Solidity test suite in
-    // contracts/test/EthHTLC.t.sol (XCHAIN_PREIMAGE, XCHAIN_HASHLOCK).
-    // If either side changes SHA-256 behavior, one of these tests breaks.
-
     const XCHAIN_PREIMAGE: &[u8; 32] = b"secret_preimage_for_testing_1234";
     const XCHAIN_HASHLOCK: [u8; 32] = [
         0x0e, 0xf6, 0x96, 0x11, 0xa9, 0x1e, 0x08, 0x05,
@@ -470,8 +437,6 @@ mod tests {
 
     #[test]
     fn test_crosschain_sha256_compatibility() {
-        // Verify that risc0's SHA-256 of our shared preimage matches
-        // the hardcoded hashlock (same value asserted in the Solidity tests).
         let computed: [u8; 32] = Impl::hash_bytes(XCHAIN_PREIMAGE)
             .as_bytes()
             .try_into()
@@ -481,113 +446,99 @@ mod tests {
 
     #[test]
     fn test_crosschain_lock_then_claim_with_shared_preimage() {
-        // Simulate the LEZ side of a cross-chain atomic swap.
-        // Maker locks lambda using the shared hashlock.
-        // Taker claims lambda using the shared preimage (learned from
-        // the Maker's Ethereum claim which revealed it on-chain).
-        let lock_pre = vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 0,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: maker_id(),
+        let maker = AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 0,
+                data: Default::default(),
+                nonce: 0,
             },
-            AccountWithMetadata {
-                account: Account::default(),
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
-            },
-        ];
+            is_authorized: true,
+            account_id: maker_id(),
+        };
+        let escrow = AccountWithMetadata {
+            account: Account::default(),
+            is_authorized: false,
+            account_id: AccountId::new([0xEE; 32]),
+        };
 
-        let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
-        assert!(lock_post[1].requires_claim());
+        let lock_result = lock_impl(maker, escrow, XCHAIN_HASHLOCK, taker_id(), AMOUNT).unwrap();
+        assert!(lock_result.post_states[1].requires_claim());
 
         // Simulate the transfer that happens after Lock (funds the PDA).
-        let mut funded_escrow = lock_post[1].account().clone();
+        let mut funded_escrow = lock_result.post_states[1].account().clone();
         funded_escrow.balance = AMOUNT;
 
         // Now simulate claim: taker uses the preimage revealed on Ethereum.
-        let claim_pre = vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 500,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: taker_id(),
+        let taker = AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 500,
+                data: Default::default(),
+                nonce: 0,
             },
-            AccountWithMetadata {
-                account: funded_escrow,
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
-            },
-        ];
+            is_authorized: true,
+            account_id: taker_id(),
+        };
+        let escrow_for_claim = AccountWithMetadata {
+            account: funded_escrow,
+            is_authorized: false,
+            account_id: AccountId::new([0xEE; 32]),
+        };
 
-        let claim_post = execute_claim(&claim_pre, XCHAIN_PREIMAGE);
+        let claim_result = claim_impl(taker, escrow_for_claim, XCHAIN_HASHLOCK, XCHAIN_PREIMAGE.to_vec()).unwrap();
 
-        assert_eq!(claim_post[0].account().balance, 500 + AMOUNT);
-        let escrow = HTLCEscrow::from_bytes(&claim_post[1].account().data);
-        assert_eq!(escrow.state, HTLCState::Claimed);
-        assert_eq!(escrow.preimage, Some(XCHAIN_PREIMAGE.to_vec()));
+        assert_eq!(claim_result.post_states[0].account().balance, 500 + AMOUNT);
+        let escrow_data = HTLCEscrow::from_bytes(&claim_result.post_states[1].account().data);
+        assert_eq!(escrow_data.state, HTLCState::Claimed);
+        assert_eq!(escrow_data.preimage, Some(XCHAIN_PREIMAGE.to_vec()));
     }
 
     #[test]
     fn test_crosschain_refund_after_timeout() {
-        // Both parties refund: Maker refunds on LEZ, Taker refunds on Ethereum.
-        // This test covers the LEZ side of the refund path.
-        let lock_pre = vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 500,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: maker_id(),
+        let maker = AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 500,
+                data: Default::default(),
+                nonce: 0,
             },
-            AccountWithMetadata {
-                account: Account::default(),
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
-            },
-        ];
+            is_authorized: true,
+            account_id: maker_id(),
+        };
+        let escrow = AccountWithMetadata {
+            account: Account::default(),
+            is_authorized: false,
+            account_id: AccountId::new([0xEE; 32]),
+        };
 
-        let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
+        let lock_result = lock_impl(maker, escrow, XCHAIN_HASHLOCK, taker_id(), AMOUNT).unwrap();
 
         // Simulate the transfer that happens after Lock (funds the PDA).
-        let mut funded_escrow = lock_post[1].account().clone();
+        let mut funded_escrow = lock_result.post_states[1].account().clone();
         funded_escrow.balance = AMOUNT;
 
         // Maker refunds (CLI enforced timelock off-chain)
-        let refund_pre = vec![
-            AccountWithMetadata {
-                account: Account {
-                    program_owner: DEFAULT_PROGRAM_ID,
-                    balance: 500,
-                    data: Default::default(),
-                    nonce: 0,
-                },
-                is_authorized: true,
-                account_id: maker_id(),
+        let maker_for_refund = AccountWithMetadata {
+            account: Account {
+                program_owner: DEFAULT_PROGRAM_ID,
+                balance: 500,
+                data: Default::default(),
+                nonce: 0,
             },
-            AccountWithMetadata {
-                account: funded_escrow,
-                is_authorized: false,
-                account_id: AccountId::new([0xEE; 32]),
-            },
-        ];
+            is_authorized: true,
+            account_id: maker_id(),
+        };
+        let escrow_for_refund = AccountWithMetadata {
+            account: funded_escrow,
+            is_authorized: false,
+            account_id: AccountId::new([0xEE; 32]),
+        };
 
-        let refund_post = execute_refund(&refund_pre);
+        let refund_result = refund_impl(maker_for_refund, escrow_for_refund, XCHAIN_HASHLOCK).unwrap();
 
-        assert_eq!(refund_post[0].account().balance, 500 + AMOUNT);
-        let escrow = HTLCEscrow::from_bytes(&refund_post[1].account().data);
-        assert_eq!(escrow.state, HTLCState::Refunded);
+        assert_eq!(refund_result.post_states[0].account().balance, 500 + AMOUNT);
+        let escrow_data = HTLCEscrow::from_bytes(&refund_result.post_states[1].account().data);
+        assert_eq!(escrow_data.state, HTLCState::Refunded);
     }
 }

@@ -15,13 +15,18 @@ pub enum HTLCInstruction {
     },
     /// Taker reveals the preimage to claim the locked λ.
     Claim {
+        /// SHA-256 hash of the secret preimage (used for PDA derivation).
+        hashlock: [u8; 32],
         /// The secret whose SHA-256 hash matches the hashlock.
         /// Must be exactly 32 bytes for cross-chain compatibility with the Ethereum HTLC (bytes32).
         preimage: Vec<u8>,
     },
     /// Maker reclaims λ from the escrow.
     /// Timelock is enforced off-chain by the CLI before submitting this instruction.
-    Refund,
+    Refund {
+        /// SHA-256 hash of the secret preimage (used for PDA derivation).
+        hashlock: [u8; 32],
+    },
 }
 
 /// Lifecycle states of an HTLC escrow.

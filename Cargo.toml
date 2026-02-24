@@ -21,9 +21,9 @@ alloy = { version = "1", features = [
 futures-util = "0.3"
 
 # LEZ
-nssa = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5", features = ["host"] }
-common = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
+nssa = { git = "https://github.com/logos-blockchain/lssa", branch = "main" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa", branch = "main", features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/lssa", branch = "main" }
 # LEZ HTLC types (HTLCInstruction, HTLCEscrow, HTLCState)
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 
@@ -62,8 +62,8 @@ base64 = "0.22"
 urlencoding = "2"
 
 # Demo-only dependencies (behind `demo` feature flag)
-sequencer_runner = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5", optional = true }
-sequencer_core = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5", features = ["testnet"], optional = true }
+sequencer_runner = { git = "https://github.com/logos-blockchain/lssa", branch = "main", optional = true }
+sequencer_core = { git = "https://github.com/logos-blockchain/lssa", branch = "main", features = ["testnet"], optional = true }
 lez_htlc_methods = { path = "programs/lez-htlc/methods", optional = true }
 tempfile = { version = "3", optional = true }
 jsonrpsee = { version = "0.26", features = ["server"], optional = true }
@@ -92,8 +92,8 @@ alloy = { version = "1", features = [
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
 
 # LEZ test sequencer
-sequencer_runner = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
-sequencer_core = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5", features = ["testnet"] }
+sequencer_runner = { git = "https://github.com/logos-blockchain/lssa", branch = "main" }
+sequencer_core = { git = "https://github.com/logos-blockchain/lssa", branch = "main", features = ["testnet"] }
 lez_htlc_methods = { path = "programs/lez-htlc/methods" }
 tempfile = "3"
 jsonrpsee = { version = "0.26", features = ["server"] }
