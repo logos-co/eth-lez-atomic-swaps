@@ -15,6 +15,12 @@ Maker                                          Taker
 
 ### Prerequisites
 
+- **Rust 1.85+** (edition 2024) — `rustup update stable` if you already have Rust
+- **Foundry** (forge, anvil)
+- **CMake 3.21+**
+- **Qt 6.5+** (Quick, QuickControls2, Concurrent)
+- **Docker** (for nwaku messaging nodes)
+
 **macOS**
 ```bash
 brew install qt@6 cmake
@@ -22,6 +28,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
 Also install [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/).
+
+> Homebrew Qt6 is keg-only. If CMake can't find Qt6, set:
+> `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`
 
 **Linux (Ubuntu/Debian)**
 ```bash
@@ -31,7 +40,21 @@ curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
 Qt 6.5+ required — Ubuntu 24.10+ ships it. For older distros, install Qt via [aqtinstall](https://github.com/miurahr/aqtinstall) or the [Qt online installer](https://www.qt.io/download-qt-installer).
 
+### Clone
+
+```bash
+git clone --recurse-submodules https://github.com/logos-co/eth-lez-atomic-swaps.git
+cd eth-lez-atomic-swaps
+```
+
+If you already cloned without `--recurse-submodules`:
+```bash
+git submodule update --init --recursive
+```
+
 ### Run
+
+Make sure Docker is running, then:
 
 ```bash
 make configure            # build Rust FFI bridge + cmake configure (first time only)
@@ -40,6 +63,8 @@ make infra                # start nwaku + Anvil + LEZ sequencer, deploy contract
 make run-maker            # open maker UI
 make run-taker            # open taker UI
 ```
+
+`make infra` spins up local Anvil and LEZ sequencer instances and writes `.env` / `.env.taker` files automatically — no manual configuration needed.
 
 **Maker**: Publish Offer → Start Swap → wait for taker.
 **Taker**: Discover Offers → select offer → Start Taker → swap completes.

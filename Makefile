@@ -1,7 +1,14 @@
 .PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra nwaku nwaku-stop \
        logos-module-configure logos-module-build logos-module-plugin logos-module-run
 
-UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
+UNAME := $(shell uname -s)
+ifeq ($(UNAME),Darwin)
+  UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
+  LOGOS_BIN = logos-module/build/lez_atomic_swap_module.app/Contents/MacOS/lez_atomic_swap_module
+else
+  UI_BIN = ui/build/atomic-swaps-ui
+  LOGOS_BIN = logos-module/build/lez_atomic_swap_module
+endif
 
 swap-ffi:
 	cd swap-ffi && cargo build
@@ -39,7 +46,6 @@ nwaku-stop:
 	docker compose down
 
 # --- Logos Core module ---
-LOGOS_BIN = logos-module/build/lez_atomic_swap_module.app/Contents/MacOS/lez_atomic_swap_module
 
 logos-module-configure:
 	cmake -B logos-module/build -S logos-module -DCMAKE_BUILD_TYPE=Debug

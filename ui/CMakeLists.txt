@@ -13,13 +13,22 @@ qt_standard_project_setup(REQUIRES 6.5)
 set(FFI_DIR "${CMAKE_SOURCE_DIR}/../swap-ffi")
 set(FFI_INCLUDE "${FFI_DIR}/include")
 
-# Use release build if available, fall back to debug.
-if(EXISTS "${FFI_DIR}/target/release/libswap_ffi.dylib")
-    set(FFI_LIB "${FFI_DIR}/target/release/libswap_ffi.dylib")
-elseif(EXISTS "${FFI_DIR}/target/debug/libswap_ffi.dylib")
-    set(FFI_LIB "${FFI_DIR}/target/debug/libswap_ffi.dylib")
+# Platform-specific shared library name
+if(APPLE)
+    set(FFI_LIB_NAME "libswap_ffi.dylib")
+elseif(WIN32)
+    set(FFI_LIB_NAME "swap_ffi.dll")
 else()
-    message(FATAL_ERROR "libswap_ffi.dylib not found. Run 'cd swap-ffi && cargo build' first.")
+    set(FFI_LIB_NAME "libswap_ffi.so")
+endif()
+
+# Use release build if available, fall back to debug.
+if(EXISTS "${FFI_DIR}/target/release/${FFI_LIB_NAME}")
+    set(FFI_LIB "${FFI_DIR}/target/release/${FFI_LIB_NAME}")
+elseif(EXISTS "${FFI_DIR}/target/debug/${FFI_LIB_NAME}")
+    set(FFI_LIB "${FFI_DIR}/target/debug/${FFI_LIB_NAME}")
+else()
+    message(FATAL_ERROR "${FFI_LIB_NAME} not found. Run 'cd swap-ffi && cargo build' first.")
 endif()
 
 add_library(swap_ffi SHARED IMPORTED)
@@ -72,9 +81,16 @@ add_custom_command(TARGET atomic-swaps-ui POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FFI_LIB}" "$<TARGET_FILE_DIR:atomic-swaps-ui>"
 )
 
-# macOS RPATH
-set_target_properties(atomic-swaps-ui PROPERTIES
-    MACOSX_BUNDLE TRUE
-    INSTALL_RPATH "@executable_path"
-    BUILD_WITH_INSTALL_RPATH TRUE
-)
+# RPATH so the FFI dylib/so is found next to the executable
+if(APPLE)
+    set_target_properties(atomic-swaps-ui PROPERTIES
+        MACOSX_BUNDLE TRUE
+        INSTALL_RPATH "@executable_path"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+else()
+    set_target_properties(atomic-swaps-ui PROPERTIES
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+endif()
