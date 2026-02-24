@@ -48,7 +48,7 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
     }
 
     let outcome =
-        run_maker(config, &eth_client, &lez_client, Some(preimage_for_display)).await?;
+        run_maker(config, &eth_client, &lez_client, Some(preimage_for_display), None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())

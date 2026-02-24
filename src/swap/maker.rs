@@ -9,7 +9,11 @@ use crate::{
     eth::client::EthClient,
     eth::watcher::{self, EthHtlcEvent},
     lez::client::LezClient,
-    swap::{refund::now_unix, types::SwapOutcome},
+    swap::{
+        progress::{self, ProgressSender, SwapProgress},
+        refund::now_unix,
+        types::SwapOutcome,
+    },
 };
 
 /// Run the maker side of an atomic swap.
@@ -24,19 +28,34 @@ pub async fn run_maker(
     eth_client: &EthClient,
     lez_client: &LezClient,
     override_preimage: Option<[u8; 32]>,
+    progress: Option<ProgressSender>,
 ) -> Result<SwapOutcome> {
     // 1. Generate random preimage and compute hashlock.
     let preimage: [u8; 32] = override_preimage.unwrap_or_else(rand::random);
     let hashlock: [u8; 32] = Sha256::digest(preimage).into();
     info!(hashlock = hex::encode(hashlock), "maker: generated preimage");
+    progress::report(
+        &progress,
+        SwapProgress::PreimageGenerated {
+            hashlock: hex::encode(hashlock),
+        },
+    );
 
     // 2. Lock LEZ.
+    progress::report(&progress, SwapProgress::LezLocking);
     let lez_lock_tx = lez_client
         .lock(hashlock, config.lez_taker_account_id, config.lez_amount)
         .await?;
     info!(tx_hash = %lez_lock_tx, "maker: LEZ locked");
+    progress::report(
+        &progress,
+        SwapProgress::LezLocked {
+            tx_hash: lez_lock_tx.clone(),
+        },
+    );
 
     // 3. Watch for ETH Locked event from the taker.
+    progress::report(&progress, SwapProgress::WaitingForEthLock);
     let (tx, mut rx) = mpsc::channel::<EthHtlcEvent>(16);
     let watcher_eth_client = EthClient::new(config).await?;
     let watcher_handle = tokio::spawn(async move {
@@ -60,6 +79,9 @@ pub async fn run_maker(
                         && amount >= U256::from(config.eth_amount)
                     {
                         info!(%swap_id, "maker: matched ETH Locked event");
+                        progress::report(&progress, SwapProgress::EthLockDetected {
+                            swap_id: format!("{swap_id}"),
+                        });
                         break swap_id;
                     }
                 }
@@ -70,7 +92,10 @@ pub async fn run_maker(
                 // LEZ timelock expired — abort and refund.
                 watcher_handle.abort();
                 info!("maker: LEZ timelock expired, refunding");
+                progress::report(&progress, SwapProgress::TimelockExpired);
+                progress::report(&progress, SwapProgress::Refunding);
                 let lez_refund_tx = lez_client.refund(&hashlock).await.ok();
+                progress::report(&progress, SwapProgress::RefundComplete);
                 return Ok(SwapOutcome::Refunded {
                     eth_refund_tx: None,
                     lez_refund_tx,
@@ -82,8 +107,15 @@ pub async fn run_maker(
     watcher_handle.abort();
 
     // 4. Claim ETH by revealing the preimage.
+    progress::report(&progress, SwapProgress::ClaimingEth);
     let eth_claim_tx = eth_client.claim(swap_id, preimage).await?;
     info!(%eth_claim_tx, "maker: ETH claimed");
+    progress::report(
+        &progress,
+        SwapProgress::EthClaimed {
+            tx_hash: format!("{eth_claim_tx}"),
+        },
+    );
 
     Ok(SwapOutcome::Completed {
         preimage,
