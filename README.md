@@ -47,46 +47,24 @@ Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
 | `programs/lez-htlc/` | LEZ HTLC program (Risc0 zkVM) — same logic, escrow in PDA |
 | `src/` | Orchestration library — ETH/LEZ clients, watchers, maker/taker/refund flows |
 | `src/messaging/` | Waku messaging client for offer discovery (nwaku REST API) |
-| `src/cli/` | CLI commands: maker, taker, refund, status, demo, infra |
 | `swap-ffi/` | C FFI bridge exposing swap functions to the Qt6 UI |
 | `ui/` | Qt6/QML app — Config, Maker, Taker, Refund tabs |
 
-## Build
+## Commands
 
-```bash
-cd contracts && forge build         # contracts
-cargo build --features demo         # CLI with demo/infra commands
-cd swap-ffi && cargo build          # FFI bridge
-make configure && make build        # Qt6 UI
-```
-
-## Test
-
-```bash
-cargo test                                            # all tests
-cargo test test_atomic_swap_happy_path -- --nocapture  # specific test
-```
-
-| Suite | Tests | Coverage |
-|---|---|---|
-| Unit | 5 | Timelock validation, PDA derivation |
-| ETH integration | 4 | Lock/claim/refund, event watcher |
-| LEZ integration | 6 | Transfer, lock/claim/refund, watcher |
-| E2E swap | 5 | Happy path, timeouts, rejections |
-| Messaging | 1 | Publish + fetch offers via nwaku |
-
-## Makefile
-
-| Target | Description |
+| Command | Description |
 |---|---|
+| `make infra` | Start all services, deploy contracts, write `.env` files |
 | `make run-maker` / `make run-taker` | Launch UI with maker/taker config |
-| `make infra` | Start all services with color-coded logs |
 | `make demo` | Automated CLI demo (no UI needed) |
-| `make nwaku` / `make nwaku-stop` | Start/stop nwaku Docker container |
 | `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle |
 | `make contracts` | Build Solidity contracts |
+| `make nwaku` / `make nwaku-stop` | Start/stop nwaku Docker container |
+| `cargo build --features demo` | CLI with demo/infra commands |
+| `cd swap-ffi && cargo build` | FFI bridge (cdylib for Qt6 UI) |
+| `cargo test` | Run all tests |
 
-## CLI
+**CLI** (config via `.env` or CLI flags — see `.env.example`):
 
 ```bash
 swap-cli maker [--preimage <hex>]       # generate preimage, lock LEZ, claim ETH
@@ -96,8 +74,6 @@ swap-cli refund eth --swap-id <hex>     # refund ETH after timelock
 swap-cli status --hashlock <hex>        # inspect escrow state
 ```
 
-Config via `.env` or CLI flags (flags override env). See `.env.example`.
-
 ## Design Notes
 
 - **SHA-256 hashlock** (not keccak) — cross-chain compatibility with LEZ's `risc0_zkvm::sha`
@@ -105,10 +81,7 @@ Config via `.env` or CLI flags (flags override env). See `.env.example`.
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Messaging is optional** — works without nwaku via manual hashlock exchange
 - **8MB thread stack** — alloy/tungstenite TLS handshake overflows the default 512K QtConcurrent stack
-
-## Logos Core
-
-The current UI is a plain Qt6 app calling LEZ/ETH directly via FFI. It does **not** use the [Logos Core module system](https://ecosystem.logos.co/engineering/application_essentials/logos_core_devex#standalone-app). Converting to a proper standalone app would require liblogos SDKs, wrapping swap logic as a Logos module, and an Ethereum module for Logos Core (which does not exist yet). Direct chain access is sufficient for the PoC.
+- **Not a Logos Core app** — the UI calls LEZ/ETH directly via FFI, not through the [Logos Core module system](https://ecosystem.logos.co/engineering/application_essentials/logos_core_devex#standalone-app); converting would require liblogos SDKs, a swap Logos module, and an Ethereum module (which doesn't exist yet)
 
 ## Status
 
