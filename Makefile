@@ -1,7 +1,13 @@
-.PHONY: build run run-maker run-taker clean configure contracts demo infra nwaku nwaku-stop \
+.PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra nwaku nwaku-stop \
        logos-module-configure logos-module-build logos-module-plugin logos-module-run
 
 UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
+
+swap-ffi:
+	cd swap-ffi && cargo build
+
+configure: swap-ffi
+	cmake -B ui/build -S ui -DCMAKE_BUILD_TYPE=Debug
 
 build:
 	cmake --build ui/build
@@ -16,9 +22,6 @@ run-taker: build
 
 clean:
 	cmake --build ui/build --target clean
-
-configure:
-	cmake -B ui/build -S ui -DCMAKE_BUILD_TYPE=Debug
 
 contracts:
 	cd contracts && forge build

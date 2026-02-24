@@ -13,9 +13,18 @@ Maker                                          Taker
 
 ## Quick Start
 
+### Prerequisites
+
+[Rust](https://rustup.rs/) · [Foundry](https://getfoundry.sh/) · [Docker](https://docs.docker.com/get-docker/) · [Qt6](https://doc.qt.io/qt-6/get-and-install-qt.html) (6.5+, Quick) · [CMake](https://cmake.org/) (3.21+)
+
+macOS: `brew install qt@6 cmake`, install [Rust](https://rustup.rs/), [Foundry](https://getfoundry.sh/), and [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/)
+
+### Run
+
 ```bash
+make configure            # build Rust FFI bridge + cmake configure (first time only)
 make infra                # start nwaku + Anvil + LEZ sequencer, deploy contracts, write .env files
-make configure            # cmake configure (first time only)
+# in new terminals:
 make run-maker            # open maker UI
 make run-taker            # open taker UI
 ```
@@ -59,7 +68,7 @@ Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
 | `make infra` | Start all services, deploy contracts, write `.env` files |
 | `make run-maker` / `make run-taker` | Launch UI with maker/taker config |
 | `make demo` | Automated CLI demo (no UI needed) |
-| `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle (`ui/`) |
+| `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle (auto-builds `swap-ffi`) |
 | `make logos-module-build` | Build Logos Core module (standalone mode) |
 | `make logos-module-plugin` | Build Logos Core module (plugin mode) |
 | `make logos-module-run` | Build + run Logos Core module as maker |
