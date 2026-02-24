@@ -136,6 +136,16 @@ ScrollView {
                 text: swapBackend.pollIntervalMs
                 onTextEdited: (val) => swapBackend.pollIntervalMs = val
             }
+
+            // --- Messaging (optional) ---
+            SectionHeader { label: "Messaging (optional)" }
+
+            ConfigField {
+                label: "Nwaku URL"
+                text: swapBackend.nwakuUrl
+                onTextEdited: (val) => swapBackend.nwakuUrl = val
+                placeholderText: "http://localhost:8645 (leave empty to disable)"
+            }
         }
     }
 
@@ -193,7 +203,7 @@ ScrollView {
                 border.width: 1
                 radius: Theme.radiusSmall
             }
-            onTextChanged: textEdited(text)
+            onTextChanged: () => textEdited(input.text)
         }
     }
 }

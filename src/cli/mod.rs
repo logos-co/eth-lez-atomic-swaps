@@ -1,5 +1,7 @@
 #[cfg(feature = "demo")]
 mod demo;
+#[cfg(feature = "demo")]
+mod infra;
 mod maker;
 mod output;
 mod refund;
@@ -89,6 +91,10 @@ pub struct ConfigArgs {
     /// Polling interval in milliseconds
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "2000")]
     poll_interval_ms: u64,
+
+    /// Nwaku REST API URL for messaging coordination (optional)
+    #[arg(long, env = "NWAKU_URL")]
+    nwaku_url: Option<String>,
 }
 
 impl ConfigArgs {
@@ -122,6 +128,7 @@ impl ConfigArgs {
             eth_recipient_address,
             lez_taker_account_id,
             poll_interval: Duration::from_millis(self.poll_interval_ms),
+            nwaku_url: self.nwaku_url,
         })
     }
 }
@@ -139,6 +146,9 @@ enum Commands {
     /// Run a full demo: start local chains, deploy contracts, run both sides
     #[cfg(feature = "demo")]
     Demo,
+    /// Start infrastructure (Anvil + LEZ sequencer + nwaku), write .env files, block until Ctrl-C
+    #[cfg(feature = "demo")]
+    Infra,
 }
 
 async fn create_clients(config: &SwapConfig) -> Result<(EthClient, LezClient)> {
@@ -155,6 +165,9 @@ pub async fn run() -> Result<()> {
         let args: Vec<String> = std::env::args().collect();
         if args.iter().any(|a| a == "demo") {
             return demo::cmd_demo().await;
+        }
+        if args.iter().any(|a| a == "infra") {
+            return infra::cmd_infra().await;
         }
     }
 
@@ -183,5 +196,7 @@ pub async fn run() -> Result<()> {
         Commands::Status(args) => status::cmd_status(args, &config, cli.json).await,
         #[cfg(feature = "demo")]
         Commands::Demo => unreachable!("handled above"),
+        #[cfg(feature = "demo")]
+        Commands::Infra => unreachable!("handled above"),
     }
 }

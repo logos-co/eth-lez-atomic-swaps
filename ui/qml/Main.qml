@@ -9,7 +9,12 @@ ApplicationWindow {
     minimumWidth: 640
     minimumHeight: 500
     visible: true
-    title: "Atomic Swaps — LEZ / ETH"
+    title: {
+        var base = "Atomic Swaps — LEZ / ETH"
+        if (swapBackend.swapRole === "maker") return base + " [MAKER]"
+        if (swapBackend.swapRole === "taker") return base + " [TAKER]"
+        return base
+    }
     color: Theme.background
 
     background: Rectangle { color: Theme.background }
@@ -57,6 +62,37 @@ ApplicationWindow {
             Layout.fillWidth: true
             height: 1
             color: Theme.border
+        }
+
+        // Role badge
+        Rectangle {
+            visible: swapBackend.swapRole === "maker" || swapBackend.swapRole === "taker"
+            Layout.fillWidth: true
+            height: 32
+            color: swapBackend.swapRole === "maker" ? "#1a2e1a" : "#1a1a2e"
+
+            RowLayout {
+                anchors.centerIn: parent
+                spacing: 8
+
+                Rectangle {
+                    width: 8; height: 8
+                    radius: 4
+                    color: swapBackend.swapRole === "maker" ? Theme.success : "#6c8cff"
+                }
+                Text {
+                    text: swapBackend.swapRole === "maker" ? "MAKER INSTANCE" : "TAKER INSTANCE"
+                    color: swapBackend.swapRole === "maker" ? Theme.success : "#6c8cff"
+                    font.pixelSize: 12
+                    font.bold: true
+                    font.letterSpacing: 1.5
+                }
+                Rectangle {
+                    width: 8; height: 8
+                    radius: 4
+                    color: swapBackend.swapRole === "maker" ? Theme.success : "#6c8cff"
+                }
+            }
         }
 
         // Content

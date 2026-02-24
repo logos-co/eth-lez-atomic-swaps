@@ -26,12 +26,11 @@ ScrollView {
         return done
     }
 
-    // Extract hashlock from progress events
-    property string hashlock: {
-        // Not directly available from progressSteps (just step names).
-        // We'd need the full JSON. For now, display from the step name hint.
-        return ""
-    }
+    property bool messagingEnabled: swapBackend.nwakuUrl !== ""
+    property string publishedHashlock: ""
+    property string publishedPreimage: ""
+    property bool offerPublished: false
+    property bool publishing: false
 
     Flickable {
         contentHeight: makerCol.implicitHeight + Theme.spacingXLarge * 2
@@ -47,6 +46,21 @@ ScrollView {
             }
             spacing: Theme.spacingLarge
 
+            Connections {
+                target: swapBackend
+                function onOfferPublished(resultJson) {
+                    makerRoot.publishing = false
+                    var obj = JSON.parse(resultJson)
+                    if (obj.ok) {
+                        makerRoot.publishedHashlock = obj.hashlock
+                        makerRoot.publishedPreimage = obj.preimage
+                        makerRoot.offerPublished = true
+                    } else {
+                        makerRoot.publishedHashlock = "Error: " + (obj.error || "unknown")
+                    }
+                }
+            }
+
             Text {
                 text: "Maker Flow"
                 color: Theme.textPrimary
@@ -54,17 +68,20 @@ ScrollView {
                 font.bold: true
             }
             Text {
-                text: "Generate preimage, lock LEZ, wait for taker to lock ETH, then claim ETH."
+                text: messagingEnabled
+                    ? "Publish offer via messaging, then lock LEZ and wait for taker."
+                    : "Generate preimage, lock LEZ, wait for taker to lock ETH, then claim ETH."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSmall
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
 
-            // Start button
+            // --- Step 1: Publish Offer (messaging enabled) ---
             Button {
-                text: swapBackend.running ? "Running..." : "Start Maker"
-                enabled: !swapBackend.running
+                visible: messagingEnabled && !offerPublished
+                text: publishing ? "Publishing..." : "Publish Offer"
+                enabled: !publishing && !swapBackend.running
                 Layout.fillWidth: true
                 Layout.preferredHeight: 48
                 font.pixelSize: Theme.fontNormal
@@ -84,7 +101,77 @@ ScrollView {
                     font: parent.font
                 }
 
-                onClicked: swapBackend.startMaker()
+                onClicked: {
+                    makerRoot.publishing = true
+                    swapBackend.publishOffer()
+                }
+            }
+
+            // Published offer card
+            Rectangle {
+                visible: messagingEnabled && offerPublished
+                Layout.fillWidth: true
+                implicitHeight: offerCol.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: Theme.accent
+                border.width: 1
+                radius: Theme.radiusNormal
+
+                ColumnLayout {
+                    id: offerCol
+                    anchors {
+                        fill: parent
+                        margins: Theme.spacingNormal
+                    }
+                    spacing: 6
+
+                    Text {
+                        text: "Offer Published"
+                        color: Theme.accent
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+                    Text {
+                        text: "Hashlock: " + publishedHashlock
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
+                        font.family: "Menlo, Courier New"
+                        wrapMode: Text.WrapAnywhere
+                        Layout.fillWidth: true
+                    }
+                }
+            }
+
+            // --- Step 2: Start Swap ---
+            Button {
+                text: swapBackend.running ? "Running..." : (messagingEnabled && offerPublished ? "Start Swap" : "Start Maker")
+                enabled: !swapBackend.running && (!messagingEnabled || offerPublished)
+                visible: !messagingEnabled || offerPublished
+                Layout.fillWidth: true
+                Layout.preferredHeight: 48
+                font.pixelSize: Theme.fontNormal
+                font.bold: true
+
+                background: Rectangle {
+                    color: parent.enabled
+                           ? (parent.hovered ? Theme.accentHover : Theme.accent)
+                           : Theme.surfaceLight
+                    radius: Theme.radiusNormal
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: parent.enabled ? "#ffffff" : Theme.textMuted
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font: parent.font
+                }
+
+                onClicked: {
+                    if (messagingEnabled && publishedPreimage !== "")
+                        swapBackend.startMaker(publishedPreimage)
+                    else
+                        swapBackend.startMaker("")
+                }
             }
 
             // Progress

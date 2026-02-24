@@ -6,16 +6,16 @@ Cross-chain atomic swap between LEZ (lambda) and Ethereum using hash time-locked
 
 ```
 Maker                                          Taker
-  │                                              │
-  │  1. Generate secret preimage                 │
-  │  2. Lock LEZ (hashlock = SHA256(preimage))   │
-  │─────────── share hashlock ──────────────────>│
-  │                                              │  3. Verify LEZ escrow
-  │                                              │  4. Lock ETH (same hashlock)
-  │  5. Claim ETH (reveals preimage on-chain)    │
-  │                                              │  6. Claim LEZ (using revealed preimage)
-  │                                              │
-  ▼              Both sides complete              ▼
+  |                                              |
+  |  1. Generate secret preimage                 |
+  |  2. Lock LEZ (hashlock = SHA256(preimage))   |
+  |─────────── share hashlock ──────────────────>|
+  |                                              |  3. Verify LEZ escrow
+  |                                              |  4. Lock ETH (same hashlock)
+  |  5. Claim ETH (reveals preimage on-chain)    |
+  |                                              |  6. Claim LEZ (using revealed preimage)
+  |                                              |
+  v              Both sides complete              v
 ```
 
 **Safety guarantees:**
@@ -23,17 +23,68 @@ Maker                                          Taker
 - If the maker never claims ETH, the taker's ETH timelock expires and they refund.
 - The taker verifies the LEZ escrow (state, amount) before locking any ETH.
 
+## Quick Start (Local Demo)
+
+Run a full end-to-end swap locally using the Qt6 UI, with all infrastructure started in one command.
+
+### Prerequisites
+
+- **Rust** (edition 2024)
+- **Foundry** (`forge`, `anvil`) — for contracts and local Ethereum
+- **Docker** — for nwaku (Waku messaging node)
+- **Qt6** (6.5+) with QtQuick — for the UI
+- **CMake** — for building the UI
+- **Access to `logos-blockchain/lssa`** on GitHub — LEZ SDK dependencies
+
+### Steps
+
+```bash
+# 1. Start nwaku (messaging node)
+make nwaku
+
+# 2. Start all infrastructure (Anvil + LEZ sequencer + deploy contracts)
+#    Writes .env (maker) and .env.taker (taker) automatically
+make infra
+
+# 3. Build and configure the UI (first time only)
+make configure
+
+# 4. Open maker and taker windows side by side
+make run-maker   # launches UI with maker config
+make run-taker   # launches UI with taker config
+
+# 5. In the maker window:
+#    - Click "Publish Offer" (broadcasts via messaging)
+#    - Click "Start Swap" (locks LEZ, waits for taker)
+
+# 6. In the taker window:
+#    - Click "Discover Offers" (finds the maker's offer)
+#    - Click an offer to select it
+#    - Click "Start Taker" (verifies escrow, locks ETH, waits for preimage, claims LEZ)
+
+# 7. Both windows show "Swap Completed" with matching preimage
+```
+
+### Stopping
+
+```bash
+# Ctrl-C the `make infra` terminal to stop Anvil + LEZ sequencer
+make nwaku-stop   # stop the nwaku Docker container
+```
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────┐
-│         swap-cli (bin)          │  ← clap CLI, thin wrapper
+│     Qt6 UI / swap-cli (bin)     |  <- user interface
 ├─────────────────────────────────┤
-│   Swap orchestration library    │  ← maker/taker/refund flows
+│    swap-ffi (C bridge / cdylib) |  <- FFI layer for UI
 ├─────────────────────────────────┤
-│      Chain monitoring           │  ← ETH event watcher + LEZ state watcher
+│   Swap orchestration library    |  <- maker/taker/refund flows
+├─────────────────────────────────┤
+│  Chain monitoring + Messaging   |  <- ETH events + LEZ state + nwaku
 ├──────────────┬──────────────────┤
-│  alloy (ETH) │  nssa_core (LEZ) │
+│  alloy (ETH) |  nssa_core (LEZ) |
 └──────────────┴──────────────────┘
 ```
 
@@ -44,14 +95,10 @@ Maker                                          Taker
 | `src/eth/` | `EthClient` (alloy) + ETH event watcher (WebSocket subscription). |
 | `src/lez/` | `LezClient` (nssa_core sequencer RPC) + LEZ escrow watcher (polling). |
 | `src/swap/` | Orchestration: `run_maker()`, `run_taker()`, `refund_lez()`, `refund_eth()`. |
-| `src/cli/` | CLI commands: maker, taker, refund, status. |
-| `src/bin/cli.rs` | Entry point for `swap-cli`. |
-
-## Prerequisites
-
-- **Rust** (edition 2024)
-- **Foundry** (`forge`) — for building/testing contracts
-- **Access to `logos-blockchain/lssa`** on GitHub — LEZ SDK dependencies are pulled via git
+| `src/messaging/` | Waku messaging client for offer discovery (nwaku REST API). |
+| `src/cli/` | CLI commands: maker, taker, refund, status, demo, infra. |
+| `swap-ffi/` | C FFI bridge (cdylib) exposing swap functions to the Qt6 UI. |
+| `ui/` | Qt6/QML application with Config, Maker, Taker, and Refund tabs. |
 
 ## Build
 
@@ -62,14 +109,20 @@ cd contracts && forge build
 # Build the CLI
 cargo build --bin swap-cli
 
-# Build the LEZ HTLC guest program
-cd programs/lez-htlc/methods && cargo build
+# Build with demo/infra commands
+cargo build --features demo
+
+# Build the FFI bridge
+cd swap-ffi && cargo build
+
+# Configure + build the Qt6 UI
+make configure && make build
 ```
 
 ## Test
 
 ```bash
-# Run all tests (20 total)
+# Run all tests
 cargo test
 
 # Run with log output
@@ -86,17 +139,58 @@ cargo test test_atomic_swap_happy_path -- --nocapture
 | Unit (`src/`) | 5 | Timelock validation, PDA derivation determinism |
 | ETH integration | 4 | Lock/read, lock/claim, lock/refund (time-forwarded), event watcher |
 | LEZ integration | 6 | Transfer, lock/escrow, lock/claim, lock/refund, wrong preimage rejected, watcher |
-| E2E swap | 5 | See below |
+| E2E swap | 5 | Happy path, maker timeout, taker timeout, missing escrow, insufficient amount |
+| Messaging | 1 | Publish + fetch offers via nwaku (requires Docker) |
 
-**E2E swap tests** (spin up local Anvil + LEZ sequencer, deploy both contracts):
+## Makefile Targets
 
-| Test | Scenario |
+| Target | Description |
 |---|---|
-| `test_atomic_swap_happy_path` | Full maker + taker flow completes. Verifies LEZ balances (exact), ETH contract drained, taker ETH decreased, maker only spent gas. |
-| `test_maker_refunds_on_timeout` | Taker never shows. Maker's LEZ timelock expires, auto-refunds. LEZ balance fully restored. |
-| `test_taker_refunds_on_timeout` | Maker never claims. Taker's ETH timelock expires, refunds ETH. Contract balance returns to zero. |
-| `test_taker_rejects_missing_escrow` | No LEZ escrow exists. Taker returns `InvalidState` before locking any ETH. |
-| `test_taker_rejects_insufficient_escrow_amount` | Maker locks less LEZ than agreed. Taker rejects before locking ETH. |
+| `make configure` | CMake configure for the Qt6 UI (first time only) |
+| `make build` | Build the Qt6 UI |
+| `make run-maker` | Build + launch UI with maker config (`.env`) |
+| `make run-taker` | Build + launch UI with taker config (`.env.taker`) |
+| `make demo` | Run the CLI demo (automated end-to-end swap) |
+| `make infra` | Start all infrastructure with color-coded logs |
+| `make nwaku` | Start nwaku via Docker Compose |
+| `make nwaku-stop` | Stop nwaku |
+| `make contracts` | Build Solidity contracts |
+| `make clean` | Clean UI build |
+
+## `make infra`
+
+Starts all backend services in one terminal with color-coded output:
+
+- **[anvil]** (yellow) — local Ethereum node (auto-funded accounts)
+- **[lez]** (cyan) — LEZ sequencer (in-process, auto-funded accounts)
+- **[nwaku]** (magenta) — checked at startup (must be running via `make nwaku`)
+
+Automatically:
+- Deploys EthHTLC contract to Anvil
+- Deploys LEZ HTLC program to the sequencer
+- Writes `.env` (maker config) and `.env.taker` (taker config)
+- Prints a summary box with all addresses and ports
+- Cleans up on Ctrl-C
+
+## Qt6 UI
+
+The UI has four tabs:
+
+**Config** — All swap parameters pre-filled from `.env`. Edit values live before starting a swap. Includes optional nwaku URL for messaging.
+
+**Maker** — Two-step flow when messaging is enabled:
+1. "Publish Offer" broadcasts the swap offer via nwaku
+2. "Start Swap" locks LEZ and waits for the taker
+
+When messaging is disabled, a single "Start Maker" button runs the full flow.
+
+**Taker** — "Discover Offers" fetches available offers from nwaku. Click an offer to auto-fill the hashlock, then "Start Taker" runs the taker flow. Manual hashlock entry is also supported.
+
+**Refund** — Manual recovery for expired HTLCs. Auto-populated from the last swap result:
+- LEZ Refund (maker) — needs hashlock, enforced off-chain (10m default)
+- ETH Refund (taker) — needs swap ID, enforced on-chain (5m default)
+
+Each window shows a role badge (green MAKER / blue TAKER) and the window title includes the role.
 
 ## CLI Usage
 
@@ -156,40 +250,7 @@ swap-cli status --hashlock <hex> --swap-id <hex>
 
 ### Configuration
 
-Every config value can be set via `.env` (or `--env-file`) **or** as a CLI flag. CLI flags override env vars.
-
-```bash
-# Ethereum
-ETH_RPC_URL=wss://sepolia.infura.io/ws/v3/YOUR_KEY
-ETH_PRIVATE_KEY=0x...
-ETH_HTLC_ADDRESS=0x...
-
-# LEZ
-LEZ_SEQUENCER_URL=http://localhost:8080   # default if omitted
-LEZ_SIGNING_KEY=<32-byte-hex>
-LEZ_HTLC_PROGRAM_ID=<32-byte-hex>
-
-# Swap parameters
-LEZ_AMOUNT=1000
-ETH_AMOUNT=1000000000000000
-
-# Timelocks — relative, in minutes from now (defaults: LEZ=10, ETH=5)
-# LEZ_TIMELOCK_MINUTES=10
-# ETH_TIMELOCK_MINUTES=5
-
-# Counterparty
-ETH_RECIPIENT_ADDRESS=0x...
-LEZ_TAKER_ACCOUNT_ID=<32-byte-hex>
-
-# Optional
-# POLL_INTERVAL_MS=2000
-```
-
-Or pass directly:
-
-```bash
-swap-cli --eth-rpc-url wss://... --eth-private-key 0x... maker
-```
+Every config value can be set via `.env` (or `--env-file`) **or** as a CLI flag. CLI flags override env vars. See `.env.example` for all options.
 
 ## Design Decisions
 
@@ -199,6 +260,12 @@ swap-cli --eth-rpc-url wss://... --eth-private-key 0x... maker
 
 **LEZ escrow funding is two-step** — LSSA balance rules prevent programs from debiting non-owned accounts. The orchestration library first calls Lock (claims the PDA and stores escrow metadata), then transfers funds to the PDA in a separate transaction.
 
+**Messaging is optional** — The swap protocol works without nwaku (manual hashlock exchange). When nwaku is configured, offers are broadcast and discovered automatically. The taker FFI layer polls for the maker's LEZ escrow before starting the swap.
+
+**FFI bridge uses hardcoded header** — `swap-ffi/build.rs` writes `swap_ffi.h` from a template instead of using cbindgen, because cbindgen 0.27 cannot parse `#[unsafe(no_mangle)]` (Rust 2024 edition).
+
+**QThreadPool stack size** — Set to 8MB in `main.cpp`. The default ~512K is insufficient for alloy/tungstenite/TLS WebSocket handshake chain which is deeply recursive.
+
 ## Project Status
 
 - [x] Ethereum HTLC smart contract
@@ -206,4 +273,20 @@ swap-cli --eth-rpc-url wss://... --eth-private-key 0x... maker
 - [x] Swap orchestration library
 - [x] Standalone CLI (`swap-cli`)
 - [x] E2E tests (happy path, timeouts, rejections, balance verification)
-- [ ] Logos Core UI (primary interface — Qt6 plugin / Rust SDK)
+- [x] One-command demo (`make demo`)
+- [x] Qt6 UI with FFI bridge (`make run-maker` / `make run-taker`)
+- [x] Messaging integration (nwaku offer discovery)
+- [x] Infrastructure command (`make infra`)
+- [ ] Logos Core standalone app (see below)
+
+## Logos Core Standalone App
+
+The current Qt6 UI calls LEZ (nssa_core) and Ethereum (alloy) directly via the Rust FFI bridge. This is a plain Qt6 application — it does **not** use the Logos Core module system.
+
+A proper [Logos Core standalone app](https://ecosystem.logos.co/engineering/application_essentials/logos_core_devex#standalone-app) would embed Logos modules via liblogos SDKs and retrieve them from the Package Manager at build time. Converting would require:
+
+1. Wrapping swap logic as a Logos module (or using the existing `logos-blockchain-module` for LEZ wallet ops)
+2. Using liblogos SDKs instead of direct nssa_core/alloy calls
+3. An Ethereum module for Logos Core (does not exist yet)
+
+For the PoC, direct chain access is sufficient and avoids blocking on module system availability.

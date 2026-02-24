@@ -28,6 +28,10 @@ class SwapBackend : public QObject
     Q_PROPERTY(QString ethRecipientAddress READ ethRecipientAddress WRITE setEthRecipientAddress NOTIFY ethRecipientAddressChanged)
     Q_PROPERTY(QString lezTakerAccountId READ lezTakerAccountId WRITE setLezTakerAccountId NOTIFY lezTakerAccountIdChanged)
     Q_PROPERTY(QString pollIntervalMs READ pollIntervalMs WRITE setPollIntervalMs NOTIFY pollIntervalMsChanged)
+    Q_PROPERTY(QString nwakuUrl READ nwakuUrl WRITE setNwakuUrl NOTIFY nwakuUrlChanged)
+
+    // Role (maker / taker — set via SWAP_ROLE env var)
+    Q_PROPERTY(QString swapRole READ swapRole CONSTANT)
 
     // State
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
@@ -38,6 +42,9 @@ class SwapBackend : public QObject
 public:
     explicit SwapBackend(QObject *parent = nullptr);
     ~SwapBackend() override;
+
+    // Role getter
+    QString swapRole() const { return m_swapRole; }
 
     // Config getters
     QString ethRpcUrl() const { return m_ethRpcUrl; }
@@ -53,6 +60,7 @@ public:
     QString ethRecipientAddress() const { return m_ethRecipientAddress; }
     QString lezTakerAccountId() const { return m_lezTakerAccountId; }
     QString pollIntervalMs() const { return m_pollIntervalMs; }
+    QString nwakuUrl() const { return m_nwakuUrl; }
 
     // Config setters
     void setEthRpcUrl(const QString &v);
@@ -68,6 +76,7 @@ public:
     void setEthRecipientAddress(const QString &v);
     void setLezTakerAccountId(const QString &v);
     void setPollIntervalMs(const QString &v);
+    void setNwakuUrl(const QString &v);
 
     // State getters
     bool running() const { return m_running; }
@@ -76,10 +85,12 @@ public:
     QString resultJson() const { return m_resultJson; }
 
     Q_INVOKABLE void loadEnv();
-    Q_INVOKABLE void startMaker();
+    Q_INVOKABLE void startMaker(const QString &preimageHex = QString());
     Q_INVOKABLE void startTaker(const QString &hashlockHex);
     Q_INVOKABLE void refundLez(const QString &hashlockHex);
     Q_INVOKABLE void refundEth(const QString &swapIdHex);
+    Q_INVOKABLE void publishOffer();
+    Q_INVOKABLE void fetchOffers();
 
 signals:
     void ethRpcUrlChanged();
@@ -95,11 +106,15 @@ signals:
     void ethRecipientAddressChanged();
     void lezTakerAccountIdChanged();
     void pollIntervalMsChanged();
+    void nwakuUrlChanged();
 
     void runningChanged();
     void currentStepChanged();
     void progressStepsChanged();
     void resultJsonChanged();
+
+    void offerPublished(const QString &resultJson);
+    void offersFetched(const QString &offersJson);
 
 private:
     QByteArray configJson() const;
@@ -110,6 +125,9 @@ private:
     void setResultJson(const QString &v);
 
     void handleProgress(const QString &json);
+
+    // Role
+    QString m_swapRole;
 
     // Config fields
     QString m_ethRpcUrl;
@@ -125,14 +143,18 @@ private:
     QString m_ethRecipientAddress;
     QString m_lezTakerAccountId;
     QString m_pollIntervalMs;
+    QString m_nwakuUrl;
 
     // State
     bool m_running = false;
     QString m_currentStep;
     QStringList m_progressSteps;
     QString m_resultJson;
+    QString m_publishedPreimage;
 
     QFutureWatcher<QString> m_watcher;
+    QFutureWatcher<QString> m_publishWatcher;
+    QFutureWatcher<QString> m_fetchWatcher;
 };
 
 #endif // SWAPBACKEND_H

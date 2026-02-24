@@ -5,10 +5,14 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::runtime::Runtime;
 
+use sha2::{Digest, Sha256};
+
 use swap_orchestrator::{
     config::{SwapConfig, parse_account_id, parse_program_id},
     eth::client::EthClient,
     lez::client::LezClient,
+    messaging::client::{MessagingClient, decode_waku_payload},
+    messaging::types::{SwapOffer, OFFERS_TOPIC},
     swap::{
         maker::run_maker,
         progress::SwapProgress,
@@ -70,6 +74,8 @@ struct FfiConfig {
     lez_taker_account_id: String,
     #[serde(default = "default_poll")]
     poll_interval_ms: String,
+    #[serde(default)]
+    nwaku_url: Option<String>,
 }
 
 fn default_poll() -> String {
@@ -123,6 +129,7 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         eth_recipient_address,
         lez_taker_account_id,
         poll_interval: Duration::from_millis(poll_interval_ms),
+        nwaku_url: c.nwaku_url,
     })
 }
 
@@ -130,7 +137,7 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
 // Outcome serialization
 // ---------------------------------------------------------------------------
 
-fn outcome_to_json(outcome: &SwapOutcome) -> String {
+fn outcome_to_json(outcome: &SwapOutcome, hashlock: &[u8; 32]) -> String {
     match outcome {
         SwapOutcome::Completed {
             preimage,
@@ -141,6 +148,7 @@ fn outcome_to_json(outcome: &SwapOutcome) -> String {
             "preimage": hex::encode(preimage),
             "eth_tx": format!("{eth_tx}"),
             "lez_tx": lez_tx,
+            "hashlock": hex::encode(hashlock),
         })
         .to_string(),
         SwapOutcome::Refunded {
@@ -150,6 +158,7 @@ fn outcome_to_json(outcome: &SwapOutcome) -> String {
             "status": "refunded",
             "eth_refund_tx": eth_refund_tx.map(|tx| format!("{tx}")),
             "lez_refund_tx": lez_refund_tx,
+            "hashlock": hex::encode(hashlock),
         })
         .to_string(),
     }
@@ -209,9 +218,11 @@ pub unsafe extern "C" fn swap_ffi_load_env(path: *const c_char) -> *mut c_char {
 ///
 /// # Safety
 /// `config_json` must be a valid null-terminated JSON C string.
+/// `preimage_hex` may be null (maker generates internally) or a 64-char hex string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn swap_ffi_run_maker(
     config_json: *const c_char,
+    preimage_hex: *const c_char,
     cb: ProgressCallback,
     user_data: *mut c_void,
 ) -> *mut c_char {
@@ -223,6 +234,28 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
     let config = match parse_config(json_str) {
         Ok(c) => c,
         Err(e) => return json_err(&e),
+    };
+
+    // Parse optional preimage override.
+    let override_preimage: Option<[u8; 32]> = if preimage_hex.is_null() {
+        None
+    } else {
+        match unsafe { c_str_to_str(preimage_hex) } {
+            Some(s) if s.is_empty() => None,
+            Some(s) => {
+                let s = s.strip_prefix("0x").unwrap_or(s);
+                match hex::decode(s) {
+                    Ok(b) if b.len() == 32 => {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&b);
+                        Some(arr)
+                    }
+                    Ok(_) => return json_err("preimage must be 32 bytes (64 hex chars)"),
+                    Err(e) => return json_err(&format!("invalid preimage hex: {e}")),
+                }
+            }
+            None => None,
+        }
     };
 
     runtime().block_on(async {
@@ -237,8 +270,17 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
             Err(e) => return json_err(&e.to_string()),
         };
 
-        match run_maker(&config, &eth_client, &lez_client, None, progress).await {
-            Ok(outcome) => to_c_string(&outcome_to_json(&outcome)),
+        match run_maker(&config, &eth_client, &lez_client, override_preimage, progress).await {
+            Ok(ref outcome) => {
+                let hashlock = match outcome {
+                    SwapOutcome::Completed { preimage, .. } => {
+                        use sha2::{Digest, Sha256};
+                        Sha256::digest(preimage).into()
+                    }
+                    _ => [0u8; 32],
+                };
+                to_c_string(&outcome_to_json(outcome, &hashlock))
+            }
             Err(e) => json_err(&e.to_string()),
         }
     })
@@ -291,8 +333,26 @@ pub unsafe extern "C" fn swap_ffi_run_taker(
             Err(e) => return json_err(&e.to_string()),
         };
 
+        // When messaging is enabled, wait for LEZ escrow to appear before starting
+        // the taker flow (maker may still be locking). Matches the CLI demo pattern.
+        if config.nwaku_url.is_some() {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+            loop {
+                match lez_client.get_escrow(&hashlock_bytes).await {
+                    Ok(Some(escrow)) if escrow.amount >= config.lez_amount => break,
+                    _ => {}
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return json_err("taker: LEZ escrow did not appear within 5 minutes");
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            // Brief pause so maker's ETH event watcher is ready.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+
         match run_taker(&config, &eth_client, &lez_client, hashlock_bytes, progress).await {
-            Ok(outcome) => to_c_string(&outcome_to_json(&outcome)),
+            Ok(ref outcome) => to_c_string(&outcome_to_json(outcome, &hashlock_bytes)),
             Err(e) => json_err(&e.to_string()),
         }
     })
@@ -387,6 +447,134 @@ pub unsafe extern "C" fn swap_ffi_refund_eth(
             }
             Err(e) => json_err(&e.to_string()),
         }
+    })
+}
+
+/// Publish a swap offer via nwaku messaging. Returns JSON with hashlock and preimage.
+///
+/// # Safety
+/// `config_json` and `nwaku_url` must be valid null-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_publish_offer(
+    config_json: *const c_char,
+    nwaku_url: *const c_char,
+) -> *mut c_char {
+    let json_str = match unsafe { c_str_to_str(config_json) } {
+        Some(s) => s,
+        None => return json_err("null or invalid config_json"),
+    };
+    let nwaku = match unsafe { c_str_to_str(nwaku_url) } {
+        Some(s) => s,
+        None => return json_err("null or invalid nwaku_url"),
+    };
+
+    let config = match parse_config(json_str) {
+        Ok(c) => c,
+        Err(e) => return json_err(&e),
+    };
+
+    runtime().block_on(async {
+        // Generate preimage + hashlock.
+        let preimage: [u8; 32] = rand::random();
+        let hashlock: [u8; 32] = Sha256::digest(preimage).into();
+
+        let lez_client = match LezClient::new(&config) {
+            Ok(c) => c,
+            Err(e) => return json_err(&e.to_string()),
+        };
+
+        let program_id_bytes: Vec<u8> = config
+            .lez_htlc_program_id
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+
+        let offer = SwapOffer {
+            hashlock: hex::encode(hashlock),
+            lez_amount: config.lez_amount,
+            eth_amount: config.eth_amount,
+            maker_eth_address: format!("{}", config.eth_recipient_address),
+            maker_lez_account: hex::encode(lez_client.account_id().value()),
+            lez_timelock: config.lez_timelock,
+            eth_timelock: config.eth_timelock,
+            lez_htlc_program_id: hex::encode(&program_id_bytes),
+            eth_htlc_address: format!("{}", config.eth_htlc_address),
+        };
+
+        let messaging = MessagingClient::new(nwaku);
+        if let Err(e) = messaging.subscribe(&[OFFERS_TOPIC]).await {
+            return json_err(&format!("failed to subscribe: {e}"));
+        }
+        if let Err(e) = messaging.publish(OFFERS_TOPIC, &offer).await {
+            return json_err(&format!("failed to publish offer: {e}"));
+        }
+
+        let result = serde_json::json!({
+            "ok": true,
+            "hashlock": hex::encode(hashlock),
+            "preimage": hex::encode(preimage),
+        });
+        to_c_string(&result.to_string())
+    })
+}
+
+/// Fetch available swap offers from nwaku messaging. Returns JSON array of offers.
+///
+/// # Safety
+/// `nwaku_url` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_fetch_offers(
+    nwaku_url: *const c_char,
+) -> *mut c_char {
+    let nwaku = match unsafe { c_str_to_str(nwaku_url) } {
+        Some(s) => s,
+        None => return json_err("null or invalid nwaku_url"),
+    };
+
+    runtime().block_on(async {
+        let messaging = MessagingClient::new(nwaku);
+        if let Err(e) = messaging.subscribe(&[OFFERS_TOPIC]).await {
+            return json_err(&format!("failed to subscribe: {e}"));
+        }
+
+        let mut offers: Vec<serde_json::Value> = Vec::new();
+        let mut seen_hashlocks = std::collections::HashSet::new();
+
+        // Query store for last 30 minutes.
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64;
+        let now_ms = now_ns / 1_000_000;
+        let start_ns = now_ns - 30 * 60 * 1_000_000_000;
+
+        if let Ok(entries) = messaging.store_query(&[OFFERS_TOPIC], Some(start_ns), Some(50)).await {
+            for entry in &entries {
+                if let Some(ref msg) = entry.message {
+                    if let Ok(offer) = decode_waku_payload::<SwapOffer>(&msg.payload) {
+                        if seen_hashlocks.insert(offer.hashlock.clone()) {
+                            let ts_ms = msg.timestamp.map(|t| t / 1_000_000).unwrap_or(now_ms);
+                            let mut val = serde_json::to_value(&offer).unwrap();
+                            val.as_object_mut().unwrap().insert("timestamp_ms".to_string(), serde_json::json!(ts_ms));
+                            offers.push(val);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also poll relay cache.
+        let relay_offers: Vec<SwapOffer> = messaging.poll_messages(OFFERS_TOPIC).await.unwrap_or_default();
+        for offer in relay_offers {
+            if seen_hashlocks.insert(offer.hashlock.clone()) {
+                let mut val = serde_json::to_value(&offer).unwrap();
+                val.as_object_mut().unwrap().insert("timestamp_ms".to_string(), serde_json::json!(now_ms));
+                offers.push(val);
+            }
+        }
+
+        let result = serde_json::json!({ "offers": offers });
+        to_c_string(&result.to_string())
     })
 }
 

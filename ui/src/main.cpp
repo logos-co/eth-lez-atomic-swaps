@@ -4,12 +4,17 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QThreadPool>
 
 #include "swapbackend.h"
 
 int main(int argc, char *argv[])
 {
     qputenv("QT_QUICK_CONTROLS_STYLE", "Basic");
+
+    // Alloy/tungstenite WebSocket+TLS handshake needs deep stack.
+    // Default QtConcurrent pool threads get ~512K which overflows.
+    QThreadPool::globalInstance()->setStackSize(8 * 1024 * 1024);
 
     QGuiApplication app(argc, argv);
     app.setApplicationName("Atomic Swaps");

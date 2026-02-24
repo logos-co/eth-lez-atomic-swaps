@@ -3,6 +3,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::SwapConfig;
 use crate::error::{Result, SwapError};
+use crate::messaging::client::MessagingClient;
+use crate::messaging::types::{self, SwapOffer, OFFERS_TOPIC};
 use crate::swap::maker::run_maker;
 
 use super::{create_clients, output};
@@ -44,7 +46,48 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
         );
     } else {
         println!("Hashlock: {}", hex::encode(hashlock));
-        println!("Share this with the taker, then waiting for swap to complete...");
+    }
+
+    // If messaging is enabled, publish the offer before starting the swap.
+    // The taker discovers it and waits for the LEZ escrow to appear.
+    if let Some(nwaku_url) = &config.nwaku_url {
+        let messaging = MessagingClient::new(nwaku_url);
+        let swap_topic = types::swap_topic(&hashlock);
+        messaging.subscribe(&[OFFERS_TOPIC, &swap_topic]).await?;
+
+        let offer = SwapOffer {
+            hashlock: hex::encode(hashlock),
+            lez_amount: config.lez_amount,
+            eth_amount: config.eth_amount,
+            maker_eth_address: format!("{}", config.eth_recipient_address),
+            maker_lez_account: hex::encode(lez_client.account_id().value()),
+            lez_timelock: config.lez_timelock,
+            eth_timelock: config.eth_timelock,
+            lez_htlc_program_id: hex::encode(
+                config.lez_htlc_program_id.iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            ),
+            eth_htlc_address: format!("{}", config.eth_htlc_address),
+        };
+
+        messaging.publish(OFFERS_TOPIC, &offer).await?;
+
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "offer_published",
+                    "topic": OFFERS_TOPIC,
+                })
+            );
+        } else {
+            println!("Offer published to Logos Messaging. Waiting for swap...");
+        }
+    } else {
+        if !json {
+            println!("Share this with the taker, then waiting for swap to complete...");
+        }
     }
 
     let outcome =

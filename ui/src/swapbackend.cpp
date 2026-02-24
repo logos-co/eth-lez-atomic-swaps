@@ -27,11 +27,27 @@ SwapBackend::SwapBackend(QObject *parent)
         setResultJson(m_watcher.result());
         setRunning(false);
     });
+
+    connect(&m_publishWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
+        QString result = m_publishWatcher.result();
+        auto doc = QJsonDocument::fromJson(result.toUtf8());
+        auto obj = doc.object();
+        if (obj.contains("preimage")) {
+            m_publishedPreimage = obj["preimage"].toString();
+        }
+        emit offerPublished(result);
+    });
+
+    connect(&m_fetchWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
+        emit offersFetched(m_fetchWatcher.result());
+    });
 }
 
 SwapBackend::~SwapBackend()
 {
     m_watcher.waitForFinished();
+    m_publishWatcher.waitForFinished();
+    m_fetchWatcher.waitForFinished();
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +72,7 @@ SETTER(EthTimelockMinutes, m_ethTimelockMinutes, ethTimelockMinutesChanged)
 SETTER(EthRecipientAddress, m_ethRecipientAddress, ethRecipientAddressChanged)
 SETTER(LezTakerAccountId, m_lezTakerAccountId, lezTakerAccountIdChanged)
 SETTER(PollIntervalMs, m_pollIntervalMs, pollIntervalMsChanged)
+SETTER(NwakuUrl, m_nwakuUrl, nwakuUrlChanged)
 
 #undef SETTER
 
@@ -121,6 +138,8 @@ QByteArray SwapBackend::configJson() const
     obj["eth_recipient_address"] = m_ethRecipientAddress;
     obj["lez_taker_account_id"] = m_lezTakerAccountId;
     obj["poll_interval_ms"] = m_pollIntervalMs;
+    if (!m_nwakuUrl.isEmpty())
+        obj["nwaku_url"] = m_nwakuUrl;
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -139,6 +158,8 @@ void SwapBackend::loadEnv()
         return val ? QString::fromUtf8(val) : fallback;
     };
 
+    m_swapRole = env("SWAP_ROLE").toLower();
+
     setEthRpcUrl(env("ETH_RPC_URL"));
     setEthPrivateKey(env("ETH_PRIVATE_KEY"));
     setEthHtlcAddress(env("ETH_HTLC_ADDRESS"));
@@ -152,6 +173,7 @@ void SwapBackend::loadEnv()
     setEthRecipientAddress(env("ETH_RECIPIENT_ADDRESS"));
     setLezTakerAccountId(env("LEZ_TAKER_ACCOUNT_ID"));
     setPollIntervalMs(env("POLL_INTERVAL_MS", "2000"));
+    setNwakuUrl(env("NWAKU_URL"));
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +202,7 @@ void SwapBackend::handleProgress(const QString &json)
 // Swap operations
 // ---------------------------------------------------------------------------
 
-void SwapBackend::startMaker()
+void SwapBackend::startMaker(const QString &preimageHex)
 {
     if (m_running)
         return;
@@ -188,10 +210,13 @@ void SwapBackend::startMaker()
     clearProgress();
 
     QByteArray cfg = configJson();
+    QByteArray preimage = preimageHex.toUtf8();
 
-    auto future = QtConcurrent::run([cfg, this]() -> QString {
+    auto future = QtConcurrent::run([cfg, preimage, this]() -> QString {
+        const char *preimagePtr = preimage.isEmpty() ? nullptr : preimage.constData();
         auto *result = swap_ffi_run_maker(
             cfg.constData(),
+            preimagePtr,
             progressCallbackTrampoline,
             this);
         return ffiToQString(result);
@@ -220,6 +245,37 @@ void SwapBackend::startTaker(const QString &hashlockHex)
     });
 
     m_watcher.setFuture(future);
+}
+
+void SwapBackend::publishOffer()
+{
+    if (m_nwakuUrl.isEmpty())
+        return;
+
+    QByteArray cfg = configJson();
+    QByteArray nwaku = m_nwakuUrl.toUtf8();
+
+    auto future = QtConcurrent::run([cfg, nwaku]() -> QString {
+        auto *result = swap_ffi_publish_offer(cfg.constData(), nwaku.constData());
+        return ffiToQString(result);
+    });
+
+    m_publishWatcher.setFuture(future);
+}
+
+void SwapBackend::fetchOffers()
+{
+    if (m_nwakuUrl.isEmpty())
+        return;
+
+    QByteArray nwaku = m_nwakuUrl.toUtf8();
+
+    auto future = QtConcurrent::run([nwaku]() -> QString {
+        auto *result = swap_ffi_fetch_offers(nwaku.constData());
+        return ffiToQString(result);
+    });
+
+    m_fetchWatcher.setFuture(future);
 }
 
 void SwapBackend::refundLez(const QString &hashlockHex)

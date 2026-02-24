@@ -5,4 +5,5 @@ pub mod demo;
 pub mod error;
 pub mod eth;
 pub mod lez;
+pub mod messaging;
 pub mod swap;

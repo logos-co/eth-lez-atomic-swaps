@@ -1,0 +1,83 @@
+services:
+  nwaku1:
+    image: harbor.status.im/wakuorg/nwaku:v0.37.0-beta
+    ports:
+      - "127.0.0.1:8645:8645"
+    entrypoint: /usr/bin/wakunode
+    command:
+      - --relay=true
+      - --store=true
+      - --store-message-db-url=sqlite:///data/store.db
+      - --store-message-retention-policy=size:50MB
+      - --rest=true
+      - --rest-admin=true
+      - --rest-address=0.0.0.0
+      - --rest-port=8645
+      - --rest-relay-cache-capacity=100
+      - --cluster-id=0
+      - --log-level=INFO
+      - --keep-alive=true
+      - --listen-address=0.0.0.0
+      - --tcp-port=60000
+    volumes:
+      - nwaku1-data:/data
+
+  nwaku2:
+    image: harbor.status.im/wakuorg/nwaku:v0.37.0-beta
+    entrypoint: /usr/bin/wakunode
+    command:
+      - --relay=true
+      - --rest=true
+      - --rest-admin=true
+      - --rest-address=0.0.0.0
+      - --rest-port=8645
+      - --rest-relay-cache-capacity=100
+      - --cluster-id=0
+      - --log-level=INFO
+      - --keep-alive=true
+      - --listen-address=0.0.0.0
+      - --tcp-port=60000
+    volumes:
+      - nwaku2-data:/data
+
+  # Init sidecar: peers the two nodes and pre-subscribes to the offers topic.
+  # Runs once then exits.
+  nwaku-init:
+    image: curlimages/curl:latest
+    depends_on:
+      - nwaku1
+      - nwaku2
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for nwaku nodes..."
+        until curl -sf http://nwaku1:8645/debug/v1/info > /dev/null 2>&1; do sleep 2; done
+        until curl -sf http://nwaku2:8645/debug/v1/info > /dev/null 2>&1; do sleep 2; done
+        echo "Both nodes up"
+
+        # Get nwaku1's multiaddr and rewrite 0.0.0.0 to docker DNS name
+        MULTIADDR=$$(curl -sf http://nwaku1:8645/debug/v1/info | \
+          tr '[]",' '\n' | grep '^/ip4/' | head -1 | \
+          sed 's|/ip4/[^/]*/|/dns4/nwaku1/|')
+        echo "nwaku1 multiaddr: $$MULTIADDR"
+
+        # Connect nwaku2 to nwaku1 via admin API
+        curl -sf -X POST http://nwaku2:8645/admin/v1/peers \
+          -H 'Content-Type: application/json' \
+          -d "[\"$$MULTIADDR\"]"
+        echo "Peered nwaku2 -> nwaku1"
+
+        # Let gossipsub form the mesh
+        sleep 2
+
+        # Pre-subscribe both nodes to the offers content topic
+        TOPICS='["/atomic-swaps/1/offers/json"]'
+        curl -sf -X POST http://nwaku1:8645/relay/v1/auto/subscriptions \
+          -H 'Content-Type: application/json' -d "$$TOPICS"
+        curl -sf -X POST http://nwaku2:8645/relay/v1/auto/subscriptions \
+          -H 'Content-Type: application/json' -d "$$TOPICS"
+        echo "Subscribed both nodes — mesh ready"
+
+volumes:
+  nwaku1-data:
+  nwaku2-data:

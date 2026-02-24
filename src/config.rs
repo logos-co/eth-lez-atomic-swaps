@@ -32,6 +32,10 @@ pub struct SwapConfig {
 
     // --- Polling ---
     pub poll_interval: Duration,
+
+    // --- Messaging ---
+    /// Nwaku REST API URL. None = messaging disabled, out-of-band coordination.
+    pub nwaku_url: Option<String>,
 }
 
 pub fn parse_account_id(hex_str: &str) -> Result<AccountId> {

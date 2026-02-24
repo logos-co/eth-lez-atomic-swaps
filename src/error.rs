@@ -38,6 +38,10 @@ pub enum SwapError {
 
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+
+    // --- Messaging ---
+    #[error("messaging error: {0}")]
+    Messaging(String),
 }
 
 pub type Result<T> = std::result::Result<T, SwapError>;

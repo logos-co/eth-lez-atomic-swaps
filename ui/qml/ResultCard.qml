@@ -53,6 +53,7 @@ Rectangle {
         // Completed details
         Repeater {
             model: card.isCompleted ? [
+                { label: "Hashlock", value: card.parsed.hashlock || "" },
                 { label: "Preimage", value: card.parsed.preimage || "" },
                 { label: "ETH Tx", value: card.parsed.eth_tx || "" },
                 { label: "LEZ Tx", value: card.parsed.lez_tx || "" },
@@ -73,7 +74,7 @@ Rectangle {
                     text: modelData.value
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSmall
-                    font.family: "monospace"
+                    font.family: "Menlo, Courier New"
                     elide: Text.ElideMiddle
                     Layout.fillWidth: true
                 }
@@ -102,7 +103,7 @@ Rectangle {
                     text: modelData.value
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSmall
-                    font.family: "monospace"
+                    font.family: "Menlo, Courier New"
                     elide: Text.ElideMiddle
                     Layout.fillWidth: true
                 }

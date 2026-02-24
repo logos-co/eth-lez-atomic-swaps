@@ -35,6 +35,7 @@ pub type SetupProgressFn = Box<dyn Fn(usize, &str, &str) + Send>;
 ///
 /// All services are started in-process and cleaned up on drop.
 pub struct DemoEnv {
+    pub anvil_stdout: Option<std::process::ChildStdout>,
     _anvil: AnvilInstance,
     _seq_handle: sequencer_runner::SequencerHandle,
     _temp_dir: tempfile::TempDir,
@@ -43,6 +44,8 @@ pub struct DemoEnv {
     pub taker_config: SwapConfig,
     pub hashlock: [u8; 32],
     pub preimage: [u8; 32],
+    pub taker_eth_private_key: String,
+    pub taker_lez_signing_key: String,
 }
 
 fn lez_key(seed: u8) -> (PrivateKey, AccountId) {
@@ -76,11 +79,13 @@ impl DemoEnv {
 
         // 1. Start Anvil.
         report(1, "Starting Anvil", "");
-        let anvil = alloy::node_bindings::Anvil::new()
+        let mut anvil = alloy::node_bindings::Anvil::new()
             .block_time(1)
+            .keep_stdout()
             .try_spawn()
             .unwrap();
         let anvil_ws = anvil.ws_endpoint();
+        let anvil_stdout = anvil.child_mut().stdout.take();
         report(1, "Starting Anvil", &anvil_ws);
 
         // 2. Deploy EthHTLC contract.
@@ -170,6 +175,7 @@ impl DemoEnv {
             eth_recipient_address: maker_eth_addr,
             lez_taker_account_id: taker_lez_id,
             poll_interval: Duration::from_millis(500),
+            nwaku_url: None,
         };
 
         let taker_config = SwapConfig {
@@ -186,9 +192,14 @@ impl DemoEnv {
             eth_recipient_address: maker_eth_addr,
             lez_taker_account_id: taker_lez_id,
             poll_interval: Duration::from_millis(500),
+            nwaku_url: None,
         };
 
+        let taker_eth_private_key = hex::encode(anvil.keys()[1].to_bytes());
+        let taker_lez_signing_key = hex::encode(taker_lez_key.value());
+
         Self {
+            anvil_stdout,
             _anvil: anvil,
             _seq_handle: seq_handle,
             _temp_dir: temp_dir,
@@ -197,6 +208,8 @@ impl DemoEnv {
             taker_config,
             hashlock,
             preimage,
+            taker_eth_private_key,
+            taker_lez_signing_key,
         }
     }
 }
