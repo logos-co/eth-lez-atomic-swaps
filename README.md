@@ -15,9 +15,21 @@ Maker                                          Taker
 
 ### Prerequisites
 
-[Rust](https://rustup.rs/) · [Foundry](https://getfoundry.sh/) · [Docker](https://docs.docker.com/get-docker/) · [Qt6](https://doc.qt.io/qt-6/get-and-install-qt.html) (6.5+, Quick) · [CMake](https://cmake.org/) (3.21+)
+**macOS**
+```bash
+brew install qt@6 cmake
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+```
+Also install [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/).
 
-macOS: `brew install qt@6 cmake`, install [Rust](https://rustup.rs/), [Foundry](https://getfoundry.sh/), and [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/)
+**Linux (Ubuntu/Debian)**
+```bash
+sudo apt install cmake qt6-base-dev qt6-declarative-dev docker.io docker-compose-plugin
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+```
+Qt 6.5+ required — Ubuntu 24.10+ ships it. For older distros, install Qt via [aqtinstall](https://github.com/miurahr/aqtinstall) or the [Qt online installer](https://www.qt.io/download-qt-installer).
 
 ### Run
 
