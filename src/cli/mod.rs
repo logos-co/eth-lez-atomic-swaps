@@ -171,6 +171,9 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Default tracing for non-infra/demo subcommands (infra/demo set up their own).
+    tracing_subscriber::fmt::init();
+
     // Check for --env-file before full parse so dotenvy loads first.
     // This ensures env vars are available when clap reads `env = "..."` fallbacks.
     let env_file = std::env::args()

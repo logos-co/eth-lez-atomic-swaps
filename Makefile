@@ -1,4 +1,5 @@
-.PHONY: build run run-maker run-taker clean configure contracts demo infra nwaku nwaku-stop
+.PHONY: build run run-maker run-taker clean configure contracts demo infra nwaku nwaku-stop \
+       logos-module-configure logos-module-build logos-module-plugin logos-module-run
 
 UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
 
@@ -33,3 +34,19 @@ nwaku:
 
 nwaku-stop:
 	docker compose down
+
+# --- Logos Core module ---
+LOGOS_BIN = logos-module/build/lez_atomic_swap_module.app/Contents/MacOS/lez_atomic_swap_module
+
+logos-module-configure:
+	cmake -B logos-module/build -S logos-module -DCMAKE_BUILD_TYPE=Debug
+
+logos-module-build: logos-module-configure
+	cmake --build logos-module/build
+
+logos-module-plugin:
+	cmake -B logos-module/build -S logos-module -DBUILD_PLUGIN=ON -DCMAKE_BUILD_TYPE=Debug
+	cmake --build logos-module/build
+
+logos-module-run: logos-module-build
+	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_BIN) &
