@@ -1,3 +1,5 @@
+#[cfg(feature = "demo")]
+mod demo;
 mod maker;
 mod output;
 mod refund;
@@ -134,6 +136,9 @@ enum Commands {
     Refund(refund::RefundArgs),
     /// Inspect escrow/HTLC state on-chain
     Status(status::StatusArgs),
+    /// Run a full demo: start local chains, deploy contracts, run both sides
+    #[cfg(feature = "demo")]
+    Demo,
 }
 
 async fn create_clients(config: &SwapConfig) -> Result<(EthClient, LezClient)> {
@@ -143,6 +148,16 @@ async fn create_clients(config: &SwapConfig) -> Result<(EthClient, LezClient)> {
 }
 
 pub async fn run() -> Result<()> {
+    // Short-circuit: the demo subcommand generates all config internally —
+    // skip .env loading and ConfigArgs parsing entirely.
+    #[cfg(feature = "demo")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "demo") {
+            return demo::cmd_demo().await;
+        }
+    }
+
     // Check for --env-file before full parse so dotenvy loads first.
     // This ensures env vars are available when clap reads `env = "..."` fallbacks.
     let env_file = std::env::args()
@@ -166,5 +181,7 @@ pub async fn run() -> Result<()> {
         Commands::Taker(args) => taker::cmd_taker(args, &config, cli.json).await,
         Commands::Refund(args) => refund::cmd_refund(args, &config, cli.json).await,
         Commands::Status(args) => status::cmd_status(args, &config, cli.json).await,
+        #[cfg(feature = "demo")]
+        Commands::Demo => unreachable!("handled above"),
     }
 }
