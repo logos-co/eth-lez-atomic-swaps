@@ -64,7 +64,6 @@ impl TestEnv {
             lez_signing_key: hex::encode(key.value()),
             lez_sequencer_url: self.sequencer_url.clone(),
             lez_htlc_program_id: self.program_id,
-            lez_account_id: AccountId::new([0; 32]),
             lez_taker_account_id: counterparty_lez,
             // Unused by LezClient::new:
             eth_rpc_url: String::new(),

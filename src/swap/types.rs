@@ -1,6 +1,7 @@
 use alloy::primitives::FixedBytes;
 
 /// Outcome of a swap orchestration flow.
+#[derive(Debug)]
 pub enum SwapOutcome {
     Completed {
         preimage: [u8; 32],

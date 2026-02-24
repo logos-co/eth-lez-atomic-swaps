@@ -1,7 +1,8 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use alloy::primitives::Address;
-use nssa_core::{account::AccountId, program::ProgramId};
+use nssa_core::program::ProgramId;
+use nssa_core::account::AccountId;
 
 use crate::error::{SwapError, Result};
 
@@ -15,7 +16,6 @@ pub struct SwapConfig {
     // --- LEZ ---
     pub lez_sequencer_url: String,
     pub lez_signing_key: String,
-    pub lez_account_id: AccountId,
     pub lez_htlc_program_id: ProgramId,
 
     // --- Swap parameters ---
@@ -34,11 +34,8 @@ pub struct SwapConfig {
     pub poll_interval: Duration,
 }
 
-fn required_env(name: &str) -> Result<String> {
-    env::var(name).map_err(|_| SwapError::MissingEnvVar(name.to_string()))
-}
-
-fn parse_account_id(hex_str: &str) -> Result<AccountId> {
+pub fn parse_account_id(hex_str: &str) -> Result<AccountId> {
+    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(hex_str)
         .map_err(|e| SwapError::InvalidConfig(format!("invalid account ID hex: {e}")))?;
     let arr: [u8; 32] = bytes
@@ -47,7 +44,8 @@ fn parse_account_id(hex_str: &str) -> Result<AccountId> {
     Ok(AccountId::new(arr))
 }
 
-fn parse_program_id(hex_str: &str) -> Result<ProgramId> {
+pub fn parse_program_id(hex_str: &str) -> Result<ProgramId> {
+    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(hex_str)
         .map_err(|e| SwapError::InvalidConfig(format!("invalid program ID hex: {e}")))?;
     if bytes.len() != 32 {
@@ -58,59 +56,4 @@ fn parse_program_id(hex_str: &str) -> Result<ProgramId> {
         id[i] = u32::from_le_bytes(chunk.try_into().unwrap());
     }
     Ok(id)
-}
-
-impl SwapConfig {
-    pub fn from_env() -> Result<Self> {
-        dotenvy::dotenv().ok();
-        let eth_htlc_address: Address = required_env("ETH_HTLC_ADDRESS")?
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid ETH_HTLC_ADDRESS: {e}")))?;
-
-        let eth_recipient_address: Address = required_env("ETH_RECIPIENT_ADDRESS")?
-            .parse()
-            .map_err(|e| {
-                SwapError::InvalidConfig(format!("invalid ETH_RECIPIENT_ADDRESS: {e}"))
-            })?;
-
-        let lez_account_id = parse_account_id(&required_env("LEZ_ACCOUNT_ID")?)?;
-        let lez_htlc_program_id = parse_program_id(&required_env("LEZ_HTLC_PROGRAM_ID")?)?;
-        let lez_taker_account_id =
-            parse_account_id(&required_env("LEZ_TAKER_ACCOUNT_ID")?)?;
-
-        let lez_amount: u128 = required_env("LEZ_AMOUNT")?
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid LEZ_AMOUNT: {e}")))?;
-        let eth_amount: u128 = required_env("ETH_AMOUNT")?
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid ETH_AMOUNT: {e}")))?;
-        let lez_timelock: u64 = required_env("LEZ_TIMELOCK")?
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid LEZ_TIMELOCK: {e}")))?;
-        let eth_timelock: u64 = required_env("ETH_TIMELOCK")?
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid ETH_TIMELOCK: {e}")))?;
-
-        let poll_interval_ms: u64 = env::var("POLL_INTERVAL_MS")
-            .unwrap_or_else(|_| "2000".into())
-            .parse()
-            .map_err(|e| SwapError::InvalidConfig(format!("invalid POLL_INTERVAL_MS: {e}")))?;
-
-        Ok(Self {
-            eth_rpc_url: required_env("ETH_RPC_URL")?,
-            eth_private_key: required_env("ETH_PRIVATE_KEY")?,
-            eth_htlc_address,
-            lez_sequencer_url: required_env("LEZ_SEQUENCER_URL")?,
-            lez_signing_key: required_env("LEZ_SIGNING_KEY")?,
-            lez_account_id,
-            lez_htlc_program_id,
-            lez_amount,
-            eth_amount,
-            lez_timelock,
-            eth_timelock,
-            eth_recipient_address,
-            lez_taker_account_id,
-            poll_interval: Duration::from_millis(poll_interval_ms),
-        })
-    }
 }

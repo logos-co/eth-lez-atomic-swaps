@@ -3,6 +3,10 @@ name = "swap-orchestrator"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "swap-cli"
+path = "src/bin/cli.rs"
+
 [dependencies]
 # Ethereum
 alloy = { version = "1", features = [
@@ -17,9 +21,9 @@ alloy = { version = "1", features = [
 futures-util = "0.3"
 
 # LEZ
-nssa = { path = "../lssa/nssa" }
-nssa_core = { path = "../lssa/nssa/core", features = ["host"] }
-common = { path = "../lssa/common" }
+nssa = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5", features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
 # LEZ HTLC types (HTLCInstruction, HTLCEscrow, HTLCState)
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 
@@ -35,6 +39,10 @@ thiserror = "2"
 
 # Logging
 tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
 
 # Environment
 dotenvy = "0.15"
@@ -62,8 +70,8 @@ alloy = { version = "1", features = [
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
 
 # LEZ test sequencer
-sequencer_runner = { path = "../lssa/sequencer_runner" }
-sequencer_core = { path = "../lssa/sequencer_core", features = ["testnet"] }
+sequencer_runner = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5" }
+sequencer_core = { git = "https://github.com/logos-blockchain/lssa", rev = "6ca020d5", features = ["testnet"] }
 lez_htlc_methods = { path = "programs/lez-htlc/methods" }
 tempfile = "3"
 jsonrpsee = { version = "0.26", features = ["server"] }

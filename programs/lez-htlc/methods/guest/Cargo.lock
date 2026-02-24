@@ -1576,6 +1576,7 @@ checksum = "a5b0c77c1b780822bc749a33e39aeb2c07584ab93332303babeabb645298a76e"
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
 dependencies = [
  "borsh",
  "bytemuck",
