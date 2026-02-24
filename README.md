@@ -13,50 +13,32 @@ Maker                                          Taker
 
 ## Quick Start
 
-### Prerequisites
+**Prerequisites:** Rust 1.85+, Foundry, CMake 3.21+, Qt 6.5+, Docker.
 
-- **Rust 1.85+** (edition 2024) — `rustup update stable` if you already have Rust
-- **Foundry** (forge, anvil)
-- **CMake 3.21+**
-- **Qt 6.5+** (Quick, QuickControls2, Concurrent)
-- **Docker** (for nwaku messaging nodes)
+<details><summary>macOS</summary>
 
-**macOS**
 ```bash
 brew install qt@6 cmake
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
-Also install [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/).
+Also install [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/). If CMake can't find Qt6: `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`
+</details>
 
-> Homebrew Qt6 is keg-only. If CMake can't find Qt6, set:
-> `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`
+<details><summary>Linux (Ubuntu/Debian)</summary>
 
-**Linux (Ubuntu/Debian)**
 ```bash
 sudo apt install cmake qt6-base-dev qt6-declarative-dev docker.io docker-compose-plugin
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
-Qt 6.5+ required — Ubuntu 24.10+ ships it. For older distros, install Qt via [aqtinstall](https://github.com/miurahr/aqtinstall) or the [Qt online installer](https://www.qt.io/download-qt-installer).
-
-### Clone
+Qt 6.5+ required — Ubuntu 24.10+ ships it. For older distros use [aqtinstall](https://github.com/miurahr/aqtinstall) or the [Qt online installer](https://www.qt.io/download-qt-installer).
+</details>
 
 ```bash
 git clone --recurse-submodules https://github.com/logos-co/eth-lez-atomic-swaps.git
 cd eth-lez-atomic-swaps
-```
 
-If you already cloned without `--recurse-submodules`:
-```bash
-git submodule update --init --recursive
-```
-
-### Run
-
-Make sure Docker is running, then:
-
-```bash
 make configure            # build Rust FFI bridge + cmake configure (first time only)
 make infra                # start nwaku + Anvil + LEZ sequencer, deploy contracts, write .env files
 # in new terminals:
@@ -64,12 +46,14 @@ make run-maker            # open maker UI
 make run-taker            # open taker UI
 ```
 
-`make infra` spins up local Anvil and LEZ sequencer instances and writes `.env` / `.env.taker` files automatically — no manual configuration needed.
+`make infra` starts local Anvil and LEZ sequencer instances and writes `.env` / `.env.taker` automatically — no manual config needed. Make sure Docker is running before you start.
 
 **Maker**: Publish Offer → Start Swap → wait for taker.
 **Taker**: Discover Offers → select offer → Start Taker → swap completes.
 
 Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
+
+> Already cloned without `--recurse-submodules`? Run `git submodule update --init --recursive`.
 
 ## Architecture
 
@@ -102,17 +86,13 @@ Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
 
 | Command | Description |
 |---|---|
+| `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle (auto-builds `swap-ffi`) |
 | `make infra` | Start all services, deploy contracts, write `.env` files |
 | `make run-maker` / `make run-taker` | Launch UI with maker/taker config |
 | `make demo` | Automated CLI demo (no UI needed) |
-| `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle (auto-builds `swap-ffi`) |
-| `make logos-module-build` | Build Logos Core module (standalone mode) |
-| `make logos-module-plugin` | Build Logos Core module (plugin mode) |
-| `make logos-module-run` | Build + run Logos Core module as maker |
 | `make contracts` | Build Solidity contracts |
-| `make nwaku` / `make nwaku-stop` | Start/stop nwaku Docker container |
-| `cargo build --features demo` | CLI with demo/infra commands |
-| `cd swap-ffi && cargo build` | FFI bridge (cdylib for Qt6 UI) |
+| `make nwaku` / `make nwaku-stop` | Start/stop nwaku Docker containers |
+| `make logos-module-build` / `logos-module-run` | Build / run Logos Core module (standalone) |
 | `cargo test` | Run all tests |
 
 **CLI** (config via `.env` or CLI flags — see `.env.example`):
@@ -131,15 +111,3 @@ swap-cli status --hashlock <hex>        # inspect escrow state
 - **LEZ timelock is off-chain** — LSSA programs lack timestamp access; orchestration checks wall-clock time
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Messaging is optional** — works without nwaku via manual hashlock exchange
-- **8MB thread stack** — alloy/tungstenite TLS handshake overflows the default 512K QtConcurrent stack
-- **Logos Core module** — `logos-module/` packages the same swap UI as a Logos Core plugin (`-DBUILD_PLUGIN=ON`) or standalone app; uses Logos Design System theme, dedicated `QThreadPool`, and `loadConfig()` for host config injection
-
-## Status
-
-- [x] Ethereum HTLC smart contract
-- [x] LEZ HTLC program (Risc0 zkVM)
-- [x] Swap orchestration library + CLI
-- [x] E2E tests (happy path, timeouts, rejections)
-- [x] Qt6 UI with messaging (offer discovery via nwaku)
-- [x] One-command infra (`make infra`) and demo (`make demo`)
-- [x] Logos Core module (standalone + plugin mode)
