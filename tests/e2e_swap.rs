@@ -221,14 +221,14 @@ async fn test_atomic_swap_happy_path() {
     let maker_handle = tokio::spawn(async move {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(preimage)).await
+        maker::run_maker(&maker_config, &eth, &lez, Some(preimage), None).await
     });
     tokio::time::sleep(Duration::from_secs(10)).await;
 
     let taker_handle = tokio::spawn(async move {
         let eth = EthClient::new(&taker_config).await.unwrap();
         let lez = LezClient::new(&taker_config).unwrap();
-        taker::run_taker(&taker_config, &eth, &lez, hashlock).await
+        taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await
     });
 
     let (maker_result, taker_result) = tokio::join!(maker_handle, taker_handle);
@@ -283,7 +283,7 @@ async fn test_maker_refunds_on_timeout() {
     let outcome = {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(preimage)).await.unwrap()
+        maker::run_maker(&maker_config, &eth, &lez, Some(preimage), None).await.unwrap()
     };
 
     assert!(
@@ -356,7 +356,7 @@ async fn test_taker_refunds_on_timeout() {
     let outcome = {
         let eth = EthClient::new(&taker_config).await.unwrap();
         let lez = LezClient::new(&taker_config).unwrap();
-        taker::run_taker(&taker_config, &eth, &lez, hashlock).await.unwrap()
+        taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await.unwrap()
     };
 
     assert!(
@@ -381,7 +381,7 @@ async fn test_taker_rejects_missing_escrow() {
 
     let eth = EthClient::new(&taker_config).await.unwrap();
     let lez = LezClient::new(&taker_config).unwrap();
-    let result = taker::run_taker(&taker_config, &eth, &lez, hashlock).await;
+    let result = taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await;
 
     assert!(result.is_err(), "taker should reject missing escrow");
     let err = result.unwrap_err();
@@ -413,7 +413,7 @@ async fn test_taker_rejects_insufficient_escrow_amount() {
 
     let eth = EthClient::new(&taker_config).await.unwrap();
     let lez = LezClient::new(&taker_config).unwrap();
-    let result = taker::run_taker(&taker_config, &eth, &lez, hashlock).await;
+    let result = taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await;
 
     assert!(result.is_err(), "taker should reject insufficient amount");
     let err = result.unwrap_err();

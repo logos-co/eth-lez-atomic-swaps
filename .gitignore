@@ -1,5 +1,6 @@
 .claude
 target/
+build/
 
 plan.md
 furps.md

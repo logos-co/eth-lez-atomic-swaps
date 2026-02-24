@@ -18,7 +18,7 @@ pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Resu
 
     let hashlock = parse_bytes32(&args.hashlock, "hashlock")?;
 
-    let outcome = run_taker(config, &eth_client, &lez_client, hashlock).await?;
+    let outcome = run_taker(config, &eth_client, &lez_client, hashlock, None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())

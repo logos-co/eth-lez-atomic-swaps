@@ -1,0 +1,13 @@
+language = "C"
+include_guard = "SWAP_FFI_H"
+tab_width = 4
+
+[parse]
+parse_deps = false
+
+[fn]
+# Expose all pub extern "C" functions
+prefix = ""
+
+[export]
+include = ["ProgressCallback"]
