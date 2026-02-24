@@ -75,6 +75,7 @@ fn execute_claim(
     preimage: &[u8],
 ) -> Vec<AccountPostState> {
     assert!(pre_states.len() == 2, "claim requires 2 accounts: [taker, escrow]");
+    assert!(preimage.len() == 32, "preimage must be exactly 32 bytes");
     let taker = &pre_states[0];
     let escrow_pda = &pre_states[1];
 
@@ -164,7 +165,7 @@ mod tests {
     use risc0_zkvm::sha::{Impl, Sha256};
 
     const AMOUNT: u128 = 1_000;
-    const SECRET: &[u8] = b"supersecretpreimage";
+    const SECRET: &[u8; 32] = b"supersecretpreimage_padding_0123";
     const PROGRAM_ID: [u32; 8] = [5; 8];
 
     fn maker_id() -> AccountId {
@@ -354,7 +355,14 @@ mod tests {
     #[should_panic(expected = "invalid preimage")]
     fn test_claim_wrong_preimage() {
         let pre = claim_pre_states();
-        execute_claim(&pre, b"wrongsecret");
+        execute_claim(&pre, b"wrong_secret_preimage_padding_01");
+    }
+
+    #[test]
+    #[should_panic(expected = "preimage must be exactly 32 bytes")]
+    fn test_claim_wrong_preimage_length() {
+        let pre = claim_pre_states();
+        execute_claim(&pre, b"too_short");
     }
 
     #[test]
