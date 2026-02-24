@@ -28,17 +28,18 @@ Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│     Qt6 UI / swap-cli (bin)     │
-├─────────────────────────────────┤
-│    swap-ffi (C bridge / cdylib) │
-├─────────────────────────────────┤
-│   Swap orchestration library    │
-├─────────────────────────────────┤
-│  Chain monitoring + Messaging   │
-├──────────────┬──────────────────┤
-│  alloy (ETH) │  nssa_core (LEZ) │
-└──────────────┴──────────────────┘
+┌──────────────────┬──────────────────┐
+│  Qt6 UI (ui/)    │ Logos Core module │
+│  standalone app  │ (logos-module/)   │
+├──────────────────┴──────────────────┤
+│       swap-ffi (C bridge / cdylib)  │
+├─────────────────────────────────────┤
+│      Swap orchestration library     │
+├─────────────────────────────────────┤
+│     Chain monitoring + Messaging    │
+├─────────────────┬───────────────────┤
+│   alloy (ETH)   │   nssa_core (LEZ) │
+└─────────────────┴───────────────────┘
 ```
 
 | Directory | Description |
@@ -48,7 +49,8 @@ Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
 | `src/` | Orchestration library — ETH/LEZ clients, watchers, maker/taker/refund flows |
 | `src/messaging/` | Waku messaging client for offer discovery (nwaku REST API) |
 | `swap-ffi/` | C FFI bridge exposing swap functions to the Qt6 UI |
-| `ui/` | Qt6/QML app — Config, Maker, Taker, Refund tabs |
+| `ui/` | Qt6/QML standalone app — Config, Maker, Taker, Refund tabs |
+| `logos-module/` | Logos Core module — same UI as embeddable plugin or standalone app |
 
 ## Commands
 
@@ -57,7 +59,10 @@ Stop with Ctrl-C on `make infra`, then `make nwaku-stop` to clean up Docker.
 | `make infra` | Start all services, deploy contracts, write `.env` files |
 | `make run-maker` / `make run-taker` | Launch UI with maker/taker config |
 | `make demo` | Automated CLI demo (no UI needed) |
-| `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle |
+| `make configure` / `make build` / `make clean` | Qt6 UI build lifecycle (`ui/`) |
+| `make logos-module-build` | Build Logos Core module (standalone mode) |
+| `make logos-module-plugin` | Build Logos Core module (plugin mode) |
+| `make logos-module-run` | Build + run Logos Core module as maker |
 | `make contracts` | Build Solidity contracts |
 | `make nwaku` / `make nwaku-stop` | Start/stop nwaku Docker container |
 | `cargo build --features demo` | CLI with demo/infra commands |
@@ -81,7 +86,7 @@ swap-cli status --hashlock <hex>        # inspect escrow state
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Messaging is optional** — works without nwaku via manual hashlock exchange
 - **8MB thread stack** — alloy/tungstenite TLS handshake overflows the default 512K QtConcurrent stack
-- **Not a Logos Core app** — the UI calls LEZ/ETH directly via FFI, not through the [Logos Core module system](https://ecosystem.logos.co/engineering/application_essentials/logos_core_devex#standalone-app); converting would require liblogos SDKs, a swap Logos module, and an Ethereum module (which doesn't exist yet)
+- **Logos Core module** — `logos-module/` packages the same swap UI as a Logos Core plugin (`-DBUILD_PLUGIN=ON`) or standalone app; uses Logos Design System theme, dedicated `QThreadPool`, and `loadConfig()` for host config injection
 
 ## Status
 
@@ -91,4 +96,4 @@ swap-cli status --hashlock <hex>        # inspect escrow state
 - [x] E2E tests (happy path, timeouts, rejections)
 - [x] Qt6 UI with messaging (offer discovery via nwaku)
 - [x] One-command infra (`make infra`) and demo (`make demo`)
-- [ ] Logos Core standalone app
+- [x] Logos Core module (standalone + plugin mode)
