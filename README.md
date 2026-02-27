@@ -42,17 +42,25 @@ cd eth-lez-atomic-swaps
 
 > Already cloned without `--recurse-submodules`? Run `git submodule update --init --recursive`.
 
-Make sure Docker is running, then:
+Make sure Docker is running, then start local services (Anvil, LEZ sequencer, nwaku), deploy contracts, and write `.env` files:
 
 ```bash
-make configure            # build Rust FFI bridge + cmake configure (first time only)
-make infra                # start nwaku + Anvil + LEZ sequencer, deploy contracts, write .env files
-# in new terminals:
-make run-maker            # open maker UI
-make run-taker            # open taker UI
+make infra                # keep running — Ctrl-C to stop
 ```
 
-`make infra` starts local Anvil and LEZ sequencer instances and writes `.env` / `.env.taker` automatically — no manual config needed.
+Then open a new terminal and pick an interface:
+
+**Standalone UI**
+```bash
+make configure            # first time only — builds FFI bridge + cmake configure
+make run-maker            # open maker UI (new terminal: make run-taker)
+```
+
+**logos-app plugin**
+```bash
+make plugin-build         # builds FFI bridge + IComponent plugin
+make plugin-run           # launch logos-app with the swap plugin loaded
+```
 
 **Maker**: Publish Offer → Start Swap → wait for taker.
 **Taker**: Discover Offers → select offer → Start Taker → swap completes.
@@ -83,7 +91,9 @@ Stop with `Ctrl-C` on `make infra`, then `make nwaku-stop` to clean up Docker.
 | `src/` | Orchestration library — ETH/LEZ clients, watchers, messaging, maker/taker/refund flows |
 | `swap-ffi/` | C FFI bridge exposing swap functions to the Qt6 UI |
 | `ui/` | Qt6/QML standalone app — Config, Maker, Taker, Refund tabs |
-| `logos-module/` | Logos Core module — same UI as embeddable plugin or standalone app |
+| `logos-module/` | Logos Core / logos-app plugin — same UI as embeddable plugin (two modes) or standalone app |
+| `tests/` | Integration tests |
+| `scripts/` | Local setup scripts (Anvil, contract deploy, `.env` generation) |
 
 ## Commands
 
@@ -96,6 +106,7 @@ Stop with `Ctrl-C` on `make infra`, then `make nwaku-stop` to clean up Docker.
 | `make contracts` | Build Solidity contracts |
 | `make nwaku` / `nwaku-stop` | Start/stop nwaku Docker containers |
 | `make logos-module-build` / `logos-module-run` | Build / run Logos Core module (standalone) |
+| `make plugin-build` / `plugin-run` | Build / run as logos-app IComponent plugin |
 | `cargo test` | Run all tests |
 
 **CLI** (config via `.env` or CLI flags — see `.env.example`):
@@ -106,6 +117,7 @@ swap-cli taker --hashlock <hex>         # verify escrow, lock ETH, claim LEZ
 swap-cli refund lez --hashlock <hex>    # refund LEZ after timelock
 swap-cli refund eth --swap-id <hex>     # refund ETH after timelock
 swap-cli status --hashlock <hex>        # inspect escrow state
+swap-cli infra                          # start Anvil + LEZ sequencer + nwaku, deploy, write .env
 ```
 
 ## Design Notes
