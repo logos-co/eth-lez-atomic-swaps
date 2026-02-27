@@ -23,10 +23,17 @@ static QString ffiToQString(char *raw)
 SwapBackend::SwapBackend(QThreadPool *pool, QObject *parent)
     : QObject(parent)
     , m_threadPool(pool)
+    , m_makerProgressCtx{this, true}
+    , m_takerProgressCtx{this, false}
 {
-    connect(&m_watcher, &QFutureWatcher<QString>::finished, this, [this]() {
-        setResultJson(m_watcher.result());
-        setRunning(false);
+    connect(&m_makerWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
+        setMakerResultJson(m_makerWatcher.result());
+        setMakerRunning(false);
+    });
+
+    connect(&m_takerWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
+        setTakerResultJson(m_takerWatcher.result());
+        setTakerRunning(false);
     });
 
     connect(&m_publishWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
@@ -46,7 +53,8 @@ SwapBackend::SwapBackend(QThreadPool *pool, QObject *parent)
 
 SwapBackend::~SwapBackend()
 {
-    m_watcher.waitForFinished();
+    m_makerWatcher.waitForFinished();
+    m_takerWatcher.waitForFinished();
     m_publishWatcher.waitForFinished();
     m_fetchWatcher.waitForFinished();
 }
@@ -78,44 +86,88 @@ SETTER(NwakuUrl, m_nwakuUrl, nwakuUrlChanged)
 #undef SETTER
 
 // ---------------------------------------------------------------------------
-// State helpers
+// Maker state helpers
 // ---------------------------------------------------------------------------
 
-void SwapBackend::setRunning(bool v)
+void SwapBackend::setMakerRunning(bool v)
 {
-    if (m_running != v) {
-        m_running = v;
+    if (m_makerRunning != v) {
+        m_makerRunning = v;
+        emit makerRunningChanged();
         emit runningChanged();
     }
 }
 
-void SwapBackend::setCurrentStep(const QString &v)
+void SwapBackend::setMakerCurrentStep(const QString &v)
 {
-    if (m_currentStep != v) {
-        m_currentStep = v;
-        emit currentStepChanged();
+    if (m_makerCurrentStep != v) {
+        m_makerCurrentStep = v;
+        emit makerCurrentStepChanged();
     }
 }
 
-void SwapBackend::addProgressStep(const QString &v)
+void SwapBackend::addMakerProgressStep(const QString &v)
 {
-    m_progressSteps.append(v);
-    emit progressStepsChanged();
+    m_makerProgressSteps.append(v);
+    emit makerProgressStepsChanged();
 }
 
-void SwapBackend::clearProgress()
+void SwapBackend::clearMakerProgress()
 {
-    m_progressSteps.clear();
-    emit progressStepsChanged();
-    setCurrentStep({});
-    setResultJson({});
+    m_makerProgressSteps.clear();
+    emit makerProgressStepsChanged();
+    setMakerCurrentStep({});
+    setMakerResultJson({});
 }
 
-void SwapBackend::setResultJson(const QString &v)
+void SwapBackend::setMakerResultJson(const QString &v)
 {
-    if (m_resultJson != v) {
-        m_resultJson = v;
-        emit resultJsonChanged();
+    if (m_makerResultJson != v) {
+        m_makerResultJson = v;
+        emit makerResultJsonChanged();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Taker state helpers
+// ---------------------------------------------------------------------------
+
+void SwapBackend::setTakerRunning(bool v)
+{
+    if (m_takerRunning != v) {
+        m_takerRunning = v;
+        emit takerRunningChanged();
+        emit runningChanged();
+    }
+}
+
+void SwapBackend::setTakerCurrentStep(const QString &v)
+{
+    if (m_takerCurrentStep != v) {
+        m_takerCurrentStep = v;
+        emit takerCurrentStepChanged();
+    }
+}
+
+void SwapBackend::addTakerProgressStep(const QString &v)
+{
+    m_takerProgressSteps.append(v);
+    emit takerProgressStepsChanged();
+}
+
+void SwapBackend::clearTakerProgress()
+{
+    m_takerProgressSteps.clear();
+    emit takerProgressStepsChanged();
+    setTakerCurrentStep({});
+    setTakerResultJson({});
+}
+
+void SwapBackend::setTakerResultJson(const QString &v)
+{
+    if (m_takerResultJson != v) {
+        m_takerResultJson = v;
+        emit takerResultJsonChanged();
     }
 }
 
@@ -139,8 +191,7 @@ QByteArray SwapBackend::configJson() const
     obj["eth_recipient_address"] = m_ethRecipientAddress;
     obj["lez_taker_account_id"] = m_lezTakerAccountId;
     obj["poll_interval_ms"] = m_pollIntervalMs;
-    if (!m_nwakuUrl.isEmpty())
-        obj["nwaku_url"] = m_nwakuUrl;
+    obj["nwaku_url"] = m_nwakuUrl;
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -213,20 +264,27 @@ void SwapBackend::loadConfig(const QJsonObject &config)
 
 extern "C" void progressCallbackTrampoline(const char *json, void *userData)
 {
-    auto *self = static_cast<SwapBackend *>(userData);
+    auto *ctx = static_cast<ProgressContext *>(userData);
+    auto *self = ctx->backend;
+    bool isMaker = ctx->isMaker;
     QString msg = QString::fromUtf8(json);
-    QMetaObject::invokeMethod(self, [self, msg]() {
-        self->handleProgress(msg);
+    QMetaObject::invokeMethod(self, [self, msg, isMaker]() {
+        self->handleProgress(msg, isMaker);
     }, Qt::QueuedConnection);
 }
 
-void SwapBackend::handleProgress(const QString &json)
+void SwapBackend::handleProgress(const QString &json, bool isMaker)
 {
     auto doc = QJsonDocument::fromJson(json.toUtf8());
     auto obj = doc.object();
     QString step = obj["step"].toString();
-    setCurrentStep(step);
-    addProgressStep(step);
+    if (isMaker) {
+        setMakerCurrentStep(step);
+        addMakerProgressStep(step);
+    } else {
+        setTakerCurrentStep(step);
+        addTakerProgressStep(step);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,48 +293,54 @@ void SwapBackend::handleProgress(const QString &json)
 
 void SwapBackend::startMaker(const QString &preimageHex)
 {
-    if (m_running)
+    if (m_makerRunning)
         return;
-    setRunning(true);
-    clearProgress();
+    setMakerRunning(true);
+    clearMakerProgress();
 
     QByteArray cfg = configJson();
     QByteArray preimage = preimageHex.toUtf8();
 
-    auto future = QtConcurrent::run(m_threadPool, [cfg, preimage, this]() -> QString {
+    auto *ctx = &m_makerProgressCtx;
+    auto future = QtConcurrent::run(m_threadPool, [cfg, preimage, ctx]() -> QString {
         const char *preimagePtr = preimage.isEmpty() ? nullptr : preimage.constData();
         auto *result = swap_ffi_run_maker(
             cfg.constData(),
             preimagePtr,
             progressCallbackTrampoline,
-            this);
+            ctx);
         return ffiToQString(result);
     });
 
-    m_watcher.setFuture(future);
+    m_makerWatcher.setFuture(future);
 }
 
 void SwapBackend::startTaker(const QString &hashlockHex)
 {
-    if (m_running)
+    if (m_takerRunning)
         return;
-    setRunning(true);
-    clearProgress();
+    setTakerRunning(true);
+    clearTakerProgress();
 
     QByteArray cfg = configJson();
     QByteArray hl = hashlockHex.toUtf8();
 
-    auto future = QtConcurrent::run(m_threadPool, [cfg, hl, this]() -> QString {
+    auto *ctx = &m_takerProgressCtx;
+    auto future = QtConcurrent::run(m_threadPool, [cfg, hl, ctx]() -> QString {
         auto *result = swap_ffi_run_taker(
             cfg.constData(),
             hl.constData(),
             progressCallbackTrampoline,
-            this);
+            ctx);
         return ffiToQString(result);
     });
 
-    m_watcher.setFuture(future);
+    m_takerWatcher.setFuture(future);
 }
+
+// ---------------------------------------------------------------------------
+// Messaging (nwaku REST)
+// ---------------------------------------------------------------------------
 
 void SwapBackend::publishOffer()
 {
@@ -284,10 +348,10 @@ void SwapBackend::publishOffer()
         return;
 
     QByteArray cfg = configJson();
-    QByteArray nwaku = m_nwakuUrl.toUtf8();
+    QByteArray url = m_nwakuUrl.toUtf8();
 
-    auto future = QtConcurrent::run(m_threadPool, [cfg, nwaku]() -> QString {
-        auto *result = swap_ffi_publish_offer(cfg.constData(), nwaku.constData());
+    auto future = QtConcurrent::run(m_threadPool, [cfg, url]() -> QString {
+        auto *result = swap_ffi_publish_offer(cfg.constData(), url.constData());
         return ffiToQString(result);
     });
 
@@ -299,10 +363,10 @@ void SwapBackend::fetchOffers()
     if (m_nwakuUrl.isEmpty())
         return;
 
-    QByteArray nwaku = m_nwakuUrl.toUtf8();
+    QByteArray url = m_nwakuUrl.toUtf8();
 
-    auto future = QtConcurrent::run(m_threadPool, [nwaku]() -> QString {
-        auto *result = swap_ffi_fetch_offers(nwaku.constData());
+    auto future = QtConcurrent::run(m_threadPool, [url]() -> QString {
+        auto *result = swap_ffi_fetch_offers(url.constData());
         return ffiToQString(result);
     });
 
@@ -311,10 +375,10 @@ void SwapBackend::fetchOffers()
 
 void SwapBackend::refundLez(const QString &hashlockHex)
 {
-    if (m_running)
+    if (m_makerRunning)
         return;
-    setRunning(true);
-    clearProgress();
+    setMakerRunning(true);
+    clearMakerProgress();
 
     QByteArray cfg = configJson();
     QByteArray hl = hashlockHex.toUtf8();
@@ -324,15 +388,15 @@ void SwapBackend::refundLez(const QString &hashlockHex)
         return ffiToQString(result);
     });
 
-    m_watcher.setFuture(future);
+    m_makerWatcher.setFuture(future);
 }
 
 void SwapBackend::refundEth(const QString &swapIdHex)
 {
-    if (m_running)
+    if (m_takerRunning)
         return;
-    setRunning(true);
-    clearProgress();
+    setTakerRunning(true);
+    clearTakerProgress();
 
     QByteArray cfg = configJson();
     QByteArray sid = swapIdHex.toUtf8();
@@ -342,5 +406,5 @@ void SwapBackend::refundEth(const QString &swapIdHex)
         return ffiToQString(result);
     });
 
-    m_watcher.setFuture(future);
+    m_takerWatcher.setFuture(future);
 }

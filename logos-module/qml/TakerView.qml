@@ -17,7 +17,7 @@ ScrollView {
 
     property var completedSteps: {
         var done = []
-        var steps = swapBackend.progressSteps
+        var steps = swapBackend.takerProgressSteps
         for (var i = 0; i < steps.length; i++) {
             if (done.indexOf(steps[i]) < 0)
                 done.push(steps[i])
@@ -111,7 +111,7 @@ ScrollView {
             Button {
                 visible: messagingEnabled
                 text: fetching ? "Fetching..." : "Discover Offers"
-                enabled: !fetching && !swapBackend.running
+                enabled: !fetching && !swapBackend.takerRunning
                 Layout.fillWidth: true
                 Layout.preferredHeight: 42
                 font.pixelSize: Theme.fontNormal
@@ -283,8 +283,8 @@ ScrollView {
 
             // Start button
             Button {
-                text: swapBackend.running ? "Running..." : "Start Taker"
-                enabled: !swapBackend.running && takerRoot.isValidHex(hashlockInput.text, 32)
+                text: swapBackend.takerRunning ? "Running..." : "Start Taker"
+                enabled: !swapBackend.takerRunning && takerRoot.isValidHex(hashlockInput.text, 32)
                 Layout.fillWidth: true
                 Layout.preferredHeight: 48
                 font.pixelSize: Theme.fontNormal
@@ -323,14 +323,14 @@ ScrollView {
                         margins: Theme.spacingNormal
                     }
                     steps: takerSteps
-                    currentStep: swapBackend.currentStep
+                    currentStep: swapBackend.takerCurrentStep
                     completedSteps: takerRoot.completedSteps
                 }
             }
 
             // Result
             ResultCard {
-                resultJson: swapBackend.resultJson
+                resultJson: swapBackend.takerResultJson
             }
         }
     }

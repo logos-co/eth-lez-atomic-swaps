@@ -144,7 +144,7 @@ ScrollView {
                 label: "Nwaku URL"
                 text: swapBackend.nwakuUrl
                 onTextEdited: (val) => swapBackend.nwakuUrl = val
-                placeholderText: "http://localhost:8645 (leave empty to disable)"
+                placeholderText: "http://localhost:8645"
             }
         }
     }

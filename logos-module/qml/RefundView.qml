@@ -14,12 +14,18 @@ ScrollView {
         return /^[0-9a-fA-F]+$/.test(clean)
     }
 
-    // Parse last swap result to auto-populate refund fields
-    readonly property var lastResult: {
-        if (!swapBackend.resultJson) return null
-        try { return JSON.parse(swapBackend.resultJson) }
+    // Parse last swap results to auto-populate refund fields
+    readonly property var lastMakerResult: {
+        if (!swapBackend.makerResultJson) return null
+        try { return JSON.parse(swapBackend.makerResultJson) }
         catch (e) { return null }
     }
+    readonly property var lastTakerResult: {
+        if (!swapBackend.takerResultJson) return null
+        try { return JSON.parse(swapBackend.takerResultJson) }
+        catch (e) { return null }
+    }
+    readonly property var lastResult: lastMakerResult || lastTakerResult
 
     // hashlock is available in completed/refunded results
     readonly property string lastHashlock: lastResult ? (lastResult.hashlock || "") : ""
@@ -169,8 +175,8 @@ ScrollView {
                     }
 
                     Button {
-                        text: swapBackend.running ? "Running..." : "Refund LEZ"
-                        enabled: !swapBackend.running && refundRoot.isValidHex(lezHashlockInput.text, 32)
+                        text: swapBackend.makerRunning ? "Running..." : "Refund LEZ"
+                        enabled: !swapBackend.makerRunning && refundRoot.isValidHex(lezHashlockInput.text, 32)
                         Layout.fillWidth: true
                         Layout.preferredHeight: 40
                         font.pixelSize: Theme.fontNormal
@@ -268,8 +274,8 @@ ScrollView {
                     }
 
                     Button {
-                        text: swapBackend.running ? "Running..." : "Refund ETH"
-                        enabled: !swapBackend.running && refundRoot.isValidHex(ethSwapIdInput.text, 32)
+                        text: swapBackend.takerRunning ? "Running..." : "Refund ETH"
+                        enabled: !swapBackend.takerRunning && refundRoot.isValidHex(ethSwapIdInput.text, 32)
                         Layout.fillWidth: true
                         Layout.preferredHeight: 40
                         font.pixelSize: Theme.fontNormal
@@ -293,9 +299,12 @@ ScrollView {
                 }
             }
 
-            // Result
+            // Results
             ResultCard {
-                resultJson: swapBackend.resultJson
+                resultJson: swapBackend.makerResultJson
+            }
+            ResultCard {
+                resultJson: swapBackend.takerResultJson
             }
         }
     }

@@ -8,6 +8,13 @@
 #include <QThreadPool>
 #include "swap_ffi.h"
 
+class SwapBackend;
+
+struct ProgressContext {
+    SwapBackend *backend;
+    bool isMaker; // true = maker, false = taker
+};
+
 extern "C" void progressCallbackTrampoline(const char *json, void *userData);
 
 class SwapBackend : public QObject
@@ -34,11 +41,20 @@ class SwapBackend : public QObject
     // Role (maker / taker — set via SWAP_ROLE env var or loadConfig)
     Q_PROPERTY(QString swapRole READ swapRole CONSTANT)
 
-    // State
+    // Maker state
+    Q_PROPERTY(bool makerRunning READ makerRunning NOTIFY makerRunningChanged)
+    Q_PROPERTY(QString makerCurrentStep READ makerCurrentStep NOTIFY makerCurrentStepChanged)
+    Q_PROPERTY(QStringList makerProgressSteps READ makerProgressSteps NOTIFY makerProgressStepsChanged)
+    Q_PROPERTY(QString makerResultJson READ makerResultJson NOTIFY makerResultJsonChanged)
+
+    // Taker state
+    Q_PROPERTY(bool takerRunning READ takerRunning NOTIFY takerRunningChanged)
+    Q_PROPERTY(QString takerCurrentStep READ takerCurrentStep NOTIFY takerCurrentStepChanged)
+    Q_PROPERTY(QStringList takerProgressSteps READ takerProgressSteps NOTIFY takerProgressStepsChanged)
+    Q_PROPERTY(QString takerResultJson READ takerResultJson NOTIFY takerResultJsonChanged)
+
+    // Combined running (for status bar / config panel)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
-    Q_PROPERTY(QString currentStep READ currentStep NOTIFY currentStepChanged)
-    Q_PROPERTY(QStringList progressSteps READ progressSteps NOTIFY progressStepsChanged)
-    Q_PROPERTY(QString resultJson READ resultJson NOTIFY resultJsonChanged)
 
 public:
     explicit SwapBackend(QThreadPool *pool, QObject *parent = nullptr);
@@ -79,11 +95,20 @@ public:
     void setPollIntervalMs(const QString &v);
     void setNwakuUrl(const QString &v);
 
-    // State getters
-    bool running() const { return m_running; }
-    QString currentStep() const { return m_currentStep; }
-    QStringList progressSteps() const { return m_progressSteps; }
-    QString resultJson() const { return m_resultJson; }
+    // Maker state getters
+    bool makerRunning() const { return m_makerRunning; }
+    QString makerCurrentStep() const { return m_makerCurrentStep; }
+    QStringList makerProgressSteps() const { return m_makerProgressSteps; }
+    QString makerResultJson() const { return m_makerResultJson; }
+
+    // Taker state getters
+    bool takerRunning() const { return m_takerRunning; }
+    QString takerCurrentStep() const { return m_takerCurrentStep; }
+    QStringList takerProgressSteps() const { return m_takerProgressSteps; }
+    QString takerResultJson() const { return m_takerResultJson; }
+
+    // Combined
+    bool running() const { return m_makerRunning || m_takerRunning; }
 
     Q_INVOKABLE void loadEnv();
     Q_INVOKABLE void loadConfig(const QJsonObject &config);
@@ -110,23 +135,39 @@ signals:
     void pollIntervalMsChanged();
     void nwakuUrlChanged();
 
+    void makerRunningChanged();
+    void makerCurrentStepChanged();
+    void makerProgressStepsChanged();
+    void makerResultJsonChanged();
+
+    void takerRunningChanged();
+    void takerCurrentStepChanged();
+    void takerProgressStepsChanged();
+    void takerResultJsonChanged();
+
     void runningChanged();
-    void currentStepChanged();
-    void progressStepsChanged();
-    void resultJsonChanged();
 
     void offerPublished(const QString &resultJson);
     void offersFetched(const QString &offersJson);
 
 private:
     QByteArray configJson() const;
-    void setRunning(bool v);
-    void setCurrentStep(const QString &v);
-    void addProgressStep(const QString &v);
-    void clearProgress();
-    void setResultJson(const QString &v);
 
-    void handleProgress(const QString &json);
+    // Maker state helpers
+    void setMakerRunning(bool v);
+    void setMakerCurrentStep(const QString &v);
+    void addMakerProgressStep(const QString &v);
+    void clearMakerProgress();
+    void setMakerResultJson(const QString &v);
+
+    // Taker state helpers
+    void setTakerRunning(bool v);
+    void setTakerCurrentStep(const QString &v);
+    void addTakerProgressStep(const QString &v);
+    void clearTakerProgress();
+    void setTakerResultJson(const QString &v);
+
+    void handleProgress(const QString &json, bool isMaker);
 
     // Dedicated thread pool (not global)
     QThreadPool *m_threadPool;
@@ -148,18 +189,31 @@ private:
     QString m_ethRecipientAddress;
     QString m_lezTakerAccountId;
     QString m_pollIntervalMs;
-    QString m_nwakuUrl;
 
-    // State
-    bool m_running = false;
-    QString m_currentStep;
-    QStringList m_progressSteps;
-    QString m_resultJson;
+    // Maker state
+    bool m_makerRunning = false;
+    QString m_makerCurrentStep;
+    QStringList m_makerProgressSteps;
+    QString m_makerResultJson;
     QString m_publishedPreimage;
 
-    QFutureWatcher<QString> m_watcher;
+    // Taker state
+    bool m_takerRunning = false;
+    QString m_takerCurrentStep;
+    QStringList m_takerProgressSteps;
+    QString m_takerResultJson;
+
+    QString m_nwakuUrl;
+
+    // Separate watchers for concurrent maker + taker
+    QFutureWatcher<QString> m_makerWatcher;
+    QFutureWatcher<QString> m_takerWatcher;
     QFutureWatcher<QString> m_publishWatcher;
     QFutureWatcher<QString> m_fetchWatcher;
+
+    // Progress callback contexts (stable pointers for FFI)
+    ProgressContext m_makerProgressCtx;
+    ProgressContext m_takerProgressCtx;
 };
 
 #endif // SWAP_BACKEND_H

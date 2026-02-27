@@ -18,7 +18,7 @@ ScrollView {
     // Track completed steps based on progress events
     property var completedSteps: {
         var done = []
-        var steps = swapBackend.progressSteps
+        var steps = swapBackend.makerProgressSteps
         for (var i = 0; i < steps.length; i++) {
             if (done.indexOf(steps[i]) < 0)
                 done.push(steps[i])
@@ -81,7 +81,7 @@ ScrollView {
             Button {
                 visible: messagingEnabled && !offerPublished
                 text: publishing ? "Publishing..." : "Publish Offer"
-                enabled: !publishing && !swapBackend.running
+                enabled: !publishing && !swapBackend.makerRunning
                 Layout.fillWidth: true
                 Layout.preferredHeight: 48
                 font.pixelSize: Theme.fontNormal
@@ -144,8 +144,8 @@ ScrollView {
 
             // --- Step 2: Start Swap ---
             Button {
-                text: swapBackend.running ? "Running..." : (messagingEnabled && offerPublished ? "Start Swap" : "Start Maker")
-                enabled: !swapBackend.running && (!messagingEnabled || offerPublished)
+                text: swapBackend.makerRunning ? "Running..." : (messagingEnabled && offerPublished ? "Start Swap" : "Start Maker")
+                enabled: !swapBackend.makerRunning && (!messagingEnabled || offerPublished)
                 visible: !messagingEnabled || offerPublished
                 Layout.fillWidth: true
                 Layout.preferredHeight: 48
@@ -190,14 +190,14 @@ ScrollView {
                         margins: Theme.spacingNormal
                     }
                     steps: makerSteps
-                    currentStep: swapBackend.currentStep
+                    currentStep: swapBackend.makerCurrentStep
                     completedSteps: makerRoot.completedSteps
                 }
             }
 
             // Result
             ResultCard {
-                resultJson: swapBackend.resultJson
+                resultJson: swapBackend.makerResultJson
             }
         }
     }

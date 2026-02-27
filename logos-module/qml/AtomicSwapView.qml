@@ -105,9 +105,14 @@ Item {
                 anchors.rightMargin: Theme.spacingNormal
 
                 Text {
-                    text: swapBackend.running
-                          ? "Running: " + swapBackend.currentStep
-                          : "Idle"
+                    text: {
+                        var parts = []
+                        if (swapBackend.makerRunning)
+                            parts.push("Maker: " + (swapBackend.makerCurrentStep || "..."))
+                        if (swapBackend.takerRunning)
+                            parts.push("Taker: " + (swapBackend.takerCurrentStep || "..."))
+                        return parts.length > 0 ? "Running: " + parts.join(" | ") : "Idle"
+                    }
                     color: swapBackend.running ? Theme.warning : Theme.textMuted
                     font.pixelSize: Theme.fontSmall
                 }
