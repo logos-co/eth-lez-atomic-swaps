@@ -1,6 +1,7 @@
 .claude
 target/
 build/
+build-*/
 
 plan.md
 furps.md
@@ -8,3 +9,4 @@ furps.md
 CLAUDE.md
 
 .env
+.env.taker

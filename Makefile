@@ -1,5 +1,6 @@
 .PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra nwaku nwaku-stop \
-       logos-module-configure logos-module-build logos-module-plugin logos-module-run
+       logos-module-configure logos-module-build logos-module-plugin logos-module-run \
+       plugin-configure plugin-build plugin-install plugin-run
 
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
@@ -59,3 +60,28 @@ logos-module-plugin:
 
 logos-module-run: logos-module-build
 	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_BIN) &
+
+# --- logos-app IComponent plugin ---
+
+LOGOS_APP_INTERFACES := $(HOME)/Developer/status/logos-app/app/interfaces
+LOGOS_APP_BIN        := $(HOME)/Developer/status/logos-app/result/bin/logos-app
+PLUGIN_BUILD         := logos-module/build-plugin
+PLUGIN_DIR           := $(HOME)/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap
+
+plugin-configure: swap-ffi
+	cmake -B $(PLUGIN_BUILD) -S logos-module \
+		-DBUILD_APP_PLUGIN=ON \
+		-DLOGOS_APP_INTERFACES_DIR=$(LOGOS_APP_INTERFACES) \
+		-DCMAKE_BUILD_TYPE=Debug
+
+plugin-build: plugin-configure
+	cmake --build $(PLUGIN_BUILD)
+
+plugin-install: plugin-build
+	@mkdir -p "$(PLUGIN_DIR)"
+	cp $(PLUGIN_BUILD)/lez_atomic_swap.dylib "$(PLUGIN_DIR)/"
+	@# Copy FFI lib if not already there or if newer
+	cp -n swap-ffi/target/release/libswap_ffi.dylib "$(PLUGIN_DIR)/" 2>/dev/null || true
+
+plugin-run: plugin-install
+	env $$(cat .env | grep -v '^\#' | xargs) $(LOGOS_APP_BIN) &

@@ -1,0 +1,9 @@
+{
+  "name": "lez_atomic_swap",
+  "version": "0.1.0",
+  "description": "LEZ <> ETH Atomic Swap Module",
+  "author": "Logos",
+  "type": "ui",
+  "category": "defi",
+  "dependencies": []
+}

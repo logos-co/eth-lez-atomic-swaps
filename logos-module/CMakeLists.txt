@@ -15,9 +15,14 @@ if(APPLE AND NOT CMAKE_OSX_SYSROOT)
     set(CMAKE_OSX_SYSROOT "${_sdk_path}" CACHE PATH "macOS SDK")
 endif()
 
-option(BUILD_PLUGIN "Build as Logos Core plugin" OFF)
+option(BUILD_PLUGIN     "Build as Logos Core module plugin" OFF)
+option(BUILD_APP_PLUGIN "Build as logos-app IComponent UI plugin" OFF)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Concurrent)
+
+if(BUILD_APP_PLUGIN)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets QuickWidgets)
+endif()
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -49,7 +54,7 @@ set_target_properties(swap_ffi PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${FFI_INCLUDE}"
 )
 
-# --- Sources shared between plugin and standalone ---
+# --- Sources shared between all build modes ---
 set(SHARED_SOURCES
     src/lez_atomic_swap_module.h
     src/lez_atomic_swap_module.cpp
@@ -58,15 +63,60 @@ set(SHARED_SOURCES
 )
 
 # --- Build mode ---
-if(BUILD_PLUGIN)
+if(BUILD_APP_PLUGIN)
+    # ── logos-app IComponent UI plugin ──
+    # Produces a shared library that logos-app loads as a UI plugin.
+    # Requires logos-cpp-sdk headers and logos-app IComponent.h.
+    qt_add_library(lez_atomic_swap_module SHARED
+        ${SHARED_SOURCES}
+        src/icomponent_adapter.cpp
+    )
+    target_compile_definitions(lez_atomic_swap_module PRIVATE LOGOS_APP_PLUGIN)
+
+    # logos-app interface header (IComponent.h)
+    if(NOT LOGOS_APP_INTERFACES_DIR)
+        set(LOGOS_APP_INTERFACES_DIR "" CACHE PATH "Path to logos-app/app/interfaces/")
+    endif()
+
+    if(LOGOS_APP_INTERFACES_DIR)
+        target_include_directories(lez_atomic_swap_module PRIVATE ${LOGOS_APP_INTERFACES_DIR})
+    endif()
+
+    target_link_libraries(lez_atomic_swap_module PRIVATE
+        Qt6::Widgets
+        Qt6::QuickWidgets
+    )
+
+    # Output: logos-app expects <name>/<name>.dylib in the plugins dir.
+    # Set OUTPUT_NAME so we get lez_atomic_swap.dylib (not liblez_atomic_swap_module.dylib).
+    set_target_properties(lez_atomic_swap_module PROPERTIES
+        OUTPUT_NAME "lez_atomic_swap"
+        PREFIX ""
+    )
+
+    # RPATH: find libswap_ffi.dylib next to the plugin at runtime
+    if(APPLE)
+        set_target_properties(lez_atomic_swap_module PROPERTIES
+            INSTALL_RPATH "@loader_path"
+            BUILD_WITH_INSTALL_RPATH TRUE
+        )
+    else()
+        set_target_properties(lez_atomic_swap_module PROPERTIES
+            INSTALL_RPATH "$ORIGIN"
+            BUILD_WITH_INSTALL_RPATH TRUE
+        )
+    endif()
+
+elseif(BUILD_PLUGIN)
+    # ── Logos Core module plugin ──
     qt_add_plugin(lez_atomic_swap_module
         ${SHARED_SOURCES}
         src/plugin.cpp
     )
     target_compile_definitions(lez_atomic_swap_module PRIVATE LOGOS_CORE_PLUGIN)
-    # When logos-cpp-sdk is available, link it here:
-    # target_link_libraries(lez_atomic_swap_module PRIVATE logos-cpp-sdk)
+
 else()
+    # ── Standalone executable ──
     qt_add_executable(lez_atomic_swap_module
         ${SHARED_SOURCES}
         src/main.cpp
@@ -97,7 +147,7 @@ target_include_directories(lez_atomic_swap_module PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# --- QML module (shared between both modes) ---
+# --- QML module (shared between all modes) ---
 # Flatten qml/ subdir paths into the module root so the QML engine
 # resolves types (especially the Theme singleton) correctly (QTP0004).
 set_source_files_properties(qml/Theme.qml             PROPERTIES QT_QML_SINGLETON_TYPE TRUE QT_RESOURCE_ALIAS Theme.qml)
