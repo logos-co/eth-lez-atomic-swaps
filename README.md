@@ -56,7 +56,7 @@ make configure            # first time only — builds FFI bridge + cmake config
 make run-maker            # open maker UI (new terminal: make run-taker)
 ```
 
-**logos-app plugin**
+**logos-app plugin** (requires a local [logos-app](https://github.com/aspect-build/logos-app) build)
 ```bash
 make plugin-build         # builds FFI bridge + IComponent plugin
 make plugin-run           # launch logos-app with the swap plugin loaded
