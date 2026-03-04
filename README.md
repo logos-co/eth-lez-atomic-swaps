@@ -56,7 +56,24 @@ make configure            # first time only — builds FFI bridge + cmake config
 make run-maker            # open maker UI (new terminal: make run-taker)
 ```
 
-**logos-app plugin** (requires a local [logos-app](https://github.com/aspect-build/logos-app) build)
+**logos-app plugin**
+
+<details><summary><b>Setting up logos-app</b></summary>
+
+```bash
+git clone https://github.com/logos-co/logos-app.git
+cd logos-app
+nix build            # builds the app via flake.nix — produces result/bin/logos-app
+```
+
+The Makefile expects logos-app at `~/Developer/status/logos-app`. If yours is elsewhere, override the path:
+
+```bash
+make plugin-build LOGOS_APP_INTERFACES=<path-to-logos-app>/app/interfaces
+make plugin-run LOGOS_APP_BIN=<path-to-logos-app>/result/bin/logos-app
+```
+</details>
+
 ```bash
 make plugin-build         # builds FFI bridge + IComponent plugin
 make plugin-run           # launch logos-app with the swap plugin loaded
@@ -99,15 +116,18 @@ Stop with `Ctrl-C` on `make infra`, then `make nwaku-stop` to clean up Docker.
 
 | Command | Description |
 |---|---|
-| `make configure` / `build` / `clean` | Qt6 UI build lifecycle (auto-builds `swap-ffi`) |
-| `make infra` | Start all services, deploy contracts, write `.env` files |
-| `make run-maker` / `run-taker` | Launch UI with maker/taker config |
-| `make demo` | Automated CLI demo (no UI needed) |
-| `make contracts` | Build Solidity contracts |
+| `make infra` | Start Anvil (local Ethereum), LEZ sequencer, nwaku; deploy HTLC contracts on both chains; write `.env` files |
+| `make configure` | Build the Rust FFI bridge + run cmake configure for the Qt6 app (first time only) |
+| `make build` | Build the Qt6 standalone UI |
+| `make run-maker` / `run-taker` | Launch the maker/taker UI window, loading config from `.env` / `.env.taker` |
+| `make demo` | Run the full swap headlessly in one terminal — no UI needed, good sanity check |
+| `make contracts` | Build Solidity contracts via Foundry |
 | `make nwaku` / `nwaku-stop` | Start/stop nwaku Docker containers |
-| `make logos-module-build` / `logos-module-run` | Build / run Logos Core module (standalone) |
-| `make plugin-build` / `plugin-run` | Build / run as logos-app IComponent plugin |
-| `cargo test` | Run all tests |
+| `make plugin-build` | Build the Rust FFI bridge + IComponent plugin for logos-app |
+| `make plugin-run` | Install plugin and launch logos-app with the swap module loaded |
+| `make logos-module-build` / `logos-module-run` | Build / run Logos Core module as standalone app |
+| `make clean` | Clean Qt6 UI build artifacts |
+| `cargo test` | Run all Rust tests (orchestration library + integration) |
 
 **CLI** (config via `.env` or CLI flags — see `.env.example`):
 
