@@ -11,6 +11,20 @@ Maker                                          Taker
   |                                 4. Claim LEZ (using preimage)
 ```
 
+## Screenshots
+
+**Standalone UI** (maker + taker side-by-side):
+
+![Standalone UI](docs/standalone-ui.gif)
+
+**logos-app plugin:**
+
+| Config | Maker | Taker | Refund |
+|--------|-------|-------|--------|
+| ![Config](docs/config.png) | ![Maker](docs/maker.png) | ![Taker](docs/taker.png) | ![Refund](docs/refund.png) |
+
+![logos-app plugin](docs/logos-app-plugin.gif)
+
 ## Quick Start
 
 **Prerequisites:** Rust 1.85+, Foundry, CMake 3.21+, Qt 6.5+, Docker.
