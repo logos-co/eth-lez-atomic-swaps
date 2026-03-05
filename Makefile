@@ -68,10 +68,20 @@ LOGOS_APP_BIN        := $(HOME)/Developer/status/logos-app/result/bin/logos-app
 PLUGIN_BUILD         := logos-module/build-plugin
 PLUGIN_DIR           := $(HOME)/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap
 
+# Use the same Nix Qt 6.9.2 that logos-app ships (not Homebrew Qt)
+NIX_QTBASE        := /nix/store/a9aq909fc6ymnawnk877qcs4gklzm1c1-qtbase-6.9.2
+NIX_QTDECLARATIVE := /nix/store/fn7iqppsl6z7ikbspxnjirwdz345w8mj-qtdeclarative-6.9.2
+NIX_QTSHADERTOOLS := /nix/store/awcf75ll0ynkkknwzam9qi6w663y0q9q-qtshadertools-6.9.2
+NIX_QTSVG         := /nix/store/6mjqccb1hfr5mffqz80icfvh8w0lvqmf-qtsvg-6.9.2
+
 plugin-configure: swap-ffi
 	cmake -B $(PLUGIN_BUILD) -S logos-module \
 		-DBUILD_APP_PLUGIN=ON \
 		-DLOGOS_APP_INTERFACES_DIR=$(LOGOS_APP_INTERFACES) \
+		-DCMAKE_PREFIX_PATH="$(NIX_QTBASE)" \
+		-DQT_ADDITIONAL_PACKAGES_PREFIX_PATH="$(NIX_QTDECLARATIVE);$(NIX_QTSHADERTOOLS);$(NIX_QTSVG)" \
+		-DQt6QmlTools_DIR=$(NIX_QTDECLARATIVE)/lib/cmake/Qt6QmlTools \
+		-DQt6QuickTools_DIR=$(NIX_QTDECLARATIVE)/lib/cmake/Qt6QuickTools \
 		-DCMAKE_BUILD_TYPE=Debug
 
 plugin-build: plugin-configure
