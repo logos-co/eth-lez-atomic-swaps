@@ -38,7 +38,7 @@ demo: contracts
 	cargo run --features demo -- demo
 
 infra: contracts nwaku
-	cargo run --features demo -- infra
+	trap 'docker compose down' EXIT INT TERM; cargo run --features demo -- infra
 
 nwaku:
 	docker compose up -d
