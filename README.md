@@ -42,7 +42,10 @@ Also install [Docker Desktop](https://docs.docker.com/desktop/install/mac-instal
 <details><summary><b>Linux (Ubuntu/Debian)</b></summary>
 
 ```bash
+# Ubuntu / Debian
 sudo apt install cmake qt6-base-dev qt6-declarative-dev docker.io docker-compose-plugin
+# Fedora
+sudo dnf install cmake qt6-qtbase-devel qt6-qtdeclarative-devel docker-compose 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
@@ -59,7 +62,7 @@ cd eth-lez-atomic-swaps
 Make sure Docker is running, then start local services (Anvil, LEZ sequencer, nwaku), deploy contracts, and write `.env` files:
 
 ```bash
-make infra                # keep running — Ctrl-C to stop
+make infra                # keeps running — Ctrl-C to stop
 ```
 
 Then open a new terminal and pick an interface:
@@ -67,7 +70,8 @@ Then open a new terminal and pick an interface:
 **Standalone UI**
 ```bash
 make configure            # first time only — builds FFI bridge + cmake configure
-make run-maker            # open maker UI (new terminal: make run-taker)
+make run-maker            # open maker UI
+make run-taker            # open taker UI (in new terminal)
 ```
 
 **logos-app plugin**
