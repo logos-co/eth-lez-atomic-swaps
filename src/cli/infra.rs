@@ -112,7 +112,6 @@ pub async fn cmd_infra() -> Result<()> {
             3 => "lez",
             4 => "sequencer",
             5 => "deploy",
-            6 => "preimage",
             _ => "infra",
         };
         if detail.is_empty() {
@@ -202,9 +201,9 @@ LEZ_HTLC_PROGRAM_ID={lez_prog}
 LEZ_AMOUNT={lez_amount}
 ETH_AMOUNT={eth_amount}
 
-# Timelocks
-LEZ_TIMELOCK_MINUTES=10
-ETH_TIMELOCK_MINUTES=5
+# Timelocks (taker locks ETH first with longer timelock)
+ETH_TIMELOCK_MINUTES=10
+LEZ_TIMELOCK_MINUTES=5
 
 # Counterparty
 ETH_RECIPIENT_ADDRESS={eth_recipient}

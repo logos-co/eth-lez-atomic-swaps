@@ -18,7 +18,6 @@ use sequencer_core::config::{AccountInitialData, SequencerConfig};
 use sha2::{Digest, Sha256};
 use swap_orchestrator::{
     config::SwapConfig,
-    error::SwapError,
     eth::client::EthClient,
     lez::client::LezClient,
     swap::{maker, taker, types::SwapOutcome},
@@ -201,6 +200,7 @@ impl TestEnv {
     }
 }
 
+/// Happy path: taker locks ETH first, maker locks LEZ, taker claims LEZ, maker claims ETH.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_atomic_swap_happy_path() {
     let env = TestEnv::setup(60).await;
@@ -208,8 +208,9 @@ async fn test_atomic_swap_happy_path() {
     let hashlock: [u8; 32] = Sha256::digest(preimage).into();
 
     let now = now_unix();
-    let maker_config = env.maker_config(now + 600, now + 300);
-    let taker_config = env.taker_config(now + 600, now + 300);
+    // Taker-locks-first: ETH timelock longer, LEZ timelock shorter.
+    let maker_config = env.maker_config(now + 300, now + 600);
+    let taker_config = env.taker_config(now + 300, now + 600);
 
     // ── Capture initial balances ──
     let balance_lez = env.lez_client(&maker_config);
@@ -218,18 +219,22 @@ async fn test_atomic_swap_happy_path() {
     let maker_eth_before = env.deployer.get_balance(env.maker_eth_addr).await.unwrap();
     let taker_eth_before = env.deployer.get_balance(env._taker_eth_addr).await.unwrap();
 
-    // ── Run maker + taker ──
+    // ── Run maker + taker concurrently ──
+    // Maker starts first (watches for ETH lock).
     let maker_handle = tokio::spawn(async move {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(preimage), None).await
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None).await
     });
-    tokio::time::sleep(Duration::from_secs(10)).await;
 
+    // Brief pause so maker's ETH watcher is ready before taker locks.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Taker generates preimage, locks ETH, waits for LEZ lock, claims LEZ.
     let taker_handle = tokio::spawn(async move {
         let eth = EthClient::new(&taker_config).await.unwrap();
         let lez = LezClient::new(&taker_config).unwrap();
-        taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await
+        taker::run_taker(&taker_config, &eth, &lez, Some(preimage), None).await
     });
 
     let (maker_result, taker_result) = tokio::join!(maker_handle, taker_handle);
@@ -271,35 +276,23 @@ async fn test_atomic_swap_happy_path() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_maker_refunds_on_timeout() {
     let env = TestEnv::setup(60).await;
-    let preimage = [0xCDu8; 32];
+    let hashlock = [0xCDu8; 32]; // arbitrary hashlock, no taker will lock
 
-    // Set LEZ timelock to expire very soon (3s). The maker will lock LEZ, then
-    // time out waiting for the taker to lock ETH, and refund.
+    // Set ETH timelock to expire very soon (3s). The maker will time out
+    // waiting for the taker to lock ETH.
     let now = now_unix();
-    let maker_config = env.maker_config(now + 3, now + 300);
-
-    let balance_lez = env.lez_client(&maker_config);
-    let maker_lez_before = balance_lez.get_balance(&env.maker_lez_id).await.unwrap();
+    let maker_config = env.maker_config(now + 300, now + 3);
 
     let outcome = {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(preimage), None).await.unwrap()
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None).await.unwrap()
     };
 
+    // Maker should return Refunded with no txs (never locked anything).
     assert!(
-        matches!(outcome, SwapOutcome::Refunded { lez_refund_tx: Some(_), .. }),
-        "maker should have refunded LEZ, got: {outcome:?}"
-    );
-
-    // Wait for LEZ refund block.
-    tokio::time::sleep(BLOCK_WAIT).await;
-
-    // Maker's LEZ balance should be restored.
-    let maker_lez_after = balance_lez.get_balance(&env.maker_lez_id).await.unwrap();
-    assert_eq!(
-        maker_lez_after, maker_lez_before,
-        "maker LEZ should be fully restored after refund"
+        matches!(outcome, SwapOutcome::Refunded { .. }),
+        "maker should have timed out, got: {outcome:?}"
     );
 
     // ETH contract should be untouched (taker never locked).
@@ -307,31 +300,18 @@ async fn test_maker_refunds_on_timeout() {
     assert_eq!(contract_balance, U256::ZERO, "no ETH should have been locked");
 }
 
-// ── Edge case: taker times out when maker never claims ETH ──
+// ── Edge case: taker times out when maker never locks LEZ ──
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_taker_refunds_on_timeout() {
     // Deploy contract with min_timelock_delta=1 so we can use short timelocks.
     let env = TestEnv::setup(1).await;
     let preimage = [0xEFu8; 32];
-    let hashlock: [u8; 32] = Sha256::digest(preimage).into();
 
     let now = now_unix();
-    // ETH timelock = now + 10s. Enough for the lock tx to be mined (needs
-    // block.timestamp + minTimelockDelta < timelock), but short enough that
-    // the wall-clock timeout fires quickly. We then fast-forward Anvil so
-    // the on-chain refund succeeds.
+    // ETH timelock = now + 10s. Short enough to time out quickly.
     let eth_timelock = now + 10;
-    let maker_config = env.maker_config(now + 600, eth_timelock);
-    let taker_config = env.taker_config(now + 600, eth_timelock);
-
-    // Maker locks LEZ manually (not using run_maker, which would also claim ETH).
-    let maker_lez = LezClient::new(&maker_config).unwrap();
-    maker_lez
-        .lock(hashlock, env.taker_lez_id, 1000)
-        .await
-        .unwrap();
-    tokio::time::sleep(BLOCK_WAIT).await;
+    let taker_config = env.taker_config(now + 300, eth_timelock);
 
     // Spawn a background task that fast-forwards Anvil time after taker locks ETH.
     let ff_provider = ProviderBuilder::new()
@@ -353,11 +333,11 @@ async fn test_taker_refunds_on_timeout() {
             .unwrap();
     });
 
-    // Run taker — should lock ETH, wait, time out, refund ETH.
+    // Run taker — should lock ETH, wait for LEZ lock, time out, refund ETH.
     let outcome = {
         let eth = EthClient::new(&taker_config).await.unwrap();
         let lez = LezClient::new(&taker_config).unwrap();
-        taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await.unwrap()
+        taker::run_taker(&taker_config, &eth, &lez, Some(preimage), None).await.unwrap()
     };
 
     assert!(
@@ -368,58 +348,4 @@ async fn test_taker_refunds_on_timeout() {
     // ETH contract should be drained (refund returned the ETH to taker).
     let contract_balance = env.deployer.get_balance(env.eth_htlc_address).await.unwrap();
     assert_eq!(contract_balance, U256::ZERO, "ETH should be refunded from contract");
-}
-
-// ── Edge case: taker rejects missing escrow ──
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_taker_rejects_missing_escrow() {
-    let env = TestEnv::setup(60).await;
-    let hashlock = [0xFFu8; 32]; // no escrow exists for this hashlock
-
-    let now = now_unix();
-    let taker_config = env.taker_config(now + 600, now + 300);
-
-    let eth = EthClient::new(&taker_config).await.unwrap();
-    let lez = LezClient::new(&taker_config).unwrap();
-    let result = taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await;
-
-    assert!(result.is_err(), "taker should reject missing escrow");
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, SwapError::InvalidState { .. }),
-        "should be InvalidState error, got: {err}"
-    );
-}
-
-// ── Edge case: taker rejects escrow with insufficient amount ──
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_taker_rejects_insufficient_escrow_amount() {
-    let env = TestEnv::setup(60).await;
-    let preimage = [0xBBu8; 32];
-    let hashlock: [u8; 32] = Sha256::digest(preimage).into();
-
-    let now = now_unix();
-    let maker_config = env.maker_config(now + 600, now + 300);
-    let taker_config = env.taker_config(now + 600, now + 300);
-
-    // Maker locks only 500 LEZ — less than the 1000 the taker expects.
-    let maker_lez = LezClient::new(&maker_config).unwrap();
-    maker_lez
-        .lock(hashlock, env.taker_lez_id, 500)
-        .await
-        .unwrap();
-    tokio::time::sleep(BLOCK_WAIT).await;
-
-    let eth = EthClient::new(&taker_config).await.unwrap();
-    let lez = LezClient::new(&taker_config).unwrap();
-    let result = taker::run_taker(&taker_config, &eth, &lez, hashlock, None).await;
-
-    assert!(result.is_err(), "taker should reject insufficient amount");
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, SwapError::InvalidState { .. }),
-        "should be InvalidState error, got: {err}"
-    );
 }

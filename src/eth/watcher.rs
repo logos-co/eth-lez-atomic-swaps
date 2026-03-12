@@ -1,6 +1,8 @@
 use alloy::primitives::{Address, FixedBytes};
+use alloy::providers::Provider;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tracing::debug;
 
 use super::client::EthHTLC;
 use crate::error::{Result, SwapError};
@@ -25,12 +27,47 @@ pub enum EthHtlcEvent {
 }
 
 /// Subscribe to all EthHTLC events via WebSocket and forward them to `tx`.
+///
+/// Replays historical Locked events from the last 256 blocks before subscribing
+/// to new events, so events emitted before the watcher started are not missed.
 pub async fn watch_events(
     client: &super::client::EthClient,
     tx: mpsc::Sender<EthHtlcEvent>,
 ) -> Result<()> {
     let contract = EthHTLC::new(client.contract_address(), client.provider().clone());
 
+    // Replay recent Locked events so we don't miss locks that happened before
+    // the watcher started. Query from (current - 256) to latest.
+    let current_block = client
+        .provider()
+        .get_block_number()
+        .await
+        .unwrap_or(0);
+    let from_block = current_block.saturating_sub(256);
+
+    let historical_locked = contract
+        .Locked_filter()
+        .from_block(from_block)
+        .query()
+        .await
+        .unwrap_or_default();
+
+    for (event, _) in &historical_locked {
+        debug!(swap_id = %event.swapId, "replaying historical Locked event");
+        let ev = EthHtlcEvent::Locked {
+            swap_id: event.swapId,
+            sender: event.sender,
+            recipient: event.recipient,
+            amount: event.amount,
+            hashlock: event.hashlock,
+            timelock: event.timelock,
+        };
+        if tx.send(ev).await.is_err() {
+            return Ok(());
+        }
+    }
+
+    // Now subscribe to new events going forward.
     let locked = contract
         .Locked_filter()
         .watch()

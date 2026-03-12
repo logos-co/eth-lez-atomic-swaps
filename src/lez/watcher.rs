@@ -38,6 +38,18 @@ pub async fn watch_escrow(
         match client.get_escrow(&hashlock).await {
             Ok(Some(escrow)) => {
                 let current = escrow.state;
+
+                // For Locked state, verify the PDA actually has funds.
+                // The sequencer may return phantom data for non-existent PDAs.
+                if current == HTLCState::Locked && last_state.is_none() {
+                    let balance = client.get_balance(&pda).await.unwrap_or(0);
+                    if balance == 0 {
+                        debug!("escrow PDA has zero balance, treating as non-existent");
+                        tokio::time::sleep(poll_interval).await;
+                        continue;
+                    }
+                }
+
                 if last_state != Some(current) {
                     debug!(?current, "LEZ escrow state changed");
                     let event = match current {

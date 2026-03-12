@@ -9,9 +9,9 @@ ScrollView {
     background: Rectangle { color: Theme.background }
 
     property var makerSteps: [
-        { name: "PreimageGenerated", label: "Generate Preimage" },
-        { name: "LezLocked",        label: "Lock LEZ" },
         { name: "EthLockDetected",   label: "Wait for ETH Lock" },
+        { name: "LezLocked",        label: "Lock LEZ" },
+        { name: "PreimageRevealed",  label: "Wait for Preimage" },
         { name: "EthClaimed",        label: "Claim ETH" },
     ]
 
@@ -27,8 +27,6 @@ ScrollView {
     }
 
     property bool messagingEnabled: swapBackend.nwakuUrl !== ""
-    property string publishedHashlock: ""
-    property string publishedPreimage: ""
     property bool offerPublished: false
     property bool publishing: false
 
@@ -52,11 +50,7 @@ ScrollView {
                     makerRoot.publishing = false
                     var obj = JSON.parse(resultJson)
                     if (obj.ok) {
-                        makerRoot.publishedHashlock = obj.hashlock
-                        makerRoot.publishedPreimage = obj.preimage
                         makerRoot.offerPublished = true
-                    } else {
-                        makerRoot.publishedHashlock = "Error: " + (obj.error || "unknown")
                     }
                 }
             }
@@ -69,8 +63,8 @@ ScrollView {
             }
             Text {
                 text: messagingEnabled
-                    ? "Publish offer via messaging, then lock LEZ and wait for taker."
-                    : "Generate preimage, lock LEZ, wait for taker to lock ETH, then claim ETH."
+                    ? "Publish offer, then wait for taker to lock ETH. Lock LEZ and claim ETH."
+                    : "Wait for taker to lock ETH, lock LEZ, wait for preimage, claim ETH."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSmall
                 wrapMode: Text.Wrap
@@ -132,10 +126,9 @@ ScrollView {
                         font.bold: true
                     }
                     Text {
-                        text: "Hashlock: " + publishedHashlock
+                        text: "Waiting for taker to accept and lock ETH..."
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
-                        font.family: "Menlo, Courier New"
                         wrapMode: Text.WrapAnywhere
                         Layout.fillWidth: true
                     }
@@ -167,10 +160,9 @@ ScrollView {
                 }
 
                 onClicked: {
-                    if (messagingEnabled && publishedPreimage !== "")
-                        swapBackend.startMaker(publishedPreimage)
-                    else
-                        swapBackend.startMaker("")
+                    // Maker no longer has preimage — just start with empty hashlock
+                    // (will be discovered from on-chain ETH lock event)
+                    swapBackend.startMaker("")
                 }
             }
 

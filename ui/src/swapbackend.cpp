@@ -202,7 +202,30 @@ void SwapBackend::handleProgress(const QString &json)
 // Swap operations
 // ---------------------------------------------------------------------------
 
-void SwapBackend::startMaker(const QString &preimageHex)
+void SwapBackend::startMaker(const QString &hashlockHex)
+{
+    if (m_running)
+        return;
+    setRunning(true);
+    clearProgress();
+
+    QByteArray cfg = configJson();
+    QByteArray hl = hashlockHex.toUtf8();
+
+    auto future = QtConcurrent::run([cfg, hl, this]() -> QString {
+        const char *hlPtr = hl.isEmpty() ? nullptr : hl.constData();
+        auto *result = swap_ffi_run_maker(
+            cfg.constData(),
+            hlPtr,
+            progressCallbackTrampoline,
+            this);
+        return ffiToQString(result);
+    });
+
+    m_watcher.setFuture(future);
+}
+
+void SwapBackend::startTaker(const QString &preimageHex)
 {
     if (m_running)
         return;
@@ -214,31 +237,9 @@ void SwapBackend::startMaker(const QString &preimageHex)
 
     auto future = QtConcurrent::run([cfg, preimage, this]() -> QString {
         const char *preimagePtr = preimage.isEmpty() ? nullptr : preimage.constData();
-        auto *result = swap_ffi_run_maker(
-            cfg.constData(),
-            preimagePtr,
-            progressCallbackTrampoline,
-            this);
-        return ffiToQString(result);
-    });
-
-    m_watcher.setFuture(future);
-}
-
-void SwapBackend::startTaker(const QString &hashlockHex)
-{
-    if (m_running)
-        return;
-    setRunning(true);
-    clearProgress();
-
-    QByteArray cfg = configJson();
-    QByteArray hl = hashlockHex.toUtf8();
-
-    auto future = QtConcurrent::run([cfg, hl, this]() -> QString {
         auto *result = swap_ffi_run_taker(
             cfg.constData(),
-            hl.constData(),
+            preimagePtr,
             progressCallbackTrampoline,
             this);
         return ffiToQString(result);

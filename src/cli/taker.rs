@@ -5,53 +5,57 @@ use tracing::{debug, info};
 
 use crate::config::SwapConfig;
 use crate::error::{Result, SwapError};
-use crate::lez::client::LezClient;
 use crate::messaging::client::{MessagingClient, decode_waku_payload};
-use crate::messaging::types::{self, SwapAccept, SwapOffer, OFFERS_TOPIC};
+use crate::messaging::types::{SwapOffer, OFFERS_TOPIC};
 use crate::swap::taker::run_taker;
 
 use super::{create_clients, output};
 
 #[derive(Args)]
 pub struct TakerArgs {
-    /// Hashlock from the maker (64-char hex). Optional when --nwaku-url is set.
+    /// Use a specific preimage (64-char hex) instead of generating a random one
     #[arg(long)]
-    hashlock: Option<String>,
+    preimage: Option<String>,
 }
 
 pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Result<()> {
     let (eth_client, lez_client) = create_clients(config).await?;
 
-    let hashlock = match args.hashlock {
-        // Explicit hashlock provided — use it directly (existing behavior).
-        Some(hex_str) => parse_bytes32(&hex_str, "hashlock")?,
-
-        // No hashlock — discover via messaging.
-        None => {
-            let nwaku_url = config.nwaku_url.as_deref().ok_or_else(|| {
-                SwapError::InvalidConfig(
-                    "either --hashlock or --nwaku-url is required".into(),
-                )
+    let override_preimage = match &args.preimage {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str).map_err(|e| {
+                SwapError::InvalidConfig(format!("invalid preimage hex: {e}"))
             })?;
-
-            discover_offer(nwaku_url, config, &lez_client, json).await?
+            let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                SwapError::InvalidConfig("preimage must be 32 bytes (64 hex chars)".into())
+            })?;
+            Some(arr)
         }
+        None => None,
     };
 
-    let outcome = run_taker(config, &eth_client, &lez_client, hashlock, None).await?;
+    // Discover offer via messaging if available.
+    if let Some(nwaku_url) = &config.nwaku_url {
+        discover_offer(nwaku_url, config, json).await?;
+    }
+
+    if !json {
+        println!("Starting taker swap — generating preimage and locking ETH...");
+    }
+
+    let outcome = run_taker(config, &eth_client, &lez_client, override_preimage, None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())
 }
 
-/// Discover a matching swap offer via Logos Messaging, wait for the LEZ
-/// escrow to appear, publish a `SwapAccept`, and return the hashlock.
+/// Discover a matching swap offer via Logos Messaging.
+/// Returns once a valid offer is found (doesn't need to wait for escrow — taker locks first now).
 async fn discover_offer(
     nwaku_url: &str,
     config: &SwapConfig,
-    lez_client: &LezClient,
     json: bool,
-) -> Result<[u8; 32]> {
+) -> Result<()> {
     let messaging = MessagingClient::new(nwaku_url);
     messaging.subscribe(&[OFFERS_TOPIC]).await?;
 
@@ -113,63 +117,23 @@ async fn discover_offer(
         }
     };
 
-    let hashlock = parse_bytes32(&offer.hashlock, "offer hashlock")?;
-
     if json {
         println!(
             "{}",
             serde_json::json!({
                 "event": "offer_discovered",
-                "hashlock": offer.hashlock,
                 "lez_amount": offer.lez_amount,
                 "eth_amount": offer.eth_amount,
             })
         );
     } else {
-        println!("Discovered offer — hashlock: {}", offer.hashlock);
+        println!(
+            "Discovered offer — {} LEZ for {} wei",
+            offer.lez_amount, offer.eth_amount,
+        );
     }
 
-    // 3. Wait for LEZ escrow to appear (maker may still be locking).
-    if !json {
-        println!("Waiting for LEZ escrow to be funded...");
-    }
-
-    let escrow_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-    loop {
-        match lez_client.get_escrow(&hashlock).await? {
-            Some(escrow) if escrow.amount >= config.lez_amount => {
-                info!("LEZ escrow is funded, proceeding");
-                break;
-            }
-            _ => {}
-        }
-
-        if tokio::time::Instant::now() >= escrow_deadline {
-            return Err(SwapError::Timeout(
-                "LEZ escrow did not appear within 5 minutes".into(),
-            ));
-        }
-
-        tokio::time::sleep(config.poll_interval).await;
-    }
-
-    // 4. Subscribe to swap-specific topic and publish accept (informational).
-    let swap_topic = types::swap_topic(&hashlock);
-    messaging.subscribe(&[&swap_topic]).await?;
-
-    let accept = SwapAccept {
-        hashlock: hex::encode(hashlock),
-        eth_swap_id: String::new(), // filled after ETH lock, informational only
-        taker_lez_account: hex::encode(lez_client.account_id().value()),
-        taker_eth_address: format!("{}", config.eth_recipient_address),
-    };
-
-    // Best-effort publish; don't fail the swap if messaging hiccups.
-    if let Err(e) = messaging.publish(&swap_topic, &accept).await {
-        tracing::warn!("failed to publish SwapAccept: {e}");
-    }
-
-    Ok(hashlock)
+    Ok(())
 }
 
 pub fn parse_bytes32(hex_str: &str, name: &str) -> Result<[u8; 32]> {

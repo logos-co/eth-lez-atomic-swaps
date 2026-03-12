@@ -85,8 +85,8 @@ public:
     QString resultJson() const { return m_resultJson; }
 
     Q_INVOKABLE void loadEnv();
-    Q_INVOKABLE void startMaker(const QString &preimageHex = QString());
-    Q_INVOKABLE void startTaker(const QString &hashlockHex);
+    Q_INVOKABLE void startMaker(const QString &hashlockHex = QString());
+    Q_INVOKABLE void startTaker(const QString &preimageHex = QString());
     Q_INVOKABLE void refundLez(const QString &hashlockHex);
     Q_INVOKABLE void refundEth(const QString &swapIdHex);
     Q_INVOKABLE void publishOffer();
