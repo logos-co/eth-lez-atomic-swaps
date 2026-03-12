@@ -106,7 +106,7 @@ ScrollView {
                 }
                 ConfigField {
                     Layout.fillWidth: true
-                    label: "ETH Amount (wei)"
+                    label: "ETH Amount"
                     text: swapBackend.ethAmount
                     onTextEdited: (val) => swapBackend.ethAmount = val
                 }

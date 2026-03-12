@@ -33,6 +33,12 @@ class SwapBackend : public QObject
     // Role (maker / taker — set via SWAP_ROLE env var)
     Q_PROPERTY(QString swapRole READ swapRole CONSTANT)
 
+    // Balances
+    Q_PROPERTY(QString ethAddress READ ethAddress NOTIFY ethAddressChanged)
+    Q_PROPERTY(QString ethBalance READ ethBalance NOTIFY ethBalanceChanged)
+    Q_PROPERTY(QString lezAccount READ lezAccount NOTIFY lezAccountChanged)
+    Q_PROPERTY(QString lezBalance READ lezBalance NOTIFY lezBalanceChanged)
+
     // State
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(QString currentStep READ currentStep NOTIFY currentStepChanged)
@@ -45,6 +51,12 @@ public:
 
     // Role getter
     QString swapRole() const { return m_swapRole; }
+
+    // Balance getters
+    QString ethAddress() const { return m_ethAddress; }
+    QString ethBalance() const { return m_ethBalance; }
+    QString lezAccount() const { return m_lezAccount; }
+    QString lezBalance() const { return m_lezBalance; }
 
     // Config getters
     QString ethRpcUrl() const { return m_ethRpcUrl; }
@@ -85,6 +97,7 @@ public:
     QString resultJson() const { return m_resultJson; }
 
     Q_INVOKABLE void loadEnv();
+    Q_INVOKABLE void fetchBalances();
     Q_INVOKABLE void startMaker(const QString &hashlockHex = QString());
     Q_INVOKABLE void startTaker(const QString &preimageHex = QString());
     Q_INVOKABLE void refundLez(const QString &hashlockHex);
@@ -107,6 +120,11 @@ signals:
     void lezTakerAccountIdChanged();
     void pollIntervalMsChanged();
     void nwakuUrlChanged();
+
+    void ethAddressChanged();
+    void ethBalanceChanged();
+    void lezAccountChanged();
+    void lezBalanceChanged();
 
     void runningChanged();
     void currentStepChanged();
@@ -145,6 +163,12 @@ private:
     QString m_pollIntervalMs;
     QString m_nwakuUrl;
 
+    // Balances
+    QString m_ethAddress;
+    QString m_ethBalance;
+    QString m_lezAccount;
+    QString m_lezBalance;
+
     // State
     bool m_running = false;
     QString m_currentStep;
@@ -153,6 +177,7 @@ private:
     QString m_publishedPreimage;
 
     QFutureWatcher<QString> m_watcher;
+    QFutureWatcher<QString> m_balanceWatcher;
     QFutureWatcher<QString> m_publishWatcher;
     QFutureWatcher<QString> m_fetchWatcher;
 };

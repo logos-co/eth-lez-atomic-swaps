@@ -61,6 +61,8 @@ char *swap_ffi_refund_lez(const char *config_json,
 char *swap_ffi_refund_eth(const char *config_json,
                           const char *swap_id_hex);
 
+char *swap_ffi_fetch_balances(const char *config_json);
+
 void swap_ffi_free_string(char *ptr);
 
 #ifdef __cplusplus

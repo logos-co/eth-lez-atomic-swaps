@@ -38,6 +38,46 @@ pub struct SwapConfig {
     pub nwaku_url: Option<String>,
 }
 
+/// Parse an ETH amount string (e.g. "0.001") and convert to wei (u128).
+pub fn eth_to_wei(s: &str) -> std::result::Result<u128, String> {
+    let s = s.trim();
+    // Split on decimal point
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (s, ""),
+    };
+    let int_val: u128 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().map_err(|e| format!("invalid ETH amount: {e}"))?
+    };
+    // Pad or truncate fractional part to 18 digits
+    let frac_padded = if frac_part.len() > 18 {
+        &frac_part[..18]
+    } else {
+        frac_part
+    };
+    let frac_val: u128 = if frac_padded.is_empty() {
+        0
+    } else {
+        let padded = format!("{:0<18}", frac_padded);
+        padded.parse().map_err(|e| format!("invalid ETH amount fraction: {e}"))?
+    };
+    Ok(int_val * 1_000_000_000_000_000_000 + frac_val)
+}
+
+/// Convert a wei value back to an ETH string (e.g. 1000000000000000 -> "0.001").
+pub fn wei_to_eth_string(wei: u128) -> String {
+    let whole = wei / 1_000_000_000_000_000_000;
+    let frac = wei % 1_000_000_000_000_000_000;
+    if frac == 0 {
+        return format!("{whole}");
+    }
+    let frac_str = format!("{:018}", frac);
+    let trimmed = frac_str.trim_end_matches('0');
+    format!("{whole}.{trimmed}")
+}
+
 pub fn parse_account_id(hex_str: &str) -> Result<AccountId> {
     let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(hex_str)

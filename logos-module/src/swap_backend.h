@@ -41,6 +41,12 @@ class SwapBackend : public QObject
     // Role (maker / taker — set via SWAP_ROLE env var or loadConfig)
     Q_PROPERTY(QString swapRole READ swapRole CONSTANT)
 
+    // Balances
+    Q_PROPERTY(QString ethAddress READ ethAddress NOTIFY ethAddressChanged)
+    Q_PROPERTY(QString ethBalance READ ethBalance NOTIFY ethBalanceChanged)
+    Q_PROPERTY(QString lezAccount READ lezAccount NOTIFY lezAccountChanged)
+    Q_PROPERTY(QString lezBalance READ lezBalance NOTIFY lezBalanceChanged)
+
     // Maker state
     Q_PROPERTY(bool makerRunning READ makerRunning NOTIFY makerRunningChanged)
     Q_PROPERTY(QString makerCurrentStep READ makerCurrentStep NOTIFY makerCurrentStepChanged)
@@ -62,6 +68,12 @@ public:
 
     // Role getter
     QString swapRole() const { return m_swapRole; }
+
+    // Balance getters
+    QString ethAddress() const { return m_ethAddress; }
+    QString ethBalance() const { return m_ethBalance; }
+    QString lezAccount() const { return m_lezAccount; }
+    QString lezBalance() const { return m_lezBalance; }
 
     // Config getters
     QString ethRpcUrl() const { return m_ethRpcUrl; }
@@ -112,6 +124,7 @@ public:
 
     Q_INVOKABLE void loadEnv();
     Q_INVOKABLE void loadConfig(const QJsonObject &config);
+    Q_INVOKABLE void fetchBalances();
     Q_INVOKABLE void startMaker(const QString &hashlockHex = QString());
     Q_INVOKABLE void startTaker(const QString &preimageHex = QString());
     Q_INVOKABLE void refundLez(const QString &hashlockHex);
@@ -134,6 +147,11 @@ signals:
     void lezTakerAccountIdChanged();
     void pollIntervalMsChanged();
     void nwakuUrlChanged();
+
+    void ethAddressChanged();
+    void ethBalanceChanged();
+    void lezAccountChanged();
+    void lezBalanceChanged();
 
     void makerRunningChanged();
     void makerCurrentStepChanged();
@@ -190,6 +208,12 @@ private:
     QString m_lezTakerAccountId;
     QString m_pollIntervalMs;
 
+    // Balances
+    QString m_ethAddress;
+    QString m_ethBalance;
+    QString m_lezAccount;
+    QString m_lezBalance;
+
     // Maker state
     bool m_makerRunning = false;
     QString m_makerCurrentStep;
@@ -206,6 +230,7 @@ private:
     QString m_nwakuUrl;
 
     // Separate watchers for concurrent maker + taker
+    QFutureWatcher<QString> m_balanceWatcher;
     QFutureWatcher<QString> m_makerWatcher;
     QFutureWatcher<QString> m_takerWatcher;
     QFutureWatcher<QString> m_publishWatcher;

@@ -13,7 +13,7 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{SwapConfig, parse_account_id, parse_program_id};
+use crate::config::{SwapConfig, eth_to_wei, parse_account_id, parse_program_id};
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
@@ -76,9 +76,9 @@ pub struct ConfigArgs {
     #[arg(long, env = "LEZ_AMOUNT")]
     lez_amount: u128,
 
-    /// Amount of ETH to swap (in wei)
+    /// Amount of ETH to swap (e.g. "0.001")
     #[arg(long, env = "ETH_AMOUNT")]
-    eth_amount: u128,
+    eth_amount: String,
 
     /// LEZ timelock duration in minutes (from now). Shorter — maker locks second.
     #[arg(long, env = "LEZ_TIMELOCK_MINUTES", default_value = "5")]
@@ -122,7 +122,8 @@ impl ConfigArgs {
             lez_signing_key: self.lez_signing_key,
             lez_htlc_program_id,
             lez_amount: self.lez_amount,
-            eth_amount: self.eth_amount,
+            eth_amount: eth_to_wei(&self.eth_amount)
+                .map_err(|e| SwapError::InvalidConfig(e))?,
             lez_timelock: now + self.lez_timelock_minutes * 60,
             eth_timelock: now + self.eth_timelock_minutes * 60,
             eth_recipient_address,

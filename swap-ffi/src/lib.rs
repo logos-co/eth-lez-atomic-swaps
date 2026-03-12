@@ -7,8 +7,11 @@ use tokio::runtime::Runtime;
 
 use sha2::{Digest, Sha256};
 
+use alloy::providers::Provider;
+use alloy::signers::local::PrivateKeySigner;
+
 use swap_orchestrator::{
-    config::{SwapConfig, parse_account_id, parse_program_id},
+    config::{SwapConfig, eth_to_wei, parse_account_id, parse_program_id},
     eth::client::EthClient,
     lez::client::LezClient,
     messaging::client::{MessagingClient, decode_waku_payload},
@@ -123,7 +126,7 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         parse_account_id(&c.lez_taker_account_id).map_err(|e| e.to_string())?;
 
     let lez_amount: u128 = c.lez_amount.parse().map_err(|e| format!("invalid lez_amount: {e}"))?;
-    let eth_amount: u128 = c.eth_amount.parse().map_err(|e| format!("invalid eth_amount: {e}"))?;
+    let eth_amount: u128 = eth_to_wei(&c.eth_amount)?;
     let lez_timelock_minutes: u64 = c
         .lez_timelock_minutes
         .parse()
@@ -577,6 +580,65 @@ pub unsafe extern "C" fn swap_ffi_fetch_offers(
         });
 
         let result = serde_json::json!({ "offers": offers });
+        to_c_string(&result.to_string())
+    })
+}
+
+/// Fetch ETH and LEZ wallet balances concurrently.
+///
+/// Returns JSON with eth_address, eth_balance, lez_account, lez_balance.
+/// Each chain is independent — one failing doesn't block the other.
+///
+/// # Safety
+/// `config_json` must be a valid null-terminated JSON C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> *mut c_char {
+    let json_str = match unsafe { c_str_to_str(config_json) } {
+        Some(s) => s,
+        None => return json_err("null or invalid config_json"),
+    };
+
+    let config = match parse_config(json_str) {
+        Ok(c) => c,
+        Err(e) => return json_err(&e),
+    };
+
+    // Derive ETH address from private key.
+    let eth_signer: std::result::Result<PrivateKeySigner, _> = config.eth_private_key.parse();
+    let eth_address = eth_signer.as_ref().ok().map(|s| format!("{}", s.address()));
+
+    // Derive LEZ account ID.
+    let lez_client_result = LezClient::new(&config);
+    let lez_account = lez_client_result.as_ref().ok().map(|c| hex::encode(c.account_id().value()));
+
+    runtime().block_on(async {
+        // Fetch ETH balance.
+        let eth_fut = async {
+            let signer = eth_signer.map_err(|e| format!("invalid ETH private key: {e}"))?;
+            let addr = signer.address();
+            let eth_client = EthClient::new(&config).await.map_err(|e| e.to_string())?;
+            let balance = eth_client.provider().get_balance(addr).await.map_err(|e| e.to_string())?;
+            Ok::<String, String>(balance.to_string())
+        };
+
+        // Fetch LEZ balance.
+        let lez_fut = async {
+            let client = lez_client_result.as_ref().map_err(|e| e.to_string())?;
+            let balance = client.get_balance(&client.account_id()).await.map_err(|e| e.to_string())?;
+            Ok::<String, String>(balance.to_string())
+        };
+
+        let (eth_result, lez_result) = tokio::join!(eth_fut, lez_fut);
+
+        let result = serde_json::json!({
+            "eth_address": eth_address,
+            "eth_balance": eth_result.as_ref().ok(),
+            "eth_error": eth_result.as_ref().err(),
+            "lez_account": lez_account,
+            "lez_balance": lez_result.as_ref().ok(),
+            "lez_error": lez_result.as_ref().err(),
+        });
+
         to_c_string(&result.to_string())
     })
 }

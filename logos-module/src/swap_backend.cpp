@@ -29,11 +29,28 @@ SwapBackend::SwapBackend(QThreadPool *pool, QObject *parent)
     connect(&m_makerWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
         setMakerResultJson(m_makerWatcher.result());
         setMakerRunning(false);
+        fetchBalances();
     });
 
     connect(&m_takerWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
         setTakerResultJson(m_takerWatcher.result());
         setTakerRunning(false);
+        fetchBalances();
+    });
+
+    connect(&m_balanceWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
+        auto doc = QJsonDocument::fromJson(m_balanceWatcher.result().toUtf8());
+        auto obj = doc.object();
+        auto setIfPresent = [&](const QString &key, QString &field, auto signal) {
+            if (!obj[key].isNull()) {
+                QString val = obj[key].toString();
+                if (field != val) { field = val; emit (this->*signal)(); }
+            }
+        };
+        setIfPresent("eth_address", m_ethAddress, &SwapBackend::ethAddressChanged);
+        setIfPresent("eth_balance", m_ethBalance, &SwapBackend::ethBalanceChanged);
+        setIfPresent("lez_account", m_lezAccount, &SwapBackend::lezAccountChanged);
+        setIfPresent("lez_balance", m_lezBalance, &SwapBackend::lezBalanceChanged);
     });
 
     connect(&m_publishWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
@@ -53,6 +70,7 @@ SwapBackend::SwapBackend(QThreadPool *pool, QObject *parent)
 
 SwapBackend::~SwapBackend()
 {
+    m_balanceWatcher.waitForFinished();
     m_makerWatcher.waitForFinished();
     m_takerWatcher.waitForFinished();
     m_publishWatcher.waitForFinished();
@@ -218,14 +236,16 @@ void SwapBackend::loadEnv()
     setLezSequencerUrl(env("LEZ_SEQUENCER_URL", "http://localhost:8080"));
     setLezSigningKey(env("LEZ_SIGNING_KEY"));
     setLezHtlcProgramId(env("LEZ_HTLC_PROGRAM_ID"));
-    setLezAmount(env("LEZ_AMOUNT", "1000"));
-    setEthAmount(env("ETH_AMOUNT", "1000000000000000"));
+    setLezAmount(env("LEZ_AMOUNT", "1"));
+    setEthAmount(env("ETH_AMOUNT", "1"));
     setLezTimelockMinutes(env("LEZ_TIMELOCK_MINUTES", "10"));
     setEthTimelockMinutes(env("ETH_TIMELOCK_MINUTES", "5"));
     setEthRecipientAddress(env("ETH_RECIPIENT_ADDRESS"));
     setLezTakerAccountId(env("LEZ_TAKER_ACCOUNT_ID"));
     setPollIntervalMs(env("POLL_INTERVAL_MS", "2000"));
     setNwakuUrl(env("NWAKU_URL"));
+
+    fetchBalances();
 }
 
 // ---------------------------------------------------------------------------
@@ -248,14 +268,32 @@ void SwapBackend::loadConfig(const QJsonObject &config)
     setLezSequencerUrl(val("lez_sequencer_url", "http://localhost:8080"));
     setLezSigningKey(val("lez_signing_key"));
     setLezHtlcProgramId(val("lez_htlc_program_id"));
-    setLezAmount(val("lez_amount", "1000"));
-    setEthAmount(val("eth_amount", "1000000000000000"));
+    setLezAmount(val("lez_amount", "1"));
+    setEthAmount(val("eth_amount", "1"));
     setLezTimelockMinutes(val("lez_timelock_minutes", "10"));
     setEthTimelockMinutes(val("eth_timelock_minutes", "5"));
     setEthRecipientAddress(val("eth_recipient_address"));
     setLezTakerAccountId(val("lez_taker_account_id"));
     setPollIntervalMs(val("poll_interval_ms", "2000"));
     setNwakuUrl(val("nwaku_url"));
+
+    fetchBalances();
+}
+
+// ---------------------------------------------------------------------------
+// Fetch balances
+// ---------------------------------------------------------------------------
+
+void SwapBackend::fetchBalances()
+{
+    QByteArray cfg = configJson();
+
+    auto future = QtConcurrent::run(m_threadPool, [cfg]() -> QString {
+        auto *result = swap_ffi_fetch_balances(cfg.constData());
+        return ffiToQString(result);
+    });
+
+    m_balanceWatcher.setFuture(future);
 }
 
 // ---------------------------------------------------------------------------
