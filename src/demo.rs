@@ -14,7 +14,6 @@ use nssa::{
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
 use sequencer_core::config::{AccountInitialData, SequencerConfig};
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::config::SwapConfig;
@@ -42,8 +41,6 @@ pub struct DemoEnv {
     _indexer_handle: jsonrpsee::server::ServerHandle,
     pub maker_config: SwapConfig,
     pub taker_config: SwapConfig,
-    pub hashlock: [u8; 32],
-    pub preimage: [u8; 32],
     pub taker_eth_private_key: String,
     pub taker_lez_signing_key: String,
 }
@@ -150,16 +147,10 @@ impl DemoEnv {
         tokio::time::sleep(BLOCK_WAIT).await;
         report(5, "Deploying LEZ HTLC program", "deployed");
 
-        // 6. Generate swap preimage.
-        report(6, "Generating swap preimage", "");
-        let preimage: [u8; 32] = rand::random();
-        let hashlock: [u8; 32] = Sha256::digest(preimage).into();
-        report(6, "Generating swap preimage", &hex::encode(&hashlock[..8]));
-
         // Build configs.
         let now = now_unix();
-        let lez_timelock = now + 600; // 10 minutes
-        let eth_timelock = now + 300; // 5 minutes
+        let eth_timelock = now + 600; // 10 minutes (taker locks ETH first, needs longer)
+        let lez_timelock = now + 300; // 5 minutes (maker locks LEZ second, shorter)
 
         let maker_config = SwapConfig {
             eth_rpc_url: anvil.ws_endpoint(),
@@ -206,8 +197,6 @@ impl DemoEnv {
             _indexer_handle: indexer_handle,
             maker_config,
             taker_config,
-            hashlock,
-            preimage,
             taker_eth_private_key,
             taker_lez_signing_key,
         }

@@ -28,7 +28,7 @@ pub async fn cmd_demo() -> Result<()> {
 
     let env = DemoEnv::start(Some(Box::new(|step, label, detail| {
         if detail.is_empty() {
-            eprint!("  [{step}/6] {label}...");
+            eprint!("  [{step}/5] {label}...");
         } else {
             eprintln!("  \x1b[32m\u{2713}\x1b[0m {detail}");
         }
@@ -51,20 +51,21 @@ pub async fn cmd_demo() -> Result<()> {
     println!("--- Running Swap ---");
     println!();
 
-    let preimage = env.preimage;
+    // Generate a deterministic preimage for the demo (passed to taker).
+    let preimage: [u8; 32] = rand::random();
+    let hashlock: [u8; 32] = Sha256::digest(preimage).into();
 
-    // Spawn maker: publish offer, lock LEZ, wait for ETH, claim ETH.
+    // Spawn maker: publish standing offer, wait for ETH lock, lock LEZ,
+    // watch for preimage on LEZ, claim ETH.
     let maker_handle = {
         let config = maker_config.clone();
         tokio::spawn(async move {
             let eth = EthClient::new(&config).await.unwrap();
             let lez = LezClient::new(&config).unwrap();
-            let hashlock: [u8; 32] = Sha256::digest(preimage).into();
 
-            // Publish offer via Logos Messaging.
+            // Publish standing offer via Logos Messaging (no hashlock).
             let messaging = MessagingClient::new(NWAKU_URL);
-            let swap_topic = crate::messaging::types::swap_topic(&hashlock);
-            messaging.subscribe(&[OFFERS_TOPIC, &swap_topic]).await.unwrap();
+            messaging.subscribe(&[OFFERS_TOPIC]).await.unwrap();
 
             let offer = SwapOffer {
                 hashlock: hex::encode(hashlock),
@@ -85,14 +86,13 @@ pub async fn cmd_demo() -> Result<()> {
             };
             messaging.publish(OFFERS_TOPIC, &offer).await.unwrap();
             eprintln!("  [maker] \x1b[34mPublished offer via Logos Messaging\x1b[0m");
-            eprintln!("          hashlock: {}", hex::encode(hashlock));
 
-            // run_maker locks LEZ, waits for ETH lock event, claims ETH.
-            run_maker(&config, &eth, &lez, Some(preimage), None).await
+            // run_maker waits for ETH lock, locks LEZ, watches for preimage, claims ETH.
+            run_maker(&config, &eth, &lez, Some(hashlock), None).await
         })
     };
 
-    // Spawn taker: discover offer via messaging, wait for escrow, lock ETH, claim LEZ.
+    // Spawn taker: discover offer, generate preimage, lock ETH, wait for LEZ lock, claim LEZ.
     let taker_handle = {
         let config = taker_config.clone();
         tokio::spawn(async move {
@@ -101,30 +101,14 @@ pub async fn cmd_demo() -> Result<()> {
 
             // Discover offer via Logos Messaging.
             eprintln!("  [taker] Listening for offers via Logos Messaging...");
-            let hashlock = discover_offer_demo(&config).await;
+            discover_offer_demo(&config).await;
             eprintln!("  [taker] \x1b[34mDiscovered offer via Logos Messaging\x1b[0m");
-            eprintln!("          hashlock: {}", hex::encode(hashlock));
-
-            // Wait for LEZ escrow to appear (maker may still be locking).
-            eprintln!("  [taker] Waiting for LEZ escrow...");
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-            loop {
-                match lez.get_escrow(&hashlock).await {
-                    Ok(Some(escrow)) if escrow.amount >= config.lez_amount => break,
-                    _ => {}
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    panic!("taker: LEZ escrow did not appear in time");
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            eprintln!("  [taker] LEZ escrow verified");
 
             // Brief pause so maker's ETH event watcher is ready before we lock.
             tokio::time::sleep(Duration::from_secs(3)).await;
 
-            // run_taker verifies escrow, locks ETH, waits for preimage, claims LEZ.
-            run_taker(&config, &eth, &lez, hashlock, None).await
+            // run_taker generates preimage, locks ETH, waits for LEZ lock, claims LEZ.
+            run_taker(&config, &eth, &lez, Some(preimage), None).await
         })
     };
 
@@ -144,7 +128,7 @@ pub async fn cmd_demo() -> Result<()> {
 }
 
 /// Poll messaging until a matching offer is found. Returns the hashlock.
-async fn discover_offer_demo(config: &crate::config::SwapConfig) -> [u8; 32] {
+async fn discover_offer_demo(config: &crate::config::SwapConfig) {
     let messaging = MessagingClient::new(NWAKU_URL);
     messaging.subscribe(&[OFFERS_TOPIC]).await.unwrap();
 
@@ -165,7 +149,7 @@ async fn discover_offer_demo(config: &crate::config::SwapConfig) -> [u8; 32] {
                         if offer.lez_amount == config.lez_amount
                             && offer.eth_amount == config.eth_amount
                         {
-                            return parse_hashlock(&offer.hashlock);
+                            return;
                         }
                     }
                 }
@@ -176,7 +160,7 @@ async fn discover_offer_demo(config: &crate::config::SwapConfig) -> [u8; 32] {
         let offers: Vec<SwapOffer> = messaging.poll_messages(OFFERS_TOPIC).await.unwrap_or_default();
         for offer in offers {
             if offer.lez_amount == config.lez_amount && offer.eth_amount == config.eth_amount {
-                return parse_hashlock(&offer.hashlock);
+                return;
             }
         }
 
@@ -186,11 +170,6 @@ async fn discover_offer_demo(config: &crate::config::SwapConfig) -> [u8; 32] {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-}
-
-fn parse_hashlock(hex_str: &str) -> [u8; 32] {
-    let bytes = hex::decode(hex_str).expect("invalid hashlock hex in offer");
-    bytes.try_into().expect("hashlock must be 32 bytes")
 }
 
 fn print_outcome(role: &str, outcome: &SwapOutcome) {

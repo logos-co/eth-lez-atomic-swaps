@@ -1,5 +1,4 @@
 use clap::Args;
-use sha2::{Digest, Sha256};
 
 use crate::config::SwapConfig;
 use crate::error::{Result, SwapError};
@@ -11,45 +10,47 @@ use super::{create_clients, output};
 
 #[derive(Args)]
 pub struct MakerArgs {
-    /// Use a specific preimage (64-char hex) instead of generating a random one
+    /// Accept a specific hashlock (64-char hex) instead of discovering via messaging
     #[arg(long)]
-    preimage: Option<String>,
+    hashlock: Option<String>,
 }
 
 pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Result<()> {
     let (eth_client, lez_client) = create_clients(config).await?;
 
-    let override_preimage = match &args.preimage {
+    let hashlock = match args.hashlock {
         Some(hex_str) => {
-            let bytes = hex::decode(hex_str).map_err(|e| {
-                SwapError::InvalidConfig(format!("invalid preimage hex: {e}"))
+            let bytes = hex::decode(&hex_str).map_err(|e| {
+                SwapError::InvalidConfig(format!("invalid hashlock hex: {e}"))
             })?;
             let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-                SwapError::InvalidConfig("preimage must be 32 bytes (64 hex chars)".into())
+                SwapError::InvalidConfig("hashlock must be 32 bytes (64 hex chars)".into())
             })?;
-            Some(arr)
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "hashlock_provided",
+                        "hashlock": hex_str,
+                    })
+                );
+            } else {
+                println!("Using hashlock: {hex_str}");
+            }
+
+            arr
         }
-        None => None,
+        None => {
+            // Publish standing offer and wait for taker via on-chain ETH lock detection.
+            // For now, require --hashlock when messaging is not fully wired for taker-locks-first.
+            return Err(SwapError::InvalidConfig(
+                "--hashlock is required (messaging-based discovery coming soon)".into(),
+            ));
+        }
     };
 
-    // Compute and display hashlock so the taker can use it.
-    let preimage_for_display: [u8; 32] = override_preimage.unwrap_or_else(rand::random);
-    let hashlock: [u8; 32] = Sha256::digest(preimage_for_display).into();
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "event": "hashlock_generated",
-                "hashlock": hex::encode(hashlock),
-            })
-        );
-    } else {
-        println!("Hashlock: {}", hex::encode(hashlock));
-    }
-
-    // If messaging is enabled, publish the offer before starting the swap.
-    // The taker discovers it and waits for the LEZ escrow to appear.
+    // If messaging is enabled, publish a standing offer.
     if let Some(nwaku_url) = &config.nwaku_url {
         let messaging = MessagingClient::new(nwaku_url);
         let swap_topic = types::swap_topic(&hashlock);
@@ -82,16 +83,13 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
                 })
             );
         } else {
-            println!("Offer published to Logos Messaging. Waiting for swap...");
+            println!("Offer published to Logos Messaging. Waiting for taker to lock ETH...");
         }
-    } else {
-        if !json {
-            println!("Share this with the taker, then waiting for swap to complete...");
-        }
+    } else if !json {
+        println!("Waiting for taker to lock ETH...");
     }
 
-    let outcome =
-        run_maker(config, &eth_client, &lez_client, Some(preimage_for_display), None).await?;
+    let outcome = run_maker(config, &eth_client, &lez_client, Some(hashlock), None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())

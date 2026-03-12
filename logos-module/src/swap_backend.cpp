@@ -291,7 +291,7 @@ void SwapBackend::handleProgress(const QString &json, bool isMaker)
 // Swap operations
 // ---------------------------------------------------------------------------
 
-void SwapBackend::startMaker(const QString &preimageHex)
+void SwapBackend::startMaker(const QString &hashlockHex)
 {
     if (m_makerRunning)
         return;
@@ -299,14 +299,14 @@ void SwapBackend::startMaker(const QString &preimageHex)
     clearMakerProgress();
 
     QByteArray cfg = configJson();
-    QByteArray preimage = preimageHex.toUtf8();
+    QByteArray hl = hashlockHex.toUtf8();
 
     auto *ctx = &m_makerProgressCtx;
-    auto future = QtConcurrent::run(m_threadPool, [cfg, preimage, ctx]() -> QString {
-        const char *preimagePtr = preimage.isEmpty() ? nullptr : preimage.constData();
+    auto future = QtConcurrent::run(m_threadPool, [cfg, hl, ctx]() -> QString {
+        const char *hlPtr = hl.isEmpty() ? nullptr : hl.constData();
         auto *result = swap_ffi_run_maker(
             cfg.constData(),
-            preimagePtr,
+            hlPtr,
             progressCallbackTrampoline,
             ctx);
         return ffiToQString(result);
@@ -315,7 +315,7 @@ void SwapBackend::startMaker(const QString &preimageHex)
     m_makerWatcher.setFuture(future);
 }
 
-void SwapBackend::startTaker(const QString &hashlockHex)
+void SwapBackend::startTaker(const QString &preimageHex)
 {
     if (m_takerRunning)
         return;
@@ -323,13 +323,14 @@ void SwapBackend::startTaker(const QString &hashlockHex)
     clearTakerProgress();
 
     QByteArray cfg = configJson();
-    QByteArray hl = hashlockHex.toUtf8();
+    QByteArray preimage = preimageHex.toUtf8();
 
     auto *ctx = &m_takerProgressCtx;
-    auto future = QtConcurrent::run(m_threadPool, [cfg, hl, ctx]() -> QString {
+    auto future = QtConcurrent::run(m_threadPool, [cfg, preimage, ctx]() -> QString {
+        const char *preimagePtr = preimage.isEmpty() ? nullptr : preimage.constData();
         auto *result = swap_ffi_run_taker(
             cfg.constData(),
-            hl.constData(),
+            preimagePtr,
             progressCallbackTrampoline,
             ctx);
         return ffiToQString(result);

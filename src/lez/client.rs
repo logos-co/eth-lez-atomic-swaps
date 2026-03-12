@@ -55,7 +55,8 @@ impl LezClient {
         AccountId::from((&self.program_id, &PdaSeed::new(*hashlock)))
     }
 
-    /// Read the escrow PDA state. Returns `None` if the account has no data.
+    /// Read the escrow PDA state. Returns `None` if the account doesn't exist
+    /// or contains invalid/phantom data.
     pub async fn get_escrow(&self, hashlock: &[u8; 32]) -> Result<Option<HTLCEscrow>> {
         let pda = self.escrow_pda(hashlock);
         let resp = self
@@ -65,11 +66,18 @@ impl LezClient {
             .map_err(|e| SwapError::LezSequencer(format!("get_account failed: {e}")))?;
 
         let data: Vec<u8> = resp.account.data.into();
-        if data.is_empty() {
+        if data.len() < 117 {
             return Ok(None);
         }
 
         let escrow = HTLCEscrow::from_bytes(&data);
+
+        // The sequencer returns data for non-existent PDAs. Verify the stored
+        // hashlock matches what we queried for to reject phantom accounts.
+        if escrow.hashlock != *hashlock {
+            return Ok(None);
+        }
+
         Ok(Some(escrow))
     }
 

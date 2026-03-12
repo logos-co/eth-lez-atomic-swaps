@@ -18,12 +18,12 @@ typedef void (*ProgressCallback)(const char*, void*);
 char *swap_ffi_load_env(const char *path);
 
 char *swap_ffi_run_maker(const char *config_json,
-                         const char *preimage_hex,
+                         const char *hashlock_hex,
                          ProgressCallback cb,
                          void *user_data);
 
 char *swap_ffi_run_taker(const char *config_json,
-                         const char *hashlock_hex,
+                         const char *preimage_hex,
                          ProgressCallback cb,
                          void *user_data);
 

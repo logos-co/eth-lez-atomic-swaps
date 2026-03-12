@@ -9,9 +9,9 @@ ScrollView {
     background: Rectangle { color: Theme.background }
 
     property var takerSteps: [
-        { name: "LezEscrowVerified", label: "Verify LEZ Escrow" },
+        { name: "PreimageGenerated", label: "Generate Preimage" },
         { name: "EthLocked",         label: "Lock ETH" },
-        { name: "PreimageRevealed",  label: "Wait for Preimage" },
+        { name: "LezLockDetected",   label: "Wait for LEZ Lock" },
         { name: "LezClaimed",        label: "Claim LEZ" },
     ]
 
@@ -28,12 +28,6 @@ ScrollView {
     property bool messagingEnabled: swapBackend.nwakuUrl !== ""
     property var discoveredOffers: []
     property bool fetching: false
-
-    function isValidHex(s, bytes) {
-        let clean = s.startsWith("0x") ? s.substring(2) : s
-        if (clean.length !== bytes * 2) return false
-        return /^[0-9a-fA-F]+$/.test(clean)
-    }
 
     function weiToEth(wei) {
         var n = Number(wei)
@@ -100,7 +94,7 @@ ScrollView {
                 font.bold: true
             }
             Text {
-                text: "Verify maker's LEZ escrow, lock ETH, wait for maker to reveal preimage, then claim LEZ."
+                text: "Generate preimage, lock ETH, wait for maker to lock LEZ, then claim LEZ."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSmall
                 wrapMode: Text.Wrap
@@ -157,7 +151,8 @@ ScrollView {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            hashlockInput.text = modelData.hashlock
+                            // Accept offer — start taker (preimage generated internally)
+                            swapBackend.startTaker("")
                         }
                     }
 
@@ -181,7 +176,7 @@ ScrollView {
                                 font.bold: true
                             }
                             Text {
-                                text: "\u21c4"
+                                text: "\u21C4"
                                 color: Theme.textMuted
                                 font.pixelSize: Theme.fontNormal
                             }
@@ -218,14 +213,6 @@ ScrollView {
                                 font.pixelSize: 11
                             }
                         }
-
-                        // Row 3: hashlock
-                        Text {
-                            text: "Hashlock: " + modelData.hashlock.substring(0, 20) + "..."
-                            color: Theme.textMuted
-                            font.pixelSize: 11
-                            font.family: "Menlo, Courier New"
-                        }
                     }
                 }
             }
@@ -238,53 +225,10 @@ ScrollView {
                 font.pixelSize: Theme.fontSmall
             }
 
-            // Hashlock input
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 4
-
-                Text {
-                    text: "Hashlock (from maker)"
-                    color: Theme.textSecondary
-                    font.pixelSize: Theme.fontSmall
-                }
-                TextField {
-                    id: hashlockInput
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: Theme.inputHeight
-                    leftPadding: 12
-                    rightPadding: 12
-                    topPadding: 8
-                    bottomPadding: 8
-                    placeholderText: "64-char hex (e.g. abcd1234...)"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontNormal
-                    font.family: "Menlo, Courier New"
-                    selectByMouse: true
-                    maximumLength: 66 // 0x prefix + 64 hex
-                    background: Rectangle {
-                        color: Theme.inputBackground
-                        border.color: {
-                            if (!hashlockInput.activeFocus) return Theme.border
-                            return hashlockInput.text.length > 0 && !takerRoot.isValidHex(hashlockInput.text, 32)
-                                   ? Theme.error : Theme.accent
-                        }
-                        border.width: 1
-                        radius: Theme.radiusSmall
-                    }
-                }
-                Text {
-                    visible: hashlockInput.text.length > 0 && !takerRoot.isValidHex(hashlockInput.text, 32)
-                    text: "Must be 64 hex characters (32 bytes)"
-                    color: Theme.error
-                    font.pixelSize: 11
-                }
-            }
-
-            // Start button
+            // Start button (no hashlock input needed — taker generates preimage)
             Button {
                 text: swapBackend.takerRunning ? "Running..." : "Start Taker"
-                enabled: !swapBackend.takerRunning && takerRoot.isValidHex(hashlockInput.text, 32)
+                enabled: !swapBackend.takerRunning
                 Layout.fillWidth: true
                 Layout.preferredHeight: 48
                 font.pixelSize: Theme.fontNormal
@@ -304,7 +248,7 @@ ScrollView {
                     font: parent.font
                 }
 
-                onClicked: swapBackend.startTaker(hashlockInput.text)
+                onClicked: swapBackend.startTaker("")
             }
 
             // Progress

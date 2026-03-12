@@ -5,24 +5,26 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "step", content = "data")]
 pub enum SwapProgress {
-    // Maker steps
+    // Taker steps (taker locks first, claims LEZ)
     PreimageGenerated { hashlock: String },
-    LezLocking,
-    LezLocked { tx_hash: String },
-    WaitingForEthLock,
-    EthLockDetected { swap_id: String },
-    ClaimingEth,
-    EthClaimed { tx_hash: String },
-
-    // Taker steps
-    VerifyingLezEscrow,
-    LezEscrowVerified,
     LockingEth,
     EthLocked { swap_id: String },
-    WaitingForPreimage,
-    PreimageRevealed { preimage: String },
+    WaitingForLezLock,
+    LezLockDetected,
+    VerifyingLezEscrow,
+    LezEscrowVerified,
     ClaimingLez,
     LezClaimed { tx_hash: String },
+
+    // Maker steps (maker locks second, claims ETH)
+    WaitingForEthLock,
+    EthLockDetected { swap_id: String },
+    LezLocking,
+    LezLocked { tx_hash: String },
+    WaitingForPreimage,
+    PreimageRevealed { preimage: String },
+    ClaimingEth,
+    EthClaimed { tx_hash: String },
 
     // Shared
     TimelockExpired,

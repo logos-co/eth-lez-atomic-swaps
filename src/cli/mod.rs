@@ -80,12 +80,12 @@ pub struct ConfigArgs {
     #[arg(long, env = "ETH_AMOUNT")]
     eth_amount: u128,
 
-    /// LEZ timelock duration in minutes (from now)
-    #[arg(long, env = "LEZ_TIMELOCK_MINUTES", default_value = "10")]
+    /// LEZ timelock duration in minutes (from now). Shorter — maker locks second.
+    #[arg(long, env = "LEZ_TIMELOCK_MINUTES", default_value = "5")]
     lez_timelock_minutes: u64,
 
-    /// ETH timelock duration in minutes (from now)
-    #[arg(long, env = "ETH_TIMELOCK_MINUTES", default_value = "5")]
+    /// ETH timelock duration in minutes (from now). Longer — taker locks first.
+    #[arg(long, env = "ETH_TIMELOCK_MINUTES", default_value = "10")]
     eth_timelock_minutes: u64,
 
     /// Polling interval in milliseconds
@@ -135,9 +135,9 @@ impl ConfigArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the maker flow: generate preimage, lock LEZ, watch for ETH, claim ETH
+    /// Run the maker flow: watch for ETH lock, lock LEZ, watch for preimage, claim ETH
     Maker(maker::MakerArgs),
-    /// Run the taker flow: verify LEZ escrow, lock ETH, watch for claim, claim LEZ
+    /// Run the taker flow: generate preimage, lock ETH, watch for LEZ lock, claim LEZ
     Taker(taker::TakerArgs),
     /// Refund expired HTLCs
     Refund(refund::RefundArgs),
