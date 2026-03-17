@@ -10,7 +10,7 @@ use super::{create_clients, output};
 
 #[derive(Args)]
 pub struct MakerArgs {
-    /// Accept a specific hashlock (64-char hex) instead of discovering via messaging
+    /// Accept a specific hashlock (64-char hex) instead of discovering via on-chain event
     #[arg(long)]
     hashlock: Option<String>,
 }
@@ -27,37 +27,28 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
                 SwapError::InvalidConfig("hashlock must be 32 bytes (64 hex chars)".into())
             })?;
 
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "event": "hashlock_provided",
-                        "hashlock": hex_str,
-                    })
-                );
-            } else {
+            if !json {
                 println!("Using hashlock: {hex_str}");
             }
 
-            arr
+            Some(arr)
         }
-        None => {
-            // Publish standing offer and wait for taker via on-chain ETH lock detection.
-            // For now, require --hashlock when messaging is not fully wired for taker-locks-first.
-            return Err(SwapError::InvalidConfig(
-                "--hashlock is required (messaging-based discovery coming soon)".into(),
-            ));
-        }
+        None => None,
     };
 
-    // If messaging is enabled, publish a standing offer.
+    // If messaging is enabled, publish a standing offer so takers can discover us.
     if let Some(nwaku_url) = &config.nwaku_url {
         let messaging = MessagingClient::new(nwaku_url);
-        let swap_topic = types::swap_topic(&hashlock);
-        messaging.subscribe(&[OFFERS_TOPIC, &swap_topic]).await?;
+
+        let mut topics = vec![OFFERS_TOPIC.to_string()];
+        if let Some(hl) = &hashlock {
+            topics.push(types::swap_topic(hl));
+        }
+        let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
+        messaging.subscribe(&topic_refs).await?;
 
         let offer = SwapOffer {
-            hashlock: hex::encode(hashlock),
+            hashlock: hashlock.map_or_else(String::new, |hl| hex::encode(hl)),
             lez_amount: config.lez_amount,
             eth_amount: config.eth_amount,
             maker_eth_address: format!("{}", config.eth_recipient_address),
@@ -74,22 +65,14 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
 
         messaging.publish(OFFERS_TOPIC, &offer).await?;
 
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "event": "offer_published",
-                    "topic": OFFERS_TOPIC,
-                })
-            );
-        } else {
+        if !json {
             println!("Offer published to Logos Messaging. Waiting for taker to lock ETH...");
         }
     } else if !json {
         println!("Waiting for taker to lock ETH...");
     }
 
-    let outcome = run_maker(config, &eth_client, &lez_client, Some(hashlock), None).await?;
+    let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())
