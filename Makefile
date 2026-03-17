@@ -1,6 +1,7 @@
 .PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra nwaku nwaku-stop \
+       setup localnet-start localnet-stop test \
        logos-module-configure logos-module-build logos-module-plugin logos-module-run \
-       plugin-configure plugin-build plugin-install plugin-run
+       plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
 
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
@@ -34,11 +35,27 @@ clean:
 contracts:
 	cd contracts && forge build
 
-demo: contracts
-	cargo run --features demo -- demo
+# --- Scaffold (LEZ infrastructure) ---
 
-infra: contracts nwaku
-	trap 'docker compose down' EXIT INT TERM; cargo run --features demo -- infra
+setup:
+	logos-scaffold setup
+
+localnet-start:
+	logos-scaffold localnet start
+
+localnet-stop:
+	logos-scaffold localnet stop
+
+test: contracts localnet-start
+	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test; logos-scaffold localnet stop
+
+# --- Demo / Infra ---
+
+demo: contracts nwaku
+	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
+
+infra: contracts nwaku localnet-start
+	trap 'logos-scaffold localnet stop; docker compose down' EXIT INT TERM; cargo run --features demo -- infra
 
 nwaku:
 	docker compose up -d
@@ -93,5 +110,10 @@ plugin-install: plugin-build
 	@# Copy FFI lib if not already there or if newer
 	cp -n swap-ffi/target/release/libswap_ffi.dylib "$(PLUGIN_DIR)/" 2>/dev/null || true
 
-plugin-run: plugin-install
-	env $$(cat .env | grep -v '^\#' | xargs) $(LOGOS_APP_BIN) &
+plugin-run: plugin-run-maker
+
+plugin-run-maker: plugin-install
+	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_APP_BIN) &
+
+plugin-run-taker: plugin-install
+	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(LOGOS_APP_BIN) &
