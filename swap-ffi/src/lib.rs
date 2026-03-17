@@ -11,7 +11,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use swap_orchestrator::{
-    config::{SwapConfig, eth_to_wei, parse_account_id, parse_program_id},
+    config::{LezAuth, SwapConfig, eth_to_wei, parse_account_id, parse_base58_account_id, parse_program_id},
     eth::client::EthClient,
     lez::client::LezClient,
     messaging::client::{MessagingClient, decode_waku_payload},
@@ -91,7 +91,15 @@ struct FfiConfig {
     eth_private_key: String,
     eth_htlc_address: String,
     lez_sequencer_url: String,
-    lez_signing_key: String,
+    /// Raw signing key (hex). Used when wallet fields are absent.
+    #[serde(default)]
+    lez_signing_key: Option<String>,
+    /// Scaffold wallet home directory. If set with lez_account_id, uses wallet auth.
+    #[serde(default)]
+    lez_wallet_home: Option<String>,
+    /// Scaffold wallet account ID (base58). Required when lez_wallet_home is set.
+    #[serde(default)]
+    lez_account_id: Option<String>,
     lez_htlc_program_id: String,
     lez_amount: String,
     eth_amount: String,
@@ -147,7 +155,16 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         eth_private_key: c.eth_private_key,
         eth_htlc_address,
         lez_sequencer_url: c.lez_sequencer_url,
-        lez_signing_key: c.lez_signing_key,
+        lez_auth: match (&c.lez_wallet_home, &c.lez_account_id) {
+            (Some(home), Some(account_id)) => LezAuth::Wallet {
+                home: std::path::PathBuf::from(home),
+                account_id: parse_base58_account_id(account_id).map_err(|e| e.to_string())?,
+            },
+            _ => LezAuth::RawKey(
+                c.lez_signing_key
+                    .ok_or("lez_signing_key is required when lez_wallet_home is not set")?,
+            ),
+        },
         lez_htlc_program_id,
         lez_amount,
         eth_amount,
