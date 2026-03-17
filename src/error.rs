@@ -32,6 +32,10 @@ pub enum SwapError {
     #[error("timelock not expired: {0} seconds remaining")]
     TimelockNotExpired(u64),
 
+    // --- Scaffold ---
+    #[error("scaffold error: {0}")]
+    Scaffold(String),
+
     // --- Config ---
     #[error("missing environment variable: {0}")]
     MissingEnvVar(String),

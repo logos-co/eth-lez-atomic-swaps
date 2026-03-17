@@ -10,21 +10,44 @@ use tracing::{debug, info};
 use url::Url;
 
 use crate::{
-    config::SwapConfig,
+    config::{LezAuth, SwapConfig},
     error::{Result, SwapError},
+    scaffold,
 };
 
+enum LezBackend {
+    Standalone {
+        sequencer: SequencerClient,
+        private_key: PrivateKey,
+    },
+    Wallet {
+        wallet_core: wallet::WalletCore,
+        private_key: PrivateKey,
+    },
+}
+
 pub struct LezClient {
-    sequencer: SequencerClient,
-    private_key: PrivateKey,
+    backend: LezBackend,
     account_id: AccountId,
     program_id: ProgramId,
     poll_interval: std::time::Duration,
 }
 
 impl LezClient {
+    /// Create a LezClient from a SwapConfig. Dispatches based on `LezAuth` variant:
+    /// - `RawKey`: uses the hex-encoded signing key directly (tests / legacy).
+    /// - `Wallet`: reads the signing key from a scaffold-managed wallet on disk.
     pub fn new(config: &SwapConfig) -> Result<Self> {
-        let key_bytes: [u8; 32] = hex::decode(&config.lez_signing_key)
+        match &config.lez_auth {
+            LezAuth::RawKey(hex_key) => Self::from_raw_key(hex_key, config),
+            LezAuth::Wallet { home, account_id } => Self::from_wallet(home, account_id, config),
+        }
+    }
+
+    /// Construct from a raw hex-encoded signing key (32 bytes). Used by tests and
+    /// the in-process demo environment.
+    pub fn from_raw_key(hex_key: &str, config: &SwapConfig) -> Result<Self> {
+        let key_bytes: [u8; 32] = hex::decode(hex_key)
             .map_err(|e| SwapError::InvalidConfig(format!("invalid LEZ signing key hex: {e}")))?
             .try_into()
             .map_err(|_| SwapError::InvalidConfig("LEZ signing key must be 32 bytes".into()))?;
@@ -42,13 +65,61 @@ impl LezClient {
             .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
 
         Ok(Self {
-            sequencer,
-            private_key,
+            backend: LezBackend::Standalone {
+                sequencer,
+                private_key,
+            },
             account_id,
             program_id: config.lez_htlc_program_id,
             poll_interval: config.poll_interval,
         })
     }
+
+    /// Construct from a scaffold-managed wallet. Reads the signing key for the
+    /// given account from the wallet config on disk. Uses the WalletCore's
+    /// sequencer client instead of creating a duplicate.
+    pub fn from_wallet(
+        wallet_home: &std::path::Path,
+        target_account_id: &AccountId,
+        config: &SwapConfig,
+    ) -> Result<Self> {
+        let wc = scaffold::wallet_core(wallet_home)?;
+
+        let private_key = wc
+            .get_account_public_signing_key(*target_account_id)
+            .ok_or_else(|| {
+                SwapError::Scaffold(format!(
+                    "wallet has no signing key for account {}",
+                    target_account_id
+                ))
+            })?
+            .clone();
+
+        Ok(Self {
+            backend: LezBackend::Wallet {
+                wallet_core: wc,
+                private_key,
+            },
+            account_id: *target_account_id,
+            program_id: config.lez_htlc_program_id,
+            poll_interval: config.poll_interval,
+        })
+    }
+
+    fn sequencer(&self) -> &SequencerClient {
+        match &self.backend {
+            LezBackend::Standalone { sequencer, .. } => sequencer,
+            LezBackend::Wallet { wallet_core, .. } => &wallet_core.sequencer_client,
+        }
+    }
+
+    fn private_key(&self) -> &PrivateKey {
+        match &self.backend {
+            LezBackend::Standalone { private_key, .. } => private_key,
+            LezBackend::Wallet { private_key, .. } => private_key,
+        }
+    }
+
 
     /// Derive the escrow PDA account ID from a hashlock.
     pub fn escrow_pda(&self, hashlock: &[u8; 32]) -> AccountId {
@@ -60,13 +131,15 @@ impl LezClient {
     pub async fn get_escrow(&self, hashlock: &[u8; 32]) -> Result<Option<HTLCEscrow>> {
         let pda = self.escrow_pda(hashlock);
         let resp = self
-            .sequencer
-            .get_account(pda.to_string())
+            .sequencer()
+            .get_account(pda)
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_account failed: {e}")))?;
 
         let data: Vec<u8> = resp.account.data.into();
+        eprintln!("[get_escrow] pda={} data_len={}", hex::encode(pda.value()), data.len());
         if data.len() < 117 {
+            eprintln!("[get_escrow] data too short ({} < 117)", data.len());
             return Ok(None);
         }
 
@@ -75,6 +148,11 @@ impl LezClient {
         // The sequencer returns data for non-existent PDAs. Verify the stored
         // hashlock matches what we queried for to reject phantom accounts.
         if escrow.hashlock != *hashlock {
+            eprintln!(
+                "[get_escrow] hashlock mismatch: expected={} got={}",
+                hex::encode(hashlock),
+                hex::encode(escrow.hashlock),
+            );
             return Ok(None);
         }
 
@@ -84,8 +162,8 @@ impl LezClient {
     /// Read the balance of an account.
     pub async fn get_balance(&self, account_id: &AccountId) -> Result<u128> {
         let resp = self
-            .sequencer
-            .get_account_balance(account_id.to_string())
+            .sequencer()
+            .get_account_balance(*account_id)
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_account_balance failed: {e}")))?;
 
@@ -102,17 +180,18 @@ impl LezClient {
         let message = Message::try_new(program_id, account_ids, nonces, amount)
             .map_err(|e| SwapError::LezTransaction(format!("failed to build message: {e}")))?;
 
-        let witness_set = WitnessSet::for_message(&message, &[&self.private_key]);
+        let witness_set = WitnessSet::for_message(&message, &[self.private_key()]);
         let tx = PublicTransaction::new(message, witness_set);
 
         let resp = self
-            .sequencer
+            .sequencer()
             .send_tx_public(tx)
             .await
             .map_err(|e| SwapError::LezTransaction(format!("transfer failed: {e}")))?;
 
-        info!(tx_hash = %resp.tx_hash, amount, "LEZ transfer submitted");
-        Ok(resp.tx_hash)
+        let tx_hash = resp.tx_hash.to_string();
+        info!(tx_hash = %tx_hash, amount, "LEZ transfer submitted");
+        Ok(tx_hash)
     }
 
     /// Lock LEZ into the HTLC escrow PDA.
@@ -155,21 +234,11 @@ impl LezClient {
         }
 
         // Step 2: Fund the escrow PDA (now owned by the HTLC program).
+        // Submit the transfer but don't wait for on-chain confirmation —
+        // the taker's watcher independently verifies the PDA balance before
+        // accepting the lock, so waiting here only adds latency.
         let transfer_hash = self.transfer(pda, amount).await?;
         debug!(tx_hash = %transfer_hash, "escrow PDA funded");
-
-        // Wait for the transfer to be committed.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-        loop {
-            let balance = self.get_balance(&pda).await?;
-            if balance >= amount {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(SwapError::Timeout("LEZ escrow funding confirmation".into()));
-            }
-            tokio::time::sleep(self.poll_interval).await;
-        }
 
         info!(lock_tx = %lock_hash, fund_tx = %transfer_hash, "LEZ HTLC locked and funded");
         Ok(lock_hash)
@@ -227,23 +296,23 @@ impl LezClient {
         let message = Message::try_new(self.program_id, account_ids, nonces, instruction)
             .map_err(|e| SwapError::LezTransaction(format!("failed to build message: {e}")))?;
 
-        let witness_set = WitnessSet::for_message(&message, &[&self.private_key]);
+        let witness_set = WitnessSet::for_message(&message, &[self.private_key()]);
         let tx = PublicTransaction::new(message, witness_set);
 
         let resp = self
-            .sequencer
+            .sequencer()
             .send_tx_public(tx)
             .await
             .map_err(|e| SwapError::LezTransaction(format!("send_tx_public failed: {e}")))?;
 
-        Ok(resp.tx_hash)
+        Ok(resp.tx_hash.to_string())
     }
 
     /// Fetch current nonces for the given signer accounts.
     async fn get_nonces(&self, signers: &[AccountId]) -> Result<Vec<u128>> {
-        let ids: Vec<String> = signers.iter().map(|id| id.to_string()).collect();
+        let ids: Vec<AccountId> = signers.to_vec();
         let resp = self
-            .sequencer
+            .sequencer()
             .get_accounts_nonces(ids)
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_accounts_nonces failed: {e}")))?;
