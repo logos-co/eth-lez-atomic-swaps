@@ -81,7 +81,9 @@ make run-taker            # open taker UI (in another terminal)
 
 **logos-app plugin**
 
-<details><summary><b>Setting up logos-app</b></summary>
+Runs inside [logos-app](https://github.com/logos-co/logos-app) as an IComponent plugin. Requires Nix (for building logos-app) and the logos-app Qt 6.9 libraries (the plugin must link against the same Qt that logos-app ships).
+
+<details><summary><b>First-time logos-app setup</b></summary>
 
 ```bash
 git clone https://github.com/logos-co/logos-app.git
@@ -89,31 +91,45 @@ cd logos-app
 nix build            # builds the app via flake.nix — produces result/bin/logos-app
 ```
 
-The Makefile expects logos-app at `~/Developer/status/logos-app`. If yours is elsewhere, override the path:
+The Makefile expects logos-app at `~/Developer/status/logos-app`. If yours is elsewhere, override:
 
 ```bash
 make plugin-build LOGOS_APP_INTERFACES=<path-to-logos-app>/app/interfaces
 make plugin-run-maker LOGOS_APP_BIN=<path-to-logos-app>/result/bin/logos-app
 ```
+
+The plugin build uses Nix Qt paths hardcoded in the Makefile (`NIX_QTBASE`, `NIX_QTDECLARATIVE`, etc.). If your Nix store hashes differ, update them — run `nix build` in logos-app first, then find the paths with `nix path-info .#logos-app --recursive | grep qt`.
 </details>
 
 ```bash
 make plugin-build         # builds FFI bridge + IComponent plugin
 make plugin-run-maker     # launch logos-app as maker (loads .env)
-make plugin-run-taker     # launch logos-app as taker (loads .env.taker)
+make plugin-run-taker     # launch logos-app as taker (loads .env.taker, in another terminal)
 ```
 
-Two logos-app instances are needed — one per role (maker/taker), each with its own wallet credentials.
+Two logos-app instances are needed — one per role (maker/taker), each with its own wallet credentials. The plugin is installed to `~/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap/` (macOS).
 
-**Headless demo** (no UI)
+**How it works:** `make plugin-install` copies the compiled plugin (`lez_atomic_swap.dylib`) and the Rust FFI bridge (`libswap_ffi.dylib`) into the logos-app plugin directory. On launch, logos-app discovers and loads the plugin, which registers a `SwapBackend` QML context object. Config is injected via environment variables from `.env` / `.env.taker`.
+
+**CLI** (no UI)
 ```bash
-make demo                 # runs full swap in one terminal — good sanity check
+# In two terminals:
+env $(cat .env | grep -v '^\#' | xargs) cargo run -- maker
+env $(cat .env.taker | grep -v '^\#' | xargs) cargo run -- taker
+
+# Or run both sides headlessly in one terminal:
+make demo
 ```
 
 ### 3. Run a Swap
 
-**Maker**: Publish Offer → Start Swap → waits for taker to lock ETH → locks LEZ → waits for preimage → claims ETH.
-**Taker**: Discover Offers → select offer → Start Taker → generates preimage, locks ETH → waits for LEZ lock → claims LEZ.
+**Maker** (any interface): Publish Offer → Start Swap → waits for taker to lock ETH → locks LEZ → waits for preimage → claims ETH.
+**Taker** (any interface): Discover Offers → select offer → Start Taker → generates preimage, locks ETH → waits for LEZ lock → claims LEZ.
+
+Verify balances after a swap with the LSSA wallet CLI:
+```bash
+NSSA_WALLET_HOME_DIR=.scaffold/wallet wallet account ls -l
+```
 
 ### 4. Cleanup
 
@@ -168,8 +184,8 @@ Stop with `Ctrl-C` on `make infra`, then `make nwaku-stop` to clean up Docker.
 **CLI** (config via `.env` or CLI flags — see `.env.example`):
 
 ```bash
-swap-cli maker                         # wait for ETH lock, lock LEZ, claim ETH
-swap-cli taker                         # generate preimage, lock ETH, claim LEZ
+swap-cli maker                         # publish offer, wait for ETH lock, lock LEZ, claim ETH
+swap-cli taker                         # discover offer, generate preimage, lock ETH, claim LEZ
 swap-cli refund lez --hashlock <hex>    # refund LEZ after timelock
 swap-cli refund eth --swap-id <hex>     # refund ETH after timelock
 swap-cli infra                          # start Anvil + LEZ sequencer + nwaku, deploy, write .env
