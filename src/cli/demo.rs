@@ -7,12 +7,13 @@ use crate::error::Result;
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
 use crate::messaging::client::{MessagingClient, decode_waku_payload};
-use crate::messaging::types::{SwapOffer, OFFERS_TOPIC};
+use crate::messaging::types::{DEFAULT_NWAKU_URL, SwapOffer, OFFERS_TOPIC};
+use crate::scaffold;
 use crate::swap::maker::run_maker;
 use crate::swap::taker::run_taker;
 use crate::swap::types::SwapOutcome;
 
-const NWAKU_URL: &str = "http://localhost:8645";
+const NWAKU_URL: &str = DEFAULT_NWAKU_URL;
 
 pub async fn cmd_demo() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
@@ -21,6 +22,18 @@ pub async fn cmd_demo() -> Result<()> {
     println!("=== Atomic Swap Demo (LEZ + Ethereum + Logos Messaging) ===");
     println!();
 
+    // Ensure scaffold localnet is running (start if needed).
+    eprint!("  Starting scaffold localnet...");
+    scaffold::localnet_start().await?;
+    eprintln!(" \x1b[32m\u{2713}\x1b[0m");
+
+    // Run the demo, stopping the localnet on exit (success or failure).
+    let result = run_demo().await;
+    scaffold::localnet_stop().await;
+    result
+}
+
+async fn run_demo() -> Result<()> {
     // Check if nwaku is reachable — messaging is required for the demo.
     let messaging = MessagingClient::new(NWAKU_URL);
     check_nwaku(&messaging).await?;
@@ -33,7 +46,7 @@ pub async fn cmd_demo() -> Result<()> {
             eprintln!("  \x1b[32m\u{2713}\x1b[0m {detail}");
         }
     })))
-    .await;
+    .await?;
 
     let mut maker_config = env.maker_config.clone();
     maker_config.nwaku_url = Some(NWAKU_URL.to_string());

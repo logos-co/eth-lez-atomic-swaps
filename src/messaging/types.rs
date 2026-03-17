@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+// ── Defaults ────────────────────────────────────────────────────────
+
+pub const DEFAULT_NWAKU_URL: &str = "http://localhost:8645";
+
 // ── Content topics ──────────────────────────────────────────────────
 
 pub const OFFERS_TOPIC: &str = "/atomic-swaps/1/offers/json";
