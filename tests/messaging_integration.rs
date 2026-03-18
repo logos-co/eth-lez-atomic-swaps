@@ -12,7 +12,7 @@ fn test_offer() -> SwapOffer {
         lez_amount: 1000,
         eth_amount: 2000,
         maker_eth_address: "0x1234567890abcdef1234567890abcdef12345678".into(),
-        maker_lez_account: "bb".repeat(32),
+        maker_lez_account: base58::ToBase58::to_base58([0xBBu8; 32].as_slice()),
         lez_timelock: 9999999999,
         eth_timelock: 9999999999,
         lez_htlc_program_id: "cc".repeat(32),

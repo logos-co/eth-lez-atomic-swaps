@@ -88,7 +88,7 @@ ScrollView {
                 label: "Taker Account ID"
                 text: swapBackend.lezTakerAccountId
                 onTextEdited: (val) => swapBackend.lezTakerAccountId = val
-                placeholderText: "32-byte hex"
+                placeholderText: "base58"
             }
 
             // --- Swap Parameters ---

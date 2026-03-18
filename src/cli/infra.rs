@@ -148,7 +148,7 @@ pub async fn cmd_infra() -> Result<()> {
             lez_amount: 10,
             eth_amount: "10",
             eth_recipient: &format!("{maker_eth_addr}"),
-            lez_taker_account: &hex::encode(accounts[1].account_id.value()),
+            lez_taker_account: &accounts[1].account_id_b58,
             nssa_wallet_home_dir: &wallet_home_str,
         },
     )?;
@@ -169,7 +169,7 @@ pub async fn cmd_infra() -> Result<()> {
             lez_amount: 10,
             eth_amount: "10",
             eth_recipient: &format!("{maker_eth_addr}"),
-            lez_taker_account: &hex::encode(accounts[1].account_id.value()),
+            lez_taker_account: &accounts[1].account_id_b58,
             nssa_wallet_home_dir: &wallet_home_str,
         },
     )?;

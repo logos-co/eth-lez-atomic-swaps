@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use crate::config::account_id_to_base58;
 use crate::demo::DemoEnv;
 use crate::error::Result;
 use crate::eth::client::EthClient;
@@ -85,7 +86,7 @@ async fn run_demo() -> Result<()> {
                 lez_amount: config.lez_amount,
                 eth_amount: config.eth_amount,
                 maker_eth_address: format!("{}", config.eth_recipient_address),
-                maker_lez_account: hex::encode(lez.account_id().value()),
+                maker_lez_account: account_id_to_base58(&lez.account_id()),
                 lez_timelock: config.lez_timelock,
                 eth_timelock: config.eth_timelock,
                 lez_htlc_program_id: hex::encode(

@@ -93,14 +93,9 @@ pub fn wei_to_eth_string(wei: u128) -> String {
     format!("{whole}.{trimmed}")
 }
 
-pub fn parse_account_id(hex_str: &str) -> Result<AccountId> {
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| SwapError::InvalidConfig(format!("invalid account ID hex: {e}")))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| SwapError::InvalidConfig("account ID must be 32 bytes".into()))?;
-    Ok(AccountId::new(arr))
+/// Convert an AccountId to base58 (matches `logos-scaffold wallet list` format).
+pub fn account_id_to_base58(id: &AccountId) -> String {
+    base58::ToBase58::to_base58(id.value().as_slice())
 }
 
 /// Parse a base58 account ID string (as used by scaffold/wallet).

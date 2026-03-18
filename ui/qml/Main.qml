@@ -150,7 +150,7 @@ ApplicationWindow {
                     font.bold: true
                 }
                 Text {
-                    text: swapBackend.lezAccount ? swapBackend.lezAccount.substring(0, 12) + "..." : "--"
+                    text: swapBackend.lezAccount ? swapBackend.lezAccount.substring(0, 8) + "..." + swapBackend.lezAccount.substring(swapBackend.lezAccount.length - 4) : "--"
                     color: Theme.textSecondary
                     font.pixelSize: 11
                     font.family: "Menlo, Courier New"

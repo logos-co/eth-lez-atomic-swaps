@@ -13,7 +13,7 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{LezAuth, SwapConfig, eth_to_wei, parse_account_id, parse_base58_account_id, parse_program_id};
+use crate::config::{LezAuth, SwapConfig, eth_to_wei, parse_base58_account_id, parse_program_id};
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
@@ -79,7 +79,7 @@ pub struct ConfigArgs {
     #[arg(long, env = "ETH_RECIPIENT_ADDRESS")]
     eth_recipient: String,
 
-    /// Taker's LEZ account ID (32-byte hex)
+    /// Taker's LEZ account ID (base58)
     #[arg(long, env = "LEZ_TAKER_ACCOUNT_ID")]
     lez_taker_account: String,
 
@@ -121,7 +121,7 @@ impl ConfigArgs {
             .map_err(|e| SwapError::InvalidConfig(format!("invalid eth-recipient: {e}")))?;
 
         let lez_htlc_program_id = parse_program_id(&self.lez_htlc_program_id)?;
-        let lez_taker_account_id = parse_account_id(&self.lez_taker_account)?;
+        let lez_taker_account_id = parse_base58_account_id(&self.lez_taker_account)?;
 
         // Determine LEZ auth mode: wallet (scaffold) or raw key.
         let lez_auth = match (self.lez_wallet_home, self.lez_account_id, self.lez_signing_key) {

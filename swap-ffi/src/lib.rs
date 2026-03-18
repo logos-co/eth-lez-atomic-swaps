@@ -11,7 +11,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use swap_orchestrator::{
-    config::{LezAuth, SwapConfig, eth_to_wei, parse_account_id, parse_base58_account_id, parse_program_id},
+    config::{LezAuth, SwapConfig, account_id_to_base58, eth_to_wei, parse_base58_account_id, parse_program_id},
     eth::client::EthClient,
     lez::client::LezClient,
     messaging::client::{MessagingClient, decode_waku_payload},
@@ -131,7 +131,7 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
     let lez_htlc_program_id =
         parse_program_id(&c.lez_htlc_program_id).map_err(|e| e.to_string())?;
     let lez_taker_account_id =
-        parse_account_id(&c.lez_taker_account_id).map_err(|e| e.to_string())?;
+        parse_base58_account_id(&c.lez_taker_account_id).map_err(|e| e.to_string())?;
 
     let lez_amount: u128 = c.lez_amount.parse().map_err(|e| format!("invalid lez_amount: {e}"))?;
     let eth_amount: u128 = eth_to_wei(&c.eth_amount)?;
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn swap_ffi_publish_offer(
             lez_amount: config.lez_amount,
             eth_amount: config.eth_amount,
             maker_eth_address: format!("{}", config.eth_recipient_address),
-            maker_lez_account: hex::encode(lez_client.account_id().value()),
+            maker_lez_account: account_id_to_base58(&lez_client.account_id()),
             lez_timelock: config.lez_timelock,
             eth_timelock: config.eth_timelock,
             lez_htlc_program_id: hex::encode(&program_id_bytes),
@@ -626,7 +626,7 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
     // Derive LEZ account ID.
     let lez_client_result = LezClient::new(&config);
-    let lez_account = lez_client_result.as_ref().ok().map(|c| hex::encode(c.account_id().value()));
+    let lez_account = lez_client_result.as_ref().ok().map(|c| account_id_to_base58(&c.account_id()));
 
     runtime().block_on(async {
         // Fetch ETH balance.

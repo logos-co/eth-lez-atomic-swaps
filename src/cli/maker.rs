@@ -1,6 +1,6 @@
 use clap::Args;
 
-use crate::config::SwapConfig;
+use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
 use crate::messaging::client::MessagingClient;
 use crate::messaging::types::{self, SwapOffer, OFFERS_TOPIC};
@@ -52,7 +52,7 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
             lez_amount: config.lez_amount,
             eth_amount: config.eth_amount,
             maker_eth_address: format!("{}", config.eth_recipient_address),
-            maker_lez_account: hex::encode(lez_client.account_id().value()),
+            maker_lez_account: account_id_to_base58(&lez_client.account_id()),
             lez_timelock: config.lez_timelock,
             eth_timelock: config.eth_timelock,
             lez_htlc_program_id: hex::encode(
