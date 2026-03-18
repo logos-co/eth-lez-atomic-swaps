@@ -91,6 +91,8 @@ SETTER(EthPrivateKey, m_ethPrivateKey, ethPrivateKeyChanged)
 SETTER(EthHtlcAddress, m_ethHtlcAddress, ethHtlcAddressChanged)
 SETTER(LezSequencerUrl, m_lezSequencerUrl, lezSequencerUrlChanged)
 SETTER(LezSigningKey, m_lezSigningKey, lezSigningKeyChanged)
+SETTER(LezWalletHome, m_lezWalletHome, lezWalletHomeChanged)
+SETTER(LezAccountId, m_lezAccountId, lezAccountIdChanged)
 SETTER(LezHtlcProgramId, m_lezHtlcProgramId, lezHtlcProgramIdChanged)
 SETTER(LezAmount, m_lezAmount, lezAmountChanged)
 SETTER(EthAmount, m_ethAmount, ethAmountChanged)
@@ -200,7 +202,12 @@ QByteArray SwapBackend::configJson() const
     obj["eth_private_key"] = m_ethPrivateKey;
     obj["eth_htlc_address"] = m_ethHtlcAddress;
     obj["lez_sequencer_url"] = m_lezSequencerUrl;
-    obj["lez_signing_key"] = m_lezSigningKey;
+    if (!m_lezSigningKey.isEmpty())
+        obj["lez_signing_key"] = m_lezSigningKey;
+    if (!m_lezWalletHome.isEmpty())
+        obj["lez_wallet_home"] = m_lezWalletHome;
+    if (!m_lezAccountId.isEmpty())
+        obj["lez_account_id"] = m_lezAccountId;
     obj["lez_htlc_program_id"] = m_lezHtlcProgramId;
     obj["lez_amount"] = m_lezAmount;
     obj["eth_amount"] = m_ethAmount;
@@ -235,6 +242,8 @@ void SwapBackend::loadEnv()
     setEthHtlcAddress(env("ETH_HTLC_ADDRESS"));
     setLezSequencerUrl(env("LEZ_SEQUENCER_URL", "http://localhost:8080"));
     setLezSigningKey(env("LEZ_SIGNING_KEY"));
+    setLezWalletHome(env("LEZ_WALLET_HOME"));
+    setLezAccountId(env("LEZ_ACCOUNT_ID"));
     setLezHtlcProgramId(env("LEZ_HTLC_PROGRAM_ID"));
     setLezAmount(env("LEZ_AMOUNT", "1"));
     setEthAmount(env("ETH_AMOUNT", "1"));
@@ -267,6 +276,8 @@ void SwapBackend::loadConfig(const QJsonObject &config)
     setEthHtlcAddress(val("eth_htlc_address"));
     setLezSequencerUrl(val("lez_sequencer_url", "http://localhost:8080"));
     setLezSigningKey(val("lez_signing_key"));
+    setLezWalletHome(val("lez_wallet_home"));
+    setLezAccountId(val("lez_account_id"));
     setLezHtlcProgramId(val("lez_htlc_program_id"));
     setLezAmount(val("lez_amount", "1"));
     setEthAmount(val("eth_amount", "1"));

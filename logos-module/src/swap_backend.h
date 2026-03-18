@@ -28,6 +28,8 @@ class SwapBackend : public QObject
     Q_PROPERTY(QString ethHtlcAddress READ ethHtlcAddress WRITE setEthHtlcAddress NOTIFY ethHtlcAddressChanged)
     Q_PROPERTY(QString lezSequencerUrl READ lezSequencerUrl WRITE setLezSequencerUrl NOTIFY lezSequencerUrlChanged)
     Q_PROPERTY(QString lezSigningKey READ lezSigningKey WRITE setLezSigningKey NOTIFY lezSigningKeyChanged)
+    Q_PROPERTY(QString lezWalletHome READ lezWalletHome WRITE setLezWalletHome NOTIFY lezWalletHomeChanged)
+    Q_PROPERTY(QString lezAccountId READ lezAccountId WRITE setLezAccountId NOTIFY lezAccountIdChanged)
     Q_PROPERTY(QString lezHtlcProgramId READ lezHtlcProgramId WRITE setLezHtlcProgramId NOTIFY lezHtlcProgramIdChanged)
     Q_PROPERTY(QString lezAmount READ lezAmount WRITE setLezAmount NOTIFY lezAmountChanged)
     Q_PROPERTY(QString ethAmount READ ethAmount WRITE setEthAmount NOTIFY ethAmountChanged)
@@ -81,6 +83,8 @@ public:
     QString ethHtlcAddress() const { return m_ethHtlcAddress; }
     QString lezSequencerUrl() const { return m_lezSequencerUrl; }
     QString lezSigningKey() const { return m_lezSigningKey; }
+    QString lezWalletHome() const { return m_lezWalletHome; }
+    QString lezAccountId() const { return m_lezAccountId; }
     QString lezHtlcProgramId() const { return m_lezHtlcProgramId; }
     QString lezAmount() const { return m_lezAmount; }
     QString ethAmount() const { return m_ethAmount; }
@@ -97,6 +101,8 @@ public:
     void setEthHtlcAddress(const QString &v);
     void setLezSequencerUrl(const QString &v);
     void setLezSigningKey(const QString &v);
+    void setLezWalletHome(const QString &v);
+    void setLezAccountId(const QString &v);
     void setLezHtlcProgramId(const QString &v);
     void setLezAmount(const QString &v);
     void setEthAmount(const QString &v);
@@ -138,6 +144,8 @@ signals:
     void ethHtlcAddressChanged();
     void lezSequencerUrlChanged();
     void lezSigningKeyChanged();
+    void lezWalletHomeChanged();
+    void lezAccountIdChanged();
     void lezHtlcProgramIdChanged();
     void lezAmountChanged();
     void ethAmountChanged();
@@ -199,6 +207,8 @@ private:
     QString m_ethHtlcAddress;
     QString m_lezSequencerUrl;
     QString m_lezSigningKey;
+    QString m_lezWalletHome;
+    QString m_lezAccountId;
     QString m_lezHtlcProgramId;
     QString m_lezAmount;
     QString m_ethAmount;

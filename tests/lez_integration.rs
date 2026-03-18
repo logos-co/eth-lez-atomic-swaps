@@ -1,67 +1,41 @@
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use common::sequencer_client::SequencerClient;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use lez_htlc_program::HTLCState;
-use nssa::{
-    AccountId, PrivateKey, PublicKey,
-    program_deployment_transaction::Message as ProgramDeploymentMessage,
-    ProgramDeploymentTransaction,
-};
+use nssa::{AccountId, ProgramDeploymentTransaction, program_deployment_transaction::Message as ProgramDeploymentMessage};
 use nssa_core::program::ProgramId;
-use sequencer_core::config::{AccountInitialData, SequencerConfig};
 use sha2::{Digest, Sha256};
 use swap_orchestrator::{
-    config::SwapConfig,
+    config::{LezAuth, SwapConfig},
     lez::{client::LezClient, watcher},
+    scaffold,
 };
-use tempfile::TempDir;
 use tokio::sync::mpsc;
-use url::Url;
 
 const BLOCK_WAIT: Duration = Duration::from_secs(4);
 
-/// Start a no-op JSON-RPC WebSocket server so the sequencer's indexer client
-/// can connect at startup (it panics if the WS handshake fails).
-async fn start_dummy_ws_server() -> (SocketAddr, jsonrpsee::server::ServerHandle) {
-    let server = jsonrpsee::server::Server::builder()
-        .build("127.0.0.1:0")
-        .await
-        .unwrap();
-    let addr = server.local_addr().unwrap();
-    let handle = server.start(jsonrpsee::RpcModule::new(()));
-    (addr, handle)
-}
-
-fn test_key(seed: u8) -> (PrivateKey, AccountId) {
-    let key = PrivateKey::try_new([seed; 32]).unwrap();
-    let pub_key = PublicKey::new_from_private_key(&key);
-    let id = AccountId::from(&pub_key);
-    (key, id)
-}
-
-fn make_preimage_and_hashlock() -> ([u8; 32], [u8; 32]) {
-    let preimage = [0xABu8; 32];
+fn make_preimage_and_hashlock(seed: u8) -> ([u8; 32], [u8; 32]) {
+    let preimage = [seed; 32];
     let hashlock: [u8; 32] = Sha256::digest(preimage).into();
     (preimage, hashlock)
 }
 
 struct TestEnv {
-    _handle: sequencer_runner::SequencerHandle,
-    _temp_dir: TempDir,
-    _indexer_handle: jsonrpsee::server::ServerHandle,
     program_id: ProgramId,
-    maker_key: PrivateKey,
     maker_id: AccountId,
-    taker_key: PrivateKey,
     taker_id: AccountId,
     sequencer_url: String,
+    wallet_home: PathBuf,
 }
 
 impl TestEnv {
-    fn lez_client_for(&self, key: &PrivateKey, counterparty_lez: AccountId) -> LezClient {
+    fn lez_client_for(&self, account_id: AccountId, counterparty_lez: AccountId) -> LezClient {
         let config = SwapConfig {
-            lez_signing_key: hex::encode(key.value()),
+            lez_auth: LezAuth::Wallet {
+                home: self.wallet_home.clone(),
+                account_id,
+            },
             lez_sequencer_url: self.sequencer_url.clone(),
             lez_htlc_program_id: self.program_id,
             lez_taker_account_id: counterparty_lez,
@@ -81,65 +55,41 @@ impl TestEnv {
     }
 
     fn maker_client(&self) -> LezClient {
-        self.lez_client_for(&self.maker_key, self.taker_id)
+        self.lez_client_for(self.maker_id, self.taker_id)
     }
 
     fn taker_client(&self) -> LezClient {
-        self.lez_client_for(&self.taker_key, self.maker_id)
+        self.lez_client_for(self.taker_id, self.maker_id)
     }
 }
 
 async fn setup() -> TestEnv {
-    let (maker_key, maker_id) = test_key(1);
-    let (taker_key, taker_id) = test_key(2);
+    // Read scaffold wallet via WalletCore.
+    let wc = scaffold::wallet_core(&scaffold::wallet_home()).expect("scaffold wallet not found — run `make setup` first");
+    let accounts = scaffold::public_accounts(&wc).unwrap();
+    let maker_id = accounts[0].account_id;
+    let taker_id = accounts[1].account_id;
+    let sequencer_url = scaffold::sequencer_url_of(&wc);
+    let wallet_home = scaffold::wallet_home();
 
-    // Start dummy WS server for the sequencer's indexer client.
-    let (indexer_addr, indexer_handle) = start_dummy_ws_server().await;
-
-    let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("configs/test_sequencer.json");
-    let mut config = SequencerConfig::from_path(&config_path).unwrap();
-
-    let temp_dir = tempfile::tempdir().unwrap();
-    config.home = temp_dir.path().to_owned();
-    config.port = 0;
-    config.indexer_rpc_url = format!("ws://127.0.0.1:{}", indexer_addr.port())
-        .parse()
-        .unwrap();
-    config.initial_accounts = vec![
-        AccountInitialData {
-            account_id: maker_id.to_string(),
-            balance: 1_000_000,
-        },
-        AccountInitialData {
-            account_id: taker_id.to_string(),
-            balance: 1_000_000,
-        },
-    ];
-
-    let (handle, addr) = sequencer_runner::startup_sequencer(config).await.unwrap();
-    let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), addr.port());
-    let sequencer_url = format!("http://{addr}");
+    // Fund accounts.
+    scaffold::wallet_topup(Some(&accounts[0].account_id_b58)).await.unwrap();
+    scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await.unwrap();
 
     // Deploy LEZ HTLC program.
-    let client = SequencerClient::new(Url::parse(&sequencer_url).unwrap()).unwrap();
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
-    client.send_tx_program(tx).await.unwrap();
+    wc.sequencer_client.send_tx_program(tx).await.unwrap();
 
     // Wait for deployment block.
     tokio::time::sleep(BLOCK_WAIT).await;
 
     TestEnv {
-        _handle: handle,
-        _temp_dir: temp_dir,
-        _indexer_handle: indexer_handle,
         program_id: LEZ_HTLC_PROGRAM_ID,
-        maker_key,
         maker_id,
-        taker_key,
         taker_id,
         sequencer_url,
+        wallet_home,
     }
 }
 
@@ -162,7 +112,7 @@ async fn test_transfer_and_read_balance() {
 async fn test_lock_creates_escrow() {
     let env = setup().await;
     let maker = env.maker_client();
-    let (_, hashlock) = make_preimage_and_hashlock();
+    let (_, hashlock) = make_preimage_and_hashlock(0x01);
 
     maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
@@ -178,7 +128,7 @@ async fn test_lock_then_claim() {
     let env = setup().await;
     let maker = env.maker_client();
     let taker = env.taker_client();
-    let (preimage, hashlock) = make_preimage_and_hashlock();
+    let (preimage, hashlock) = make_preimage_and_hashlock(0x02);
 
     maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
@@ -198,7 +148,7 @@ async fn test_lock_then_claim() {
 async fn test_lock_then_refund() {
     let env = setup().await;
     let maker = env.maker_client();
-    let (_, hashlock) = make_preimage_and_hashlock();
+    let (_, hashlock) = make_preimage_and_hashlock(0x03);
 
     let maker_before = maker.get_balance(&env.maker_id).await.unwrap();
     maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
@@ -219,7 +169,7 @@ async fn test_claim_wrong_preimage_fails() {
     let env = setup().await;
     let maker = env.maker_client();
     let taker = env.taker_client();
-    let (_, hashlock) = make_preimage_and_hashlock();
+    let (_, hashlock) = make_preimage_and_hashlock(0x04);
 
     maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
@@ -239,10 +189,10 @@ async fn test_watcher_detects_lock_and_claim() {
     let env = setup().await;
     let maker = env.maker_client();
     let taker = env.taker_client();
-    let (preimage, hashlock) = make_preimage_and_hashlock();
+    let (preimage, hashlock) = make_preimage_and_hashlock(0x05);
 
     let (tx, mut rx) = mpsc::channel(16);
-    let watcher_client = env.lez_client_for(&env.maker_key, env.taker_id);
+    let watcher_client = env.lez_client_for(env.maker_id, env.taker_id);
     let watcher_handle = tokio::spawn(async move {
         watcher::watch_escrow(&watcher_client, hashlock, Duration::from_millis(500), tx).await
     });

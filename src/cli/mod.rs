@@ -13,7 +13,7 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{SwapConfig, eth_to_wei, parse_account_id, parse_program_id};
+use crate::config::{LezAuth, SwapConfig, eth_to_wei, parse_account_id, parse_base58_account_id, parse_program_id};
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
@@ -52,12 +52,23 @@ pub struct ConfigArgs {
     #[arg(long, env = "ETH_HTLC_ADDRESS")]
     eth_htlc_address: String,
 
-    /// LEZ signing key (32-byte hex)
+    /// LEZ signing key (32-byte hex) — used when not using scaffold wallet.
+    /// Mutually exclusive with LEZ_WALLET_HOME + LEZ_ACCOUNT_ID.
     #[arg(long, env = "LEZ_SIGNING_KEY", hide_env_values = true)]
-    lez_signing_key: String,
+    lez_signing_key: Option<String>,
+
+    /// Scaffold wallet home directory (e.g. `.scaffold/wallet`).
+    /// When set, the wallet manages keys — LEZ_SIGNING_KEY is not needed.
+    #[arg(long, env = "LEZ_WALLET_HOME")]
+    lez_wallet_home: Option<String>,
+
+    /// LEZ account ID (base58) to sign with from the scaffold wallet.
+    /// Required when LEZ_WALLET_HOME is set.
+    #[arg(long, env = "LEZ_ACCOUNT_ID")]
+    lez_account_id: Option<String>,
 
     /// LEZ sequencer URL
-    #[arg(long, env = "LEZ_SEQUENCER_URL", default_value = "http://localhost:8080")]
+    #[arg(long, env = "LEZ_SEQUENCER_URL", default_value = "http://127.0.0.1:3040")]
     lez_sequencer_url: String,
 
     /// LEZ HTLC program ID (32-byte hex)
@@ -112,6 +123,33 @@ impl ConfigArgs {
         let lez_htlc_program_id = parse_program_id(&self.lez_htlc_program_id)?;
         let lez_taker_account_id = parse_account_id(&self.lez_taker_account)?;
 
+        // Determine LEZ auth mode: wallet (scaffold) or raw key.
+        let lez_auth = match (self.lez_wallet_home, self.lez_account_id, self.lez_signing_key) {
+            (Some(home), Some(account_id_str), _) => {
+                let account_id = parse_base58_account_id(&account_id_str)?;
+                LezAuth::Wallet {
+                    home: std::path::PathBuf::from(home),
+                    account_id,
+                }
+            }
+            (None, None, Some(key)) => LezAuth::RawKey(key),
+            (Some(_), None, _) => {
+                return Err(SwapError::InvalidConfig(
+                    "LEZ_WALLET_HOME requires LEZ_ACCOUNT_ID".into(),
+                ));
+            }
+            (None, Some(_), _) => {
+                return Err(SwapError::InvalidConfig(
+                    "LEZ_ACCOUNT_ID requires LEZ_WALLET_HOME".into(),
+                ));
+            }
+            (None, None, None) => {
+                return Err(SwapError::InvalidConfig(
+                    "either LEZ_SIGNING_KEY or LEZ_WALLET_HOME + LEZ_ACCOUNT_ID must be set".into(),
+                ));
+            }
+        };
+
         let now = now_unix();
 
         Ok(SwapConfig {
@@ -119,7 +157,7 @@ impl ConfigArgs {
             eth_private_key: self.eth_private_key,
             eth_htlc_address,
             lez_sequencer_url: self.lez_sequencer_url,
-            lez_signing_key: self.lez_signing_key,
+            lez_auth,
             lez_htlc_program_id,
             lez_amount: self.lez_amount,
             eth_amount: eth_to_wei(&self.eth_amount)

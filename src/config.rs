@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use alloy::primitives::Address;
@@ -5,6 +6,20 @@ use nssa_core::program::ProgramId;
 use nssa_core::account::AccountId;
 
 use crate::error::{SwapError, Result};
+
+/// How the LEZ client authenticates transactions.
+#[derive(Debug, Clone)]
+pub enum LezAuth {
+    /// Raw signing key (32-byte hex) — used in tests / legacy demo mode.
+    RawKey(String),
+    /// Scaffold-managed wallet — reads keys from wallet files on disk.
+    Wallet {
+        /// Path to the scaffold wallet home directory (e.g. `.scaffold/wallet`).
+        home: PathBuf,
+        /// The account ID to sign with (from `wallet list`).
+        account_id: AccountId,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct SwapConfig {
@@ -15,7 +30,7 @@ pub struct SwapConfig {
 
     // --- LEZ ---
     pub lez_sequencer_url: String,
-    pub lez_signing_key: String,
+    pub lez_auth: LezAuth,
     pub lez_htlc_program_id: ProgramId,
 
     // --- Swap parameters ---
@@ -85,6 +100,16 @@ pub fn parse_account_id(hex_str: &str) -> Result<AccountId> {
     let arr: [u8; 32] = bytes
         .try_into()
         .map_err(|_| SwapError::InvalidConfig("account ID must be 32 bytes".into()))?;
+    Ok(AccountId::new(arr))
+}
+
+/// Parse a base58 account ID string (as used by scaffold/wallet).
+pub fn parse_base58_account_id(s: &str) -> Result<AccountId> {
+    let bytes = base58::FromBase58::from_base58(s)
+        .map_err(|e| SwapError::InvalidConfig(format!("invalid base58 account ID: {e:?}")))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| SwapError::InvalidConfig("base58 account ID must decode to 32 bytes".into()))?;
     Ok(AccountId::new(arr))
 }
 

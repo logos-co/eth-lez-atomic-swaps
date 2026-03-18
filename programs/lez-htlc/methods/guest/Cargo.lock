@@ -283,6 +283,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "base58"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6107fe1be6682a68940da878d9e9f5e90ca5745b3dec9fd1bb393c8777d4f581"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -420,6 +426,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bytesize"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bd91ee7b2422bcb158d90ef4d14f75ef67f340943fc4149891dcce8f8b972a3"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -1576,13 +1591,16 @@ checksum = "a5b0c77c1b780822bc749a33e39aeb2c07584ab93332303babeabb645298a76e"
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/lssa?rev=6ca020d5#6ca020d547a9ef65b07c636bfabf8ed2149d9b62"
+source = "git+https://github.com/logos-blockchain/lssa?rev=d6655404#d665540495f00dd0960a877a33e80dd2d74f3dff"
 dependencies = [
+ "base58",
  "borsh",
  "bytemuck",
+ "bytesize",
  "chacha20",
  "risc0-zkvm",
  "serde",
+ "serde_with",
  "thiserror",
 ]
 
