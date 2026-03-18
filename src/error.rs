@@ -46,6 +46,10 @@ pub enum SwapError {
     // --- Messaging ---
     #[error("messaging error: {0}")]
     Messaging(String),
+
+    // --- Cancellation ---
+    #[error("swap cancelled by user")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, SwapError>;

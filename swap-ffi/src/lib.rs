@@ -1,5 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -17,7 +18,7 @@ use swap_orchestrator::{
     messaging::client::{MessagingClient, decode_waku_payload},
     messaging::types::{SwapOffer, OFFERS_TOPIC},
     swap::{
-        maker::run_maker,
+        maker::{run_maker, run_maker_loop, AutoAcceptConfig},
         progress::SwapProgress,
         refund::{now_unix, refund_eth, refund_lez},
         taker::run_taker,
@@ -300,7 +301,7 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
             Err(e) => return json_err(&e.to_string()),
         };
 
-        match run_maker(&config, &eth_client, &lez_client, hashlock_opt, progress).await {
+        match run_maker(&config, &eth_client, &lez_client, hashlock_opt, None, progress).await {
             Ok(ref outcome) => {
                 let hashlock = match outcome {
                     SwapOutcome::Completed { preimage, .. } => {
@@ -658,6 +659,71 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
         to_c_string(&result.to_string())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Maker auto-accept loop
+// ---------------------------------------------------------------------------
+
+static MAKER_LOOP_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Run the maker in an auto-accept loop. Blocks until cancelled, out of funds,
+/// or an unrecoverable error. Returns JSON: `{ "completed": N, "failed": M }`.
+///
+/// # Safety
+/// `config_json` must be a valid null-terminated JSON C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_run_maker_loop(
+    config_json: *const c_char,
+    cb: ProgressCallback,
+    user_data: *mut c_void,
+) -> *mut c_char {
+    MAKER_LOOP_CANCEL.store(false, Ordering::SeqCst);
+
+    let json_str = match unsafe { c_str_to_str(config_json) } {
+        Some(s) => s,
+        None => return json_err("null or invalid config_json"),
+    };
+
+    // Parse FfiConfig to extract raw minutes before parse_config converts to absolute.
+    let ffi_config: FfiConfig = match serde_json::from_str(json_str) {
+        Ok(c) => c,
+        Err(e) => return json_err(&format!("bad config JSON: {e}")),
+    };
+    let lez_timelock_minutes: u64 = match ffi_config.lez_timelock_minutes.parse() {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid lez_timelock_minutes: {e}")),
+    };
+    let eth_timelock_minutes: u64 = match ffi_config.eth_timelock_minutes.parse() {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid eth_timelock_minutes: {e}")),
+    };
+
+    let base_config = match parse_config(json_str) {
+        Ok(c) => c,
+        Err(e) => return json_err(&e),
+    };
+
+    let auto_config = AutoAcceptConfig {
+        lez_timelock_minutes,
+        eth_timelock_minutes,
+    };
+
+    runtime().block_on(async {
+        let progress = forward_progress(cb, user_data);
+        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress).await;
+        let json = serde_json::json!({
+            "completed": result.total_completed,
+            "failed": result.total_failed,
+        });
+        to_c_string(&json.to_string())
+    })
+}
+
+/// Signal the maker auto-accept loop to stop after the current iteration.
+#[unsafe(no_mangle)]
+pub extern "C" fn swap_ffi_stop_maker_loop() {
+    MAKER_LOOP_CANCEL.store(true, Ordering::SeqCst);
 }
 
 /// Free a string previously returned by any `swap_ffi_*` function.

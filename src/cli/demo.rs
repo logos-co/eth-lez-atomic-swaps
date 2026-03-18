@@ -102,7 +102,7 @@ async fn run_demo() -> Result<()> {
             eprintln!("  [maker] \x1b[34mPublished offer via Logos Messaging\x1b[0m");
 
             // run_maker waits for ETH lock, locks LEZ, watches for preimage, claims ETH.
-            run_maker(&config, &eth, &lez, Some(hashlock), None).await
+            run_maker(&config, &eth, &lez, Some(hashlock), None, None).await
         })
     };
 

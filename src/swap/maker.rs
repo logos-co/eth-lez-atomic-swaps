@@ -1,10 +1,12 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use alloy::primitives::U256;
 use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
     config::SwapConfig,
-    error::Result,
+    error::{Result, SwapError},
     eth::client::{EthClient, EthHTLC::SwapState},
     eth::watcher::{self, EthHtlcEvent},
     lez::client::LezClient,
@@ -17,17 +19,35 @@ use crate::{
     },
 };
 
+/// Wait until the cancel flag is set. Returns immediately if the flag is already set.
+/// If `cancel` is `None`, pends forever (no cancellation configured).
+async fn cancel_wait(cancel: &Option<&AtomicBool>) {
+    match cancel {
+        Some(flag) => loop {
+            if flag.load(Ordering::Relaxed) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        },
+        None => std::future::pending().await,
+    }
+}
+
 /// Run the maker side of an atomic swap (taker-locks-first).
 ///
 /// The maker optionally receives a hashlock. If `None`, the maker watches for
 /// any ETH lock to its recipient address with sufficient amount and extracts
 /// the hashlock from the event. This supports the UI flow where the taker
 /// generates the preimage independently after discovering the maker's offer.
+///
+/// If `cancel` is `Some`, the flag is checked during the ETH lock wait phase.
+/// Setting the flag causes the function to return `Err(SwapError::Cancelled)`.
 pub async fn run_maker(
     config: &SwapConfig,
     eth_client: &EthClient,
     lez_client: &LezClient,
     hashlock: Option<[u8; 32]>,
+    cancel: Option<&AtomicBool>,
     progress: Option<ProgressSender>,
 ) -> Result<SwapOutcome> {
     // 1. Watch for ETH Locked event from the taker.
@@ -80,6 +100,10 @@ pub async fn run_maker(
                     eth_refund_tx: None,
                     lez_refund_tx: None,
                 });
+            }
+            _ = cancel_wait(&cancel) => {
+                watcher_handle.abort();
+                return Err(SwapError::Cancelled);
             }
         }
     };
@@ -181,4 +205,173 @@ pub async fn run_maker(
         eth_tx: eth_claim_tx,
         lez_tx: lez_lock_tx,
     })
+}
+
+/// Configuration for the auto-accept maker loop.
+pub struct AutoAcceptConfig {
+    pub lez_timelock_minutes: u64,
+    pub eth_timelock_minutes: u64,
+}
+
+/// Result of a completed auto-accept loop run.
+pub struct AutoAcceptResult {
+    pub total_completed: u32,
+    pub total_failed: u32,
+}
+
+/// Run the maker in a loop, auto-accepting swaps until cancelled or out of funds.
+///
+/// Each iteration gets fresh timelocks, checks balance, publishes an offer
+/// (if messaging is configured), and runs a single maker swap. On failure,
+/// the error is logged and the loop continues (R1 resilience).
+pub async fn run_maker_loop(
+    base_config: &SwapConfig,
+    auto_config: &AutoAcceptConfig,
+    cancel: &AtomicBool,
+    progress: Option<ProgressSender>,
+) -> AutoAcceptResult {
+    let mut completed: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut iteration: u32 = 0;
+
+    progress::report(&progress, SwapProgress::AutoAcceptStarted);
+
+    loop {
+        // Check cancel flag between iterations.
+        if cancel.load(Ordering::Relaxed) {
+            progress::report(&progress, SwapProgress::AutoAcceptCancelled);
+            break;
+        }
+
+        iteration += 1;
+
+        // Fresh timelocks for this iteration.
+        let fresh_config = base_config.with_fresh_timelocks(
+            auto_config.lez_timelock_minutes,
+            auto_config.eth_timelock_minutes,
+        );
+
+        // Check LEZ balance before proceeding.
+        let lez_client = match LezClient::new(&fresh_config) {
+            Ok(c) => c,
+            Err(e) => {
+                failed += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptSwapFailed {
+                        iteration,
+                        error: format!("LEZ client init failed: {e}"),
+                    },
+                );
+                continue;
+            }
+        };
+
+        match lez_client.get_balance(&lez_client.account_id()).await {
+            Ok(balance) if balance < fresh_config.lez_amount => {
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptInsufficientFunds {
+                        lez_balance: balance.to_string(),
+                        lez_required: fresh_config.lez_amount.to_string(),
+                    },
+                );
+                break;
+            }
+            Err(e) => {
+                failed += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptSwapFailed {
+                        iteration,
+                        error: format!("balance check failed: {e}"),
+                    },
+                );
+                continue;
+            }
+            _ => {} // balance sufficient
+        }
+
+        progress::report(
+            &progress,
+            SwapProgress::AutoAcceptIteration { iteration },
+        );
+
+        // Create ETH client for this iteration.
+        let eth_client = match EthClient::new(&fresh_config).await {
+            Ok(c) => c,
+            Err(e) => {
+                failed += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptSwapFailed {
+                        iteration,
+                        error: format!("ETH client init failed: {e}"),
+                    },
+                );
+                continue;
+            }
+        };
+
+        // Run a single maker swap with cancel support.
+        match run_maker(
+            &fresh_config,
+            &eth_client,
+            &lez_client,
+            None,
+            Some(cancel),
+            progress.clone(),
+        )
+        .await
+        {
+            Ok(SwapOutcome::Completed { .. }) => {
+                completed += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptSwapCompleted {
+                        iteration,
+                        status: "completed".into(),
+                    },
+                );
+            }
+            Ok(SwapOutcome::Refunded { .. }) => {
+                failed += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptSwapFailed {
+                        iteration,
+                        error: "swap refunded (taker timed out)".into(),
+                    },
+                );
+            }
+            Err(SwapError::Cancelled) => {
+                progress::report(&progress, SwapProgress::AutoAcceptCancelled);
+                break;
+            }
+            Err(e) => {
+                failed += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptSwapFailed {
+                        iteration,
+                        error: e.to_string(),
+                    },
+                );
+                // R1: log error and continue to next iteration
+            }
+        }
+    }
+
+    progress::report(
+        &progress,
+        SwapProgress::AutoAcceptStopped {
+            total_completed: completed,
+            total_failed: failed,
+        },
+    );
+
+    AutoAcceptResult {
+        total_completed: completed,
+        total_failed: failed,
+    }
 }

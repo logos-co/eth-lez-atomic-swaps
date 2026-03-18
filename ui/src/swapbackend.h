@@ -47,6 +47,13 @@ class SwapBackend : public QObject
     Q_PROPERTY(QStringList progressSteps READ progressSteps NOTIFY progressStepsChanged)
     Q_PROPERTY(QString resultJson READ resultJson NOTIFY resultJsonChanged)
 
+    // Auto-accept state
+    Q_PROPERTY(bool autoAcceptRunning READ autoAcceptRunning NOTIFY autoAcceptRunningChanged)
+    Q_PROPERTY(int autoAcceptCompleted READ autoAcceptCompleted NOTIFY autoAcceptCompletedChanged)
+    Q_PROPERTY(int autoAcceptFailed READ autoAcceptFailed NOTIFY autoAcceptFailedChanged)
+    Q_PROPERTY(int autoAcceptIteration READ autoAcceptIteration NOTIFY autoAcceptIterationChanged)
+    Q_PROPERTY(QStringList swapHistory READ swapHistory NOTIFY swapHistoryChanged)
+
 public:
     explicit SwapBackend(QObject *parent = nullptr);
     ~SwapBackend() override;
@@ -97,10 +104,17 @@ public:
     void setNwakuUrl(const QString &v);
 
     // State getters
-    bool running() const { return m_running; }
+    bool running() const { return m_running || m_autoAcceptRunning; }
     QString currentStep() const { return m_currentStep; }
     QStringList progressSteps() const { return m_progressSteps; }
     QString resultJson() const { return m_resultJson; }
+
+    // Auto-accept getters
+    bool autoAcceptRunning() const { return m_autoAcceptRunning; }
+    int autoAcceptCompleted() const { return m_autoAcceptCompleted; }
+    int autoAcceptFailed() const { return m_autoAcceptFailed; }
+    int autoAcceptIteration() const { return m_autoAcceptIteration; }
+    QStringList swapHistory() const { return m_swapHistory; }
 
     Q_INVOKABLE void loadEnv();
     Q_INVOKABLE void fetchBalances();
@@ -110,6 +124,8 @@ public:
     Q_INVOKABLE void refundEth(const QString &swapIdHex);
     Q_INVOKABLE void publishOffer();
     Q_INVOKABLE void fetchOffers();
+    Q_INVOKABLE void startAutoAccept();
+    Q_INVOKABLE void stopAutoAccept();
 
 signals:
     void ethRpcUrlChanged();
@@ -138,6 +154,12 @@ signals:
     void currentStepChanged();
     void progressStepsChanged();
     void resultJsonChanged();
+
+    void autoAcceptRunningChanged();
+    void autoAcceptCompletedChanged();
+    void autoAcceptFailedChanged();
+    void autoAcceptIterationChanged();
+    void swapHistoryChanged();
 
     void offerPublished(const QString &resultJson);
     void offersFetched(const QString &offersJson);
@@ -186,10 +208,18 @@ private:
     QString m_resultJson;
     QString m_publishedPreimage;
 
+    // Auto-accept state
+    bool m_autoAcceptRunning = false;
+    int m_autoAcceptCompleted = 0;
+    int m_autoAcceptFailed = 0;
+    int m_autoAcceptIteration = 0;
+    QStringList m_swapHistory;
+
     QFutureWatcher<QString> m_watcher;
     QFutureWatcher<QString> m_balanceWatcher;
     QFutureWatcher<QString> m_publishWatcher;
     QFutureWatcher<QString> m_fetchWatcher;
+    QFutureWatcher<QString> m_autoAcceptWatcher;
 };
 
 #endif // SWAPBACKEND_H

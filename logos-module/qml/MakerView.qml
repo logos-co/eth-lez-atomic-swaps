@@ -135,11 +135,90 @@ ScrollView {
                 }
             }
 
-            // --- Step 2: Start Swap ---
+            // --- Auto-Accept Toggle ---
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: autoAcceptRow.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: Theme.border
+                border.width: 1
+                radius: Theme.radiusNormal
+
+                RowLayout {
+                    id: autoAcceptRow
+                    anchors {
+                        fill: parent
+                        margins: Theme.spacingNormal
+                    }
+                    spacing: Theme.spacingNormal
+
+                    Text {
+                        text: "Auto-Accept"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Switch {
+                        checked: swapBackend.autoAcceptRunning
+                        enabled: !swapBackend.makerRunning
+                        onToggled: {
+                            if (checked) {
+                                swapBackend.startAutoAccept()
+                            } else {
+                                swapBackend.stopAutoAccept()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- Auto-Accept Stats ---
+            Rectangle {
+                visible: swapBackend.autoAcceptRunning || swapBackend.autoAcceptIteration > 0
+                Layout.fillWidth: true
+                implicitHeight: statsCol.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: Theme.border
+                border.width: 1
+                radius: Theme.radiusNormal
+
+                ColumnLayout {
+                    id: statsCol
+                    anchors {
+                        fill: parent
+                        margins: Theme.spacingNormal
+                    }
+                    spacing: 6
+
+                    RowLayout {
+                        spacing: Theme.spacingLarge
+                        Text {
+                            text: "Iteration: " + swapBackend.autoAcceptIteration
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSmall
+                        }
+                        Text {
+                            text: "Completed: " + swapBackend.autoAcceptCompleted
+                            color: Theme.accent
+                            font.pixelSize: Theme.fontSmall
+                        }
+                        Text {
+                            text: "Failed: " + swapBackend.autoAcceptFailed
+                            color: swapBackend.autoAcceptFailed > 0 ? Theme.error : Theme.textSecondary
+                            font.pixelSize: Theme.fontSmall
+                        }
+                    }
+                }
+            }
+
+            // --- Step 2: Start Single Swap (manual) ---
             Button {
-                text: swapBackend.makerRunning ? "Running..." : (messagingEnabled && offerPublished ? "Start Swap" : "Start Maker")
-                enabled: !swapBackend.makerRunning && (!messagingEnabled || offerPublished)
-                visible: !messagingEnabled || offerPublished
+                text: swapBackend.makerRunning ? "Running..." : (messagingEnabled && offerPublished ? "Start Swap" : "Start Single Swap")
+                enabled: !swapBackend.makerRunning && !swapBackend.autoAcceptRunning && (!messagingEnabled || offerPublished)
+                visible: !swapBackend.autoAcceptRunning && (!messagingEnabled || offerPublished)
                 Layout.fillWidth: true
                 Layout.preferredHeight: 48
                 font.pixelSize: Theme.fontNormal
@@ -188,6 +267,44 @@ ScrollView {
             // Result
             ResultCard {
                 resultJson: swapBackend.makerResultJson
+            }
+
+            // --- Swap History ---
+            Rectangle {
+                visible: swapBackend.swapHistory.length > 0
+                Layout.fillWidth: true
+                implicitHeight: historyCol.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: Theme.border
+                border.width: 1
+                radius: Theme.radiusNormal
+
+                ColumnLayout {
+                    id: historyCol
+                    anchors {
+                        fill: parent
+                        margins: Theme.spacingNormal
+                    }
+                    spacing: 6
+
+                    Text {
+                        text: "Swap History"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+
+                    Repeater {
+                        model: swapBackend.swapHistory
+                        delegate: Text {
+                            text: modelData
+                            color: modelData.indexOf("completed") >= 0 ? Theme.accent : Theme.textSecondary
+                            font.pixelSize: Theme.fontSmall
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
             }
         }
     }
