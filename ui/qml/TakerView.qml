@@ -110,6 +110,7 @@ ScrollView {
                 font.bold: true
             }
             Text {
+                visible: !swapBackend.running && !takerRoot.swapCompleted
                 text: "Browse available offers and click one to start a swap."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSmall

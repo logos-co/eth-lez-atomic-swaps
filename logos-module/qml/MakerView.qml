@@ -212,11 +212,6 @@ ScrollView {
                 }
             }
 
-            // Result
-            ResultCard {
-                resultJson: swapBackend.makerResultJson
-            }
-
             // --- Completed Swaps ---
             Rectangle {
                 visible: swapBackend.swapHistory.length > 0
