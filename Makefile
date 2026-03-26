@@ -23,10 +23,10 @@ build:
 
 run: run-maker
 
-run-maker: build
+run-maker: configure build
 	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(UI_BIN) &
 
-run-taker: build
+run-taker: configure build
 	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(UI_BIN) &
 
 clean:
@@ -107,8 +107,16 @@ plugin-build: plugin-configure
 plugin-install: plugin-build
 	@mkdir -p "$(PLUGIN_DIR)"
 	cp $(PLUGIN_BUILD)/lez_atomic_swap.dylib "$(PLUGIN_DIR)/"
-	@# Copy FFI lib if not already there or if newer
-	cp -n swap-ffi/target/release/libswap_ffi.dylib "$(PLUGIN_DIR)/" 2>/dev/null || true
+	@# Always copy latest FFI dylib (prefer release, fall back to debug)
+	@if [ -f swap-ffi/target/release/libswap_ffi.dylib ]; then \
+		cp swap-ffi/target/release/libswap_ffi.dylib "$(PLUGIN_DIR)/"; \
+	elif [ -f swap-ffi/target/debug/libswap_ffi.dylib ]; then \
+		cp swap-ffi/target/debug/libswap_ffi.dylib "$(PLUGIN_DIR)/"; \
+	fi
+ifeq ($(UNAME),Darwin)
+	@codesign -fs - "$(PLUGIN_DIR)/lez_atomic_swap.dylib" 2>/dev/null || true
+	@codesign -fs - "$(PLUGIN_DIR)/libswap_ffi.dylib" 2>/dev/null || true
+endif
 
 plugin-run: plugin-run-maker
 
