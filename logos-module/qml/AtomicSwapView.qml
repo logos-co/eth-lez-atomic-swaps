@@ -196,6 +196,34 @@ Item {
             height: 32
             color: Theme.surface
 
+            function humanStep(step) {
+                var map = {
+                    "WaitingForEthLock": "Waiting for buyer to lock ETH\u2026",
+                    "EthLockDetected":   "ETH lock detected",
+                    "LezLocking":        "Locking LEZ in escrow\u2026",
+                    "LezLocked":         "LEZ locked",
+                    "WaitingForPreimage": "Waiting for preimage reveal\u2026",
+                    "PreimageRevealed":  "Preimage revealed",
+                    "ClaimingEth":       "Claiming ETH\u2026",
+                    "EthClaimed":        "ETH claimed",
+                    "PreimageGenerated": "Preimage generated",
+                    "LockingEth":        "Locking ETH\u2026",
+                    "EthLocked":         "ETH locked",
+                    "WaitingForLezLock": "Waiting for seller to lock LEZ\u2026",
+                    "LezLockDetected":   "LEZ lock detected",
+                    "VerifyingLezEscrow": "Verifying LEZ escrow\u2026",
+                    "LezEscrowVerified": "LEZ escrow verified",
+                    "ClaimingLez":       "Claiming LEZ\u2026",
+                    "LezClaimed":        "LEZ claimed",
+                    "TimelockExpired":   "Timelock expired",
+                    "Refunding":         "Refunding\u2026",
+                    "RefundComplete":    "Refund complete",
+                    "AutoAcceptStarted": "Starting auto-accept\u2026",
+                    "AutoAcceptCancelled": "Auto-accept stopped",
+                }
+                return map[step] || step
+            }
+
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: Theme.spacingNormal
@@ -203,12 +231,13 @@ Item {
 
                 Text {
                     text: {
+                        var hs = parent.parent.humanStep
                         var parts = []
                         if (swapBackend.makerRunning)
-                            parts.push("Maker: " + (swapBackend.makerCurrentStep || "..."))
+                            parts.push("Maker: " + hs(swapBackend.makerCurrentStep || "..."))
                         if (swapBackend.takerRunning)
-                            parts.push("Taker: " + (swapBackend.takerCurrentStep || "..."))
-                        return parts.length > 0 ? "Running: " + parts.join(" | ") : "Idle"
+                            parts.push("Taker: " + hs(swapBackend.takerCurrentStep || "..."))
+                        return parts.length > 0 ? parts.join(" | ") : "Idle"
                     }
                     color: swapBackend.running ? Theme.warning : Theme.textMuted
                     font.pixelSize: Theme.fontSmall
