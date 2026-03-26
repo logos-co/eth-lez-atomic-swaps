@@ -133,39 +133,50 @@ ScrollView {
             // --- Go Live Toggle ---
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: autoAcceptRow.implicitHeight + Theme.spacingNormal * 2
+                implicitHeight: goLiveCol.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
-                border.color: Theme.border
+                border.color: swapBackend.autoAcceptRunning ? Theme.accent : Theme.border
                 border.width: 1
                 radius: Theme.radiusNormal
 
-                RowLayout {
-                    id: autoAcceptRow
+                ColumnLayout {
+                    id: goLiveCol
                     anchors {
                         fill: parent
                         margins: Theme.spacingNormal
                     }
-                    spacing: Theme.spacingNormal
+                    spacing: 6
 
-                    Text {
-                        text: "Go Live"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontNormal
-                        font.bold: true
-                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingNormal
 
-                    Item { Layout.fillWidth: true }
+                        Text {
+                            text: "Go Live"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontNormal
+                            font.bold: true
+                        }
 
-                    Switch {
-                        checked: swapBackend.autoAcceptRunning
-                        enabled: !swapBackend.running || swapBackend.autoAcceptRunning
-                        onToggled: {
-                            if (checked) {
-                                swapBackend.startAutoAccept()
-                            } else {
-                                swapBackend.stopAutoAccept()
+                        Item { Layout.fillWidth: true }
+
+                        Switch {
+                            checked: swapBackend.autoAcceptRunning
+                            enabled: !swapBackend.running || swapBackend.autoAcceptRunning
+                            onToggled: {
+                                if (checked) {
+                                    swapBackend.startAutoAccept()
+                                } else {
+                                    swapBackend.stopAutoAccept()
+                                }
                             }
                         }
+                    }
+
+                    Text {
+                        text: "Continuously accept swaps at this rate until stopped"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
                     }
                 }
             }

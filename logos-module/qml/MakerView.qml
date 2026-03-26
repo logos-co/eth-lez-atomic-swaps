@@ -26,16 +26,26 @@ ScrollView {
         return done
     }
 
+    property string cumulativeStats: {
+        var n = swapBackend.autoAcceptCompleted
+        if (n <= 0) return ""
+        var lezSold = n * Number(swapBackend.lezAmount)
+        var ethEarned = n * Number(swapBackend.ethAmount)
+        return n + " swap" + (n > 1 ? "s" : "") + " completed (" + lezSold + " LEZ sold for " + ethEarned + " ETH)"
+    }
+
     property string statusText: {
-        if (!swapBackend.autoAcceptRunning)
-            return "Publish your offer and start accepting swaps automatically"
+        if (!swapBackend.autoAcceptRunning) {
+            if (makerRoot.cumulativeStats)
+                return "Offline \u2014 " + makerRoot.cumulativeStats
+            return "Set your rate and go live to start accepting swaps"
+        }
         if (swapBackend.makerCurrentStep === "" || swapBackend.makerCurrentStep === "WaitingForEthLock") {
             if (swapBackend.autoAcceptCompleted === 0)
-                return "Your offer is live \u2014 waiting for a buyer..."
-            var n = swapBackend.autoAcceptCompleted
-            return n + " swap" + (n > 1 ? "s" : "") + " completed \u2014 waiting for next buyer..."
+                return "\u25CF LIVE \u2014 Listening for buyers..."
+            return "\u25CF LIVE \u2014 " + makerRoot.cumulativeStats + " \u2014 listening for buyers..."
         }
-        return "Swap in progress..."
+        return "\u25CF LIVE \u2014 Processing swap..."
     }
 
     function timeAgo(timestampMs) {
@@ -97,18 +107,23 @@ ScrollView {
                     spacing: 6
 
                     Text {
-                        text: "Your Offer"
+                        text: "Your Rate"
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontNormal
                         font.bold: true
                     }
                     Text {
-                        text: swapBackend.lezAmount + " LEZ  \u21C4  " + swapBackend.ethAmount + " ETH"
+                        text: swapBackend.lezAmount + " LEZ \u2192 " + swapBackend.ethAmount + " ETH  per swap"
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontNormal
                     }
                     Text {
-                        text: "Available: " + swapBackend.lezBalance + " LEZ"
+                        text: {
+                            var bal = swapBackend.lezBalance
+                            var amt = Number(swapBackend.lezAmount)
+                            var n = (amt > 0) ? Math.floor(Number(bal) / amt) : 0
+                            return "Available: " + bal + " LEZ" + (n > 0 ? "  (~" + n + " swaps at this rate)" : "")
+                        }
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
                     }
@@ -118,39 +133,50 @@ ScrollView {
             // --- Go Live Toggle ---
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: autoAcceptRow.implicitHeight + Theme.spacingNormal * 2
+                implicitHeight: goLiveCol.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
-                border.color: Theme.border
+                border.color: swapBackend.autoAcceptRunning ? Theme.accent : Theme.border
                 border.width: 1
                 radius: Theme.radiusNormal
 
-                RowLayout {
-                    id: autoAcceptRow
+                ColumnLayout {
+                    id: goLiveCol
                     anchors {
                         fill: parent
                         margins: Theme.spacingNormal
                     }
-                    spacing: Theme.spacingNormal
+                    spacing: 6
 
-                    Text {
-                        text: "Go Live"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontNormal
-                        font.bold: true
-                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingNormal
 
-                    Item { Layout.fillWidth: true }
+                        Text {
+                            text: "Go Live"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontNormal
+                            font.bold: true
+                        }
 
-                    Switch {
-                        checked: swapBackend.autoAcceptRunning
-                        enabled: !swapBackend.makerRunning
-                        onToggled: {
-                            if (checked) {
-                                swapBackend.startAutoAccept()
-                            } else {
-                                swapBackend.stopAutoAccept()
+                        Item { Layout.fillWidth: true }
+
+                        Switch {
+                            checked: swapBackend.autoAcceptRunning
+                            enabled: !swapBackend.makerRunning
+                            onToggled: {
+                                if (checked) {
+                                    swapBackend.startAutoAccept()
+                                } else {
+                                    swapBackend.stopAutoAccept()
+                                }
                             }
                         }
+                    }
+
+                    Text {
+                        text: "Continuously accept swaps at this rate until stopped"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
                     }
                 }
             }
