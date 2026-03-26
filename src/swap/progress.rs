@@ -30,6 +30,15 @@ pub enum SwapProgress {
     TimelockExpired,
     Refunding,
     RefundComplete,
+
+    // Auto-accept loop events
+    AutoAcceptStarted,
+    AutoAcceptIteration { iteration: u32 },
+    AutoAcceptSwapCompleted { iteration: u32, status: String },
+    AutoAcceptSwapFailed { iteration: u32, error: String },
+    AutoAcceptInsufficientFunds { lez_balance: String, lez_required: String },
+    AutoAcceptStopped { total_completed: u32, total_failed: u32 },
+    AutoAcceptCancelled,
 }
 
 pub type ProgressSender = mpsc::UnboundedSender<SwapProgress>;

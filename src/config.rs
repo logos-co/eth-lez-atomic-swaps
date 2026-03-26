@@ -53,6 +53,17 @@ pub struct SwapConfig {
     pub nwaku_url: Option<String>,
 }
 
+impl SwapConfig {
+    /// Create a copy with fresh absolute timelocks computed from the current time.
+    pub fn with_fresh_timelocks(&self, lez_minutes: u64, eth_minutes: u64) -> Self {
+        let now = crate::swap::refund::now_unix();
+        let mut fresh = self.clone();
+        fresh.lez_timelock = now + lez_minutes * 60;
+        fresh.eth_timelock = now + eth_minutes * 60;
+        fresh
+    }
+}
+
 /// Parse an ETH amount string (e.g. "0.001") and convert to wei (u128).
 pub fn eth_to_wei(s: &str) -> std::result::Result<u128, String> {
     let s = s.trim();

@@ -61,6 +61,13 @@ class SwapBackend : public QObject
     Q_PROPERTY(QStringList takerProgressSteps READ takerProgressSteps NOTIFY takerProgressStepsChanged)
     Q_PROPERTY(QString takerResultJson READ takerResultJson NOTIFY takerResultJsonChanged)
 
+    // Auto-accept state
+    Q_PROPERTY(bool autoAcceptRunning READ autoAcceptRunning NOTIFY autoAcceptRunningChanged)
+    Q_PROPERTY(int autoAcceptCompleted READ autoAcceptCompleted NOTIFY autoAcceptCompletedChanged)
+    Q_PROPERTY(int autoAcceptFailed READ autoAcceptFailed NOTIFY autoAcceptFailedChanged)
+    Q_PROPERTY(int autoAcceptIteration READ autoAcceptIteration NOTIFY autoAcceptIterationChanged)
+    Q_PROPERTY(QStringList swapHistory READ swapHistory NOTIFY swapHistoryChanged)
+
     // Combined running (for status bar / config panel)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
 
@@ -125,8 +132,15 @@ public:
     QStringList takerProgressSteps() const { return m_takerProgressSteps; }
     QString takerResultJson() const { return m_takerResultJson; }
 
+    // Auto-accept getters
+    bool autoAcceptRunning() const { return m_autoAcceptRunning; }
+    int autoAcceptCompleted() const { return m_autoAcceptCompleted; }
+    int autoAcceptFailed() const { return m_autoAcceptFailed; }
+    int autoAcceptIteration() const { return m_autoAcceptIteration; }
+    QStringList swapHistory() const { return m_swapHistory; }
+
     // Combined
-    bool running() const { return m_makerRunning || m_takerRunning; }
+    bool running() const { return m_makerRunning || m_takerRunning || m_autoAcceptRunning; }
 
     Q_INVOKABLE void loadEnv();
     Q_INVOKABLE void loadConfig(const QJsonObject &config);
@@ -137,6 +151,8 @@ public:
     Q_INVOKABLE void refundEth(const QString &swapIdHex);
     Q_INVOKABLE void publishOffer();
     Q_INVOKABLE void fetchOffers();
+    Q_INVOKABLE void startAutoAccept();
+    Q_INVOKABLE void stopAutoAccept();
 
 signals:
     void ethRpcUrlChanged();
@@ -172,6 +188,12 @@ signals:
     void takerResultJsonChanged();
 
     void runningChanged();
+
+    void autoAcceptRunningChanged();
+    void autoAcceptCompletedChanged();
+    void autoAcceptFailedChanged();
+    void autoAcceptIterationChanged();
+    void swapHistoryChanged();
 
     void offerPublished(const QString &resultJson);
     void offersFetched(const QString &offersJson);
@@ -245,6 +267,16 @@ private:
     QFutureWatcher<QString> m_takerWatcher;
     QFutureWatcher<QString> m_publishWatcher;
     QFutureWatcher<QString> m_fetchWatcher;
+
+    // Auto-accept state
+    bool m_autoAcceptRunning = false;
+    int m_autoAcceptCompleted = 0;
+    int m_autoAcceptFailed = 0;
+    int m_autoAcceptIteration = 0;
+    QStringList m_swapHistory;
+    QString m_lastEthTx;
+    QString m_lastLezTx;
+    QFutureWatcher<QString> m_autoAcceptWatcher;
 
     // Progress callback contexts (stable pointers for FFI)
     ProgressContext m_makerProgressCtx;

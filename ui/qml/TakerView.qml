@@ -25,9 +25,19 @@ ScrollView {
         return done
     }
 
-    property bool messagingEnabled: swapBackend.nwakuUrl !== ""
     property var discoveredOffers: []
     property bool fetching: false
+    property var pendingOffer: null
+    property var acceptedOffer: null
+    property bool swapCompleted: false
+
+    // Convert wei to ETH numeric string (for config fields, not display)
+    function weiToEthValue(wei) {
+        var n = Number(wei)
+        if (isNaN(n) || n === 0) return "0"
+        var eth = n / 1e18
+        return eth.toString()
+    }
 
     function weiToEth(wei) {
         var n = Number(wei)
@@ -85,25 +95,32 @@ ScrollView {
                     if (obj.offers)
                         takerRoot.discoveredOffers = obj.offers
                 }
+                function onRunningChanged() {
+                    if (!swapBackend.running && takerRoot.acceptedOffer !== null) {
+                        takerRoot.swapCompleted = true
+                        takerRoot.acceptedOffer = null
+                    }
+                }
             }
 
             Text {
-                text: "Taker Flow"
+                text: "Buy LEZ"
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontTitle
                 font.bold: true
             }
             Text {
-                text: "Generate preimage, lock ETH, wait for maker to lock LEZ, then claim LEZ."
+                visible: !swapBackend.running && !takerRoot.swapCompleted
+                text: "Browse available offers and click one to start a swap."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSmall
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
 
-            // --- Discover Offers (messaging enabled) ---
+            // --- Discover Offers ---
             Button {
-                visible: messagingEnabled
+                visible: !swapBackend.running && !takerRoot.swapCompleted
                 text: fetching ? "Fetching..." : "Discover Offers"
                 enabled: !fetching && !swapBackend.running
                 Layout.fillWidth: true
@@ -135,7 +152,7 @@ ScrollView {
 
             // Offer list
             Repeater {
-                model: discoveredOffers
+                model: !swapBackend.running && !takerRoot.swapCompleted ? discoveredOffers : []
 
                 Rectangle {
                     Layout.fillWidth: true
@@ -150,9 +167,9 @@ ScrollView {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                        enabled: !swapBackend.running && takerRoot.pendingOffer === null
                         onClicked: {
-                            // Accept offer — start taker (preimage generated internally)
-                            swapBackend.startTaker("")
+                            takerRoot.pendingOffer = modelData
                         }
                     }
 
@@ -219,40 +236,150 @@ ScrollView {
 
             // No offers message
             Text {
-                visible: messagingEnabled && discoveredOffers.length === 0 && !fetching
+                visible: discoveredOffers.length === 0 && !fetching && !swapBackend.running && !takerRoot.swapCompleted && takerRoot.pendingOffer === null
                 text: "No offers found. Click \"Discover Offers\" to search."
                 color: Theme.textMuted
                 font.pixelSize: Theme.fontSmall
             }
 
-            // Start button (no hashlock input needed — taker generates preimage)
-            Button {
-                text: swapBackend.running ? "Running..." : "Start Taker"
-                enabled: !swapBackend.running
+            // --- Confirm Purchase Card ---
+            Rectangle {
+                visible: takerRoot.pendingOffer !== null && !swapBackend.running
                 Layout.fillWidth: true
-                Layout.preferredHeight: 48
-                font.pixelSize: Theme.fontNormal
-                font.bold: true
+                implicitHeight: confirmCol.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: Theme.accent
+                border.width: 1
+                radius: Theme.radiusNormal
 
-                background: Rectangle {
-                    color: parent.enabled
-                           ? (parent.hovered ? Theme.accentHover : Theme.accent)
-                           : Theme.surfaceLight
-                    radius: Theme.radiusNormal
-                }
-                contentItem: Text {
-                    text: parent.text
-                    color: parent.enabled ? "#ffffff" : Theme.textMuted
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font: parent.font
-                }
+                ColumnLayout {
+                    id: confirmCol
+                    anchors {
+                        fill: parent
+                        margins: Theme.spacingNormal
+                    }
+                    spacing: 8
 
-                onClicked: swapBackend.startTaker("")
+                    Text {
+                        text: takerRoot.pendingOffer
+                              ? "Buy " + takerRoot.pendingOffer.lez_amount + " LEZ for " + takerRoot.weiToEth(takerRoot.pendingOffer.eth_amount) + "?"
+                              : ""
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+                    Text {
+                        text: takerRoot.pendingOffer
+                              ? "from " + takerRoot.pendingOffer.maker_eth_address.substring(0, 6) + "..." + takerRoot.pendingOffer.maker_eth_address.substring(takerRoot.pendingOffer.maker_eth_address.length - 4)
+                              : ""
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spacingNormal
+
+                        Button {
+                            text: "Buy"
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 40
+                            font.pixelSize: Theme.fontNormal
+                            font.bold: true
+
+                            background: Rectangle {
+                                color: parent.hovered ? Theme.accentHover : Theme.accent
+                                radius: Theme.radiusNormal
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: "#ffffff"
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                font: parent.font
+                            }
+
+                            onClicked: {
+                                var offer = takerRoot.pendingOffer
+                                swapBackend.ethRecipientAddress = offer.maker_eth_address
+                                swapBackend.lezAmount = String(offer.lez_amount)
+                                swapBackend.ethAmount = takerRoot.weiToEthValue(offer.eth_amount)
+                                swapBackend.ethHtlcAddress = offer.eth_htlc_address
+                                swapBackend.lezHtlcProgramId = offer.lez_htlc_program_id
+                                swapBackend.lezTakerAccountId = offer.maker_lez_account
+                                takerRoot.acceptedOffer = offer
+                                takerRoot.pendingOffer = null
+                                swapBackend.startTaker("")
+                            }
+                        }
+
+                        Button {
+                            text: "Cancel"
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 40
+                            font.pixelSize: Theme.fontNormal
+
+                            background: Rectangle {
+                                color: parent.hovered ? Qt.darker(Theme.surface, 1.1) : Theme.surface
+                                border.color: Theme.border
+                                border.width: 1
+                                radius: Theme.radiusNormal
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: Theme.textPrimary
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                font: parent.font
+                            }
+
+                            onClicked: {
+                                takerRoot.pendingOffer = null
+                            }
+                        }
+                    }
+                }
             }
 
-            // Progress
+            // --- Active Swap: Accepted Offer + Progress ---
             Rectangle {
+                visible: swapBackend.running && takerRoot.acceptedOffer !== null
+                Layout.fillWidth: true
+                implicitHeight: activeCol.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: Theme.accent
+                border.width: 1
+                radius: Theme.radiusNormal
+
+                ColumnLayout {
+                    id: activeCol
+                    anchors {
+                        fill: parent
+                        margins: Theme.spacingNormal
+                    }
+                    spacing: 6
+
+                    Text {
+                        text: takerRoot.acceptedOffer
+                              ? "Buying " + takerRoot.acceptedOffer.lez_amount + " LEZ for " + takerRoot.weiToEth(takerRoot.acceptedOffer.eth_amount)
+                              : ""
+                        color: Theme.accent
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+                    Text {
+                        text: takerRoot.acceptedOffer
+                              ? "from " + takerRoot.acceptedOffer.maker_eth_address.substring(0, 6) + "..." + takerRoot.acceptedOffer.maker_eth_address.substring(takerRoot.acceptedOffer.maker_eth_address.length - 4)
+                              : ""
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
+                    }
+                }
+            }
+
+            // Progress (only during active swap)
+            Rectangle {
+                visible: swapBackend.running
                 Layout.fillWidth: true
                 implicitHeight: takerStepper.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
@@ -275,6 +402,37 @@ ScrollView {
             // Result
             ResultCard {
                 resultJson: swapBackend.resultJson
+            }
+
+            // --- Browse More Offers (post-swap) ---
+            Button {
+                visible: takerRoot.swapCompleted && !swapBackend.running
+                text: "Browse More Offers"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 42
+                font.pixelSize: Theme.fontNormal
+                font.bold: true
+
+                background: Rectangle {
+                    color: parent.hovered ? Qt.darker(Theme.surface, 1.1) : Theme.surface
+                    border.color: Theme.accent
+                    border.width: 1
+                    radius: Theme.radiusNormal
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: Theme.accent
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    font: parent.font
+                }
+
+                onClicked: {
+                    takerRoot.swapCompleted = false
+                    takerRoot.pendingOffer = null
+                    takerRoot.acceptedOffer = null
+                    takerRoot.discoveredOffers = []
+                }
             }
         }
     }

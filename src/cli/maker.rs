@@ -72,7 +72,7 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
         println!("Waiting for taker to lock ETH...");
     }
 
-    let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None).await?;
+    let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None, None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())

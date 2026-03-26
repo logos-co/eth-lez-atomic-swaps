@@ -1,5 +1,6 @@
 #include "swapbackend.h"
 
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -59,12 +60,20 @@ SwapBackend::SwapBackend(QObject *parent)
     connect(&m_fetchWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
         emit offersFetched(m_fetchWatcher.result());
     });
+
+    connect(&m_autoAcceptWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
+        m_autoAcceptRunning = false;
+        emit autoAcceptRunningChanged();
+        emit runningChanged();
+        fetchBalances();
+    });
 }
 
 SwapBackend::~SwapBackend()
 {
     m_watcher.waitForFinished();
     m_balanceWatcher.waitForFinished();
+    m_autoAcceptWatcher.waitForFinished();
     m_publishWatcher.waitForFinished();
     m_fetchWatcher.waitForFinished();
 }
@@ -241,6 +250,70 @@ void SwapBackend::handleProgress(const QString &json)
     auto doc = QJsonDocument::fromJson(json.toUtf8());
     auto obj = doc.object();
     QString step = obj["step"].toString();
+
+    // Track tx hashes for history entries
+    if (step == "EthClaimed" || step == "LezClaimed") {
+        m_lastEthTx = obj["data"].toObject()["tx_hash"].toString();
+    }
+    if (step == "LezLocked") {
+        m_lastLezTx = obj["data"].toObject()["tx_hash"].toString();
+    }
+
+    // Handle auto-accept loop events
+    if (step == "AutoAcceptIteration") {
+        m_autoAcceptIteration = obj["data"].toObject()["iteration"].toInt();
+        emit autoAcceptIterationChanged();
+        clearProgress();
+        return;
+    }
+    if (step == "AutoAcceptSwapCompleted") {
+        m_autoAcceptCompleted++;
+        emit autoAcceptCompletedChanged();
+        QJsonObject entry;
+        entry["status"] = QStringLiteral("completed");
+        entry["lez_amount"] = m_lezAmount;
+        entry["eth_amount"] = m_ethAmount;
+        entry["eth_tx"] = m_lastEthTx;
+        entry["lez_tx"] = m_lastLezTx;
+        entry["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+        m_swapHistory.prepend(QString::fromUtf8(
+            QJsonDocument(entry).toJson(QJsonDocument::Compact)));
+        emit swapHistoryChanged();
+        m_lastEthTx.clear();
+        m_lastLezTx.clear();
+        return;
+    }
+    if (step == "AutoAcceptSwapFailed") {
+        auto data = obj["data"].toObject();
+        m_autoAcceptFailed++;
+        emit autoAcceptFailedChanged();
+        QJsonObject entry;
+        entry["status"] = QStringLiteral("failed");
+        entry["error"] = data["error"].toString();
+        entry["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+        m_swapHistory.prepend(QString::fromUtf8(
+            QJsonDocument(entry).toJson(QJsonDocument::Compact)));
+        emit swapHistoryChanged();
+        m_lastEthTx.clear();
+        m_lastLezTx.clear();
+        return;
+    }
+    if (step == "AutoAcceptInsufficientFunds") {
+        auto data = obj["data"].toObject();
+        QJsonObject entry;
+        entry["status"] = QStringLiteral("insufficient_funds");
+        entry["lez_balance"] = data["lez_balance"].toString();
+        entry["lez_required"] = data["lez_required"].toString();
+        entry["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+        m_swapHistory.prepend(QString::fromUtf8(
+            QJsonDocument(entry).toJson(QJsonDocument::Compact)));
+        emit swapHistoryChanged();
+        return;
+    }
+    if (step == "AutoAcceptStarted" || step == "AutoAcceptStopped" || step == "AutoAcceptCancelled") {
+        return;
+    }
+
     setCurrentStep(step);
     addProgressStep(step);
 }
@@ -251,7 +324,7 @@ void SwapBackend::handleProgress(const QString &json)
 
 void SwapBackend::startMaker(const QString &hashlockHex)
 {
-    if (m_running)
+    if (m_running || m_autoAcceptRunning)
         return;
     setRunning(true);
     clearProgress();
@@ -293,6 +366,50 @@ void SwapBackend::startTaker(const QString &preimageHex)
     });
 
     m_watcher.setFuture(future);
+}
+
+// ---------------------------------------------------------------------------
+// Auto-accept loop
+// ---------------------------------------------------------------------------
+
+void SwapBackend::startAutoAccept()
+{
+    if (m_autoAcceptRunning || m_running)
+        return;
+
+    m_autoAcceptRunning = true;
+    emit autoAcceptRunningChanged();
+    emit runningChanged();
+
+    m_autoAcceptCompleted = 0;
+    m_autoAcceptFailed = 0;
+    m_autoAcceptIteration = 0;
+    m_swapHistory.clear();
+    m_lastEthTx.clear();
+    m_lastLezTx.clear();
+    emit autoAcceptCompletedChanged();
+    emit autoAcceptFailedChanged();
+    emit autoAcceptIterationChanged();
+    emit swapHistoryChanged();
+
+    clearProgress();
+
+    QByteArray cfg = configJson();
+
+    auto future = QtConcurrent::run([cfg, this]() -> QString {
+        auto *result = swap_ffi_run_maker_loop(
+            cfg.constData(),
+            progressCallbackTrampoline,
+            this);
+        return ffiToQString(result);
+    });
+
+    m_autoAcceptWatcher.setFuture(future);
+}
+
+void SwapBackend::stopAutoAccept()
+{
+    swap_ffi_stop_maker_loop();
 }
 
 void SwapBackend::publishOffer()
