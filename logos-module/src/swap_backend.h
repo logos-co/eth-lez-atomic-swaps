@@ -274,6 +274,8 @@ private:
     int m_autoAcceptFailed = 0;
     int m_autoAcceptIteration = 0;
     QStringList m_swapHistory;
+    QString m_lastEthTx;
+    QString m_lastLezTx;
     QFutureWatcher<QString> m_autoAcceptWatcher;
 
     // Progress callback contexts (stable pointers for FFI)

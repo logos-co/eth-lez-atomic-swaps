@@ -8,6 +8,8 @@ ScrollView {
     contentWidth: availableWidth
     background: Rectangle { color: Theme.background }
 
+    property bool anyRunning: swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning
+
     Flickable {
         contentHeight: col.implicitHeight + Theme.spacingXLarge * 2
         boundsBehavior: Flickable.StopAtBounds
@@ -42,6 +44,7 @@ ScrollView {
                 text: swapBackend.ethRpcUrl
                 onTextEdited: (val) => swapBackend.ethRpcUrl = val
                 placeholderText: "wss://..."
+                fieldEnabled: !configRoot.anyRunning
             }
             ConfigField {
                 label: "Private Key"
@@ -49,18 +52,21 @@ ScrollView {
                 onTextEdited: (val) => swapBackend.ethPrivateKey = val
                 echoMode: TextInput.Password
                 placeholderText: "0x..."
+                fieldEnabled: !configRoot.anyRunning
             }
             ConfigField {
                 label: "HTLC Contract Address"
                 text: swapBackend.ethHtlcAddress
                 onTextEdited: (val) => swapBackend.ethHtlcAddress = val
                 placeholderText: "0x..."
+                fieldEnabled: !configRoot.anyRunning
             }
             ConfigField {
                 label: "Recipient Address"
                 text: swapBackend.ethRecipientAddress
                 onTextEdited: (val) => swapBackend.ethRecipientAddress = val
                 placeholderText: "0x..."
+                fieldEnabled: !configRoot.anyRunning
             }
 
             // --- LEZ ---
@@ -70,6 +76,7 @@ ScrollView {
                 label: "Sequencer URL"
                 text: swapBackend.lezSequencerUrl
                 onTextEdited: (val) => swapBackend.lezSequencerUrl = val
+                fieldEnabled: !configRoot.anyRunning
             }
             ConfigField {
                 label: "Signing Key"
@@ -77,18 +84,21 @@ ScrollView {
                 onTextEdited: (val) => swapBackend.lezSigningKey = val
                 echoMode: TextInput.Password
                 placeholderText: "32-byte hex"
+                fieldEnabled: !configRoot.anyRunning
             }
             ConfigField {
                 label: "HTLC Program ID"
                 text: swapBackend.lezHtlcProgramId
                 onTextEdited: (val) => swapBackend.lezHtlcProgramId = val
                 placeholderText: "32-byte hex"
+                fieldEnabled: !configRoot.anyRunning
             }
             ConfigField {
                 label: "Taker Account ID"
                 text: swapBackend.lezTakerAccountId
                 onTextEdited: (val) => swapBackend.lezTakerAccountId = val
                 placeholderText: "base58"
+                fieldEnabled: !configRoot.anyRunning
             }
 
             // --- Swap Parameters ---
@@ -103,12 +113,14 @@ ScrollView {
                     label: "LEZ Amount"
                     text: swapBackend.lezAmount
                     onTextEdited: (val) => swapBackend.lezAmount = val
+                    fieldEnabled: !configRoot.anyRunning
                 }
                 ConfigField {
                     Layout.fillWidth: true
                     label: "ETH Amount"
                     text: swapBackend.ethAmount
                     onTextEdited: (val) => swapBackend.ethAmount = val
+                    fieldEnabled: !configRoot.anyRunning
                 }
             }
 
@@ -121,12 +133,14 @@ ScrollView {
                     label: "LEZ Timelock (min)"
                     text: swapBackend.lezTimelockMinutes
                     onTextEdited: (val) => swapBackend.lezTimelockMinutes = val
+                    fieldEnabled: !configRoot.anyRunning
                 }
                 ConfigField {
                     Layout.fillWidth: true
                     label: "ETH Timelock (min)"
                     text: swapBackend.ethTimelockMinutes
                     onTextEdited: (val) => swapBackend.ethTimelockMinutes = val
+                    fieldEnabled: !configRoot.anyRunning
                 }
             }
 
@@ -135,16 +149,18 @@ ScrollView {
                 label: "Poll Interval (ms)"
                 text: swapBackend.pollIntervalMs
                 onTextEdited: (val) => swapBackend.pollIntervalMs = val
+                fieldEnabled: !configRoot.anyRunning
             }
 
-            // --- Messaging (optional) ---
-            SectionHeader { label: "Messaging (optional)" }
+            // --- Messaging ---
+            SectionHeader { label: "Messaging" }
 
             ConfigField {
                 label: "Nwaku URL"
                 text: swapBackend.nwakuUrl
                 onTextEdited: (val) => swapBackend.nwakuUrl = val
                 placeholderText: "http://localhost:8645"
+                fieldEnabled: !configRoot.anyRunning
             }
         }
     }
@@ -177,6 +193,7 @@ ScrollView {
         property alias text: input.text
         property alias echoMode: input.echoMode
         property alias placeholderText: input.placeholderText
+        property bool fieldEnabled: true
         signal textEdited(string val)
 
         spacing: 4
@@ -188,6 +205,7 @@ ScrollView {
         }
         TextField {
             id: input
+            enabled: fieldEnabled
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.inputHeight
             leftPadding: 12
@@ -202,6 +220,7 @@ ScrollView {
                 border.color: input.activeFocus ? Theme.accent : Theme.border
                 border.width: 1
                 radius: Theme.radiusSmall
+                opacity: input.enabled ? 1.0 : 0.5
             }
             onTextChanged: () => textEdited(input.text)
         }

@@ -1,5 +1,6 @@
 #include "swap_backend.h"
 
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -336,6 +337,14 @@ void SwapBackend::handleProgress(const QString &json, bool isMaker)
     auto obj = doc.object();
     QString step = obj["step"].toString();
 
+    // Track tx hashes for history entries
+    if (step == "EthClaimed" || step == "LezClaimed") {
+        m_lastEthTx = obj["data"].toObject()["tx_hash"].toString();
+    }
+    if (step == "LezLocked") {
+        m_lastLezTx = obj["data"].toObject()["tx_hash"].toString();
+    }
+
     // Handle auto-accept loop events
     if (step == "AutoAcceptIteration") {
         m_autoAcceptIteration = obj["data"].toObject()["iteration"].toInt();
@@ -345,24 +354,46 @@ void SwapBackend::handleProgress(const QString &json, bool isMaker)
         return;
     }
     if (step == "AutoAcceptSwapCompleted") {
-        auto data = obj["data"].toObject();
         m_autoAcceptCompleted++;
         emit autoAcceptCompletedChanged();
-        m_swapHistory.prepend(QStringLiteral("Swap #%1: completed").arg(data["iteration"].toInt()));
+        QJsonObject entry;
+        entry["status"] = QStringLiteral("completed");
+        entry["lez_amount"] = m_lezAmount;
+        entry["eth_amount"] = m_ethAmount;
+        entry["eth_tx"] = m_lastEthTx;
+        entry["lez_tx"] = m_lastLezTx;
+        entry["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+        m_swapHistory.prepend(QString::fromUtf8(
+            QJsonDocument(entry).toJson(QJsonDocument::Compact)));
         emit swapHistoryChanged();
+        m_lastEthTx.clear();
+        m_lastLezTx.clear();
         return;
     }
     if (step == "AutoAcceptSwapFailed") {
         auto data = obj["data"].toObject();
         m_autoAcceptFailed++;
         emit autoAcceptFailedChanged();
-        m_swapHistory.prepend(QStringLiteral("Swap #%1: %2").arg(data["iteration"].toInt()).arg(data["error"].toString()));
+        QJsonObject entry;
+        entry["status"] = QStringLiteral("failed");
+        entry["error"] = data["error"].toString();
+        entry["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+        m_swapHistory.prepend(QString::fromUtf8(
+            QJsonDocument(entry).toJson(QJsonDocument::Compact)));
         emit swapHistoryChanged();
+        m_lastEthTx.clear();
+        m_lastLezTx.clear();
         return;
     }
     if (step == "AutoAcceptInsufficientFunds") {
         auto data = obj["data"].toObject();
-        m_swapHistory.prepend(QStringLiteral("Insufficient funds: have %1, need %2").arg(data["lez_balance"].toString()).arg(data["lez_required"].toString()));
+        QJsonObject entry;
+        entry["status"] = QStringLiteral("insufficient_funds");
+        entry["lez_balance"] = data["lez_balance"].toString();
+        entry["lez_required"] = data["lez_required"].toString();
+        entry["timestamp"] = QDateTime::currentMSecsSinceEpoch();
+        m_swapHistory.prepend(QString::fromUtf8(
+            QJsonDocument(entry).toJson(QJsonDocument::Compact)));
         emit swapHistoryChanged();
         return;
     }
@@ -448,6 +479,8 @@ void SwapBackend::startAutoAccept()
     m_autoAcceptFailed = 0;
     m_autoAcceptIteration = 0;
     m_swapHistory.clear();
+    m_lastEthTx.clear();
+    m_lastLezTx.clear();
     emit autoAcceptCompletedChanged();
     emit autoAcceptFailedChanged();
     emit autoAcceptIterationChanged();

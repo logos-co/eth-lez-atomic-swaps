@@ -5,13 +5,15 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::{
-    config::SwapConfig,
+    config::{account_id_to_base58, SwapConfig},
     error::{Result, SwapError},
     eth::client::{EthClient, EthHTLC::SwapState},
     eth::watcher::{self, EthHtlcEvent},
     lez::client::LezClient,
     lez::watcher as lez_watcher,
     lez::watcher::LezHtlcEvent,
+    messaging::client::MessagingClient,
+    messaging::types::{SwapOffer, OFFERS_TOPIC},
     swap::{
         progress::{self, ProgressSender, SwapProgress},
         refund::now_unix,
@@ -290,6 +292,33 @@ pub async fn run_maker_loop(
                 continue;
             }
             _ => {} // balance sufficient
+        }
+
+        // Publish offer (if messaging configured).
+        if let Some(nwaku_url) = &fresh_config.nwaku_url {
+            let offer = SwapOffer {
+                hashlock: String::new(),
+                lez_amount: fresh_config.lez_amount,
+                eth_amount: fresh_config.eth_amount,
+                maker_eth_address: format!("{}", fresh_config.eth_recipient_address),
+                maker_lez_account: account_id_to_base58(&lez_client.account_id()),
+                lez_timelock: fresh_config.lez_timelock,
+                eth_timelock: fresh_config.eth_timelock,
+                lez_htlc_program_id: hex::encode(
+                    fresh_config
+                        .lez_htlc_program_id
+                        .iter()
+                        .flat_map(|w| w.to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                ),
+                eth_htlc_address: format!("{}", fresh_config.eth_htlc_address),
+            };
+            let messaging = MessagingClient::new(nwaku_url);
+            let _ = messaging.subscribe(&[OFFERS_TOPIC]).await;
+            match messaging.publish(OFFERS_TOPIC, &offer).await {
+                Ok(_) => info!(iteration, "maker: offer published"),
+                Err(e) => info!(iteration, %e, "maker: failed to publish offer (continuing)"),
+            }
         }
 
         progress::report(

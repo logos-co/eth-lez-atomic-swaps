@@ -214,6 +214,8 @@ private:
     int m_autoAcceptFailed = 0;
     int m_autoAcceptIteration = 0;
     QStringList m_swapHistory;
+    QString m_lastEthTx;
+    QString m_lastLezTx;
 
     QFutureWatcher<QString> m_watcher;
     QFutureWatcher<QString> m_balanceWatcher;

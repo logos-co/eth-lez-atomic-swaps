@@ -41,8 +41,8 @@ char *swap_ffi_refund_eth(const char *config_json,
 char *swap_ffi_fetch_balances(const char *config_json);
 
 char *swap_ffi_run_maker_loop(const char *config_json,
-                               ProgressCallback cb,
-                               void *user_data);
+                              ProgressCallback cb,
+                              void *user_data);
 
 void swap_ffi_stop_maker_loop(void);
 
