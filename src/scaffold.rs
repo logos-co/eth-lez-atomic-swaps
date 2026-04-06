@@ -59,15 +59,17 @@ pub fn wallet_core(home: &Path) -> Result<wallet::WalletCore> {
 /// Returns at least 2 accounts (maker + taker) or errors.
 pub fn public_accounts(wc: &wallet::WalletCore) -> Result<Vec<WalletAccount>> {
     let mut result = Vec::new();
-    for entry in &wc.config().initial_accounts {
-        if let wallet::config::InitialAccountData::Public(pub_data) = entry {
-            let account_id = pub_data.account_id;
-            let account_id_b58 =
-                base58::ToBase58::to_base58(account_id.value().as_slice());
-            result.push(WalletAccount {
-                account_id,
-                account_id_b58,
-            });
+    if let Some(initial_accounts) = &wc.config().initial_accounts {
+        for entry in initial_accounts {
+            if let wallet::config::InitialAccountData::Public(pub_data) = entry {
+                let account_id = pub_data.account_id;
+                let account_id_b58 =
+                    base58::ToBase58::to_base58(account_id.value().as_slice());
+                result.push(WalletAccount {
+                    account_id,
+                    account_id_b58,
+                });
+            }
         }
     }
 
