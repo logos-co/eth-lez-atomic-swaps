@@ -114,7 +114,8 @@ async fn test_lock_creates_escrow() {
     let maker = env.maker_client();
     let (_, hashlock) = make_preimage_and_hashlock(0x01);
 
-    maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
+    // timelock=0 → already expired; not testing timelock enforcement here.
+    maker.lock(hashlock, env.taker_id, 1000, 0).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
 
     let escrow = maker.get_escrow(&hashlock).await.unwrap().expect("escrow should exist");
@@ -130,7 +131,7 @@ async fn test_lock_then_claim() {
     let taker = env.taker_client();
     let (preimage, hashlock) = make_preimage_and_hashlock(0x02);
 
-    maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
+    maker.lock(hashlock, env.taker_id, 1000, 0).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
 
     let taker_before = taker.get_balance(&env.taker_id).await.unwrap();
@@ -151,7 +152,8 @@ async fn test_lock_then_refund() {
     let (_, hashlock) = make_preimage_and_hashlock(0x03);
 
     let maker_before = maker.get_balance(&env.maker_id).await.unwrap();
-    maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
+    // timelock=0 → already expired; not testing timelock enforcement here.
+    maker.lock(hashlock, env.taker_id, 1000, 0).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
 
     maker.refund(&hashlock).await.unwrap();
@@ -171,7 +173,7 @@ async fn test_claim_wrong_preimage_fails() {
     let taker = env.taker_client();
     let (_, hashlock) = make_preimage_and_hashlock(0x04);
 
-    maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
+    maker.lock(hashlock, env.taker_id, 1000, 0).await.unwrap();
     tokio::time::sleep(BLOCK_WAIT * 2).await;
 
     let wrong_preimage = [0xFFu8; 32];
@@ -198,7 +200,7 @@ async fn test_watcher_detects_lock_and_claim() {
     });
 
     // Lock LEZ — watcher should emit Locked.
-    maker.lock(hashlock, env.taker_id, 1000).await.unwrap();
+    maker.lock(hashlock, env.taker_id, 1000, 0).await.unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(15), rx.recv())
         .await
@@ -219,4 +221,91 @@ async fn test_watcher_detects_lock_and_claim() {
     assert!(matches!(event, watcher::LezHtlcEvent::Claimed { .. }));
 
     watcher_handle.abort();
+}
+
+/// Validates on-chain timelock enforcement via the LEZ runtime's timestamp
+/// validity window. The guest program attaches `with_timestamp_validity_window(timelock..)`
+/// to the refund output, so the runtime must reject refund transactions whose
+/// block timestamp falls before the timelock.
+///
+/// Sequence:
+///   1. Lock LEZ with a far-future timelock (1 hour from now).
+///   2. Attempt refund immediately → the runtime should reject the transaction
+///      because the block timestamp is before the validity window.
+///   3. Lock LEZ again with an already-expired timelock (in the past).
+///   4. Refund → should succeed because the block timestamp satisfies the window.
+///
+/// This is the primary regression test for on-chain timelock enforcement in the
+/// atomic swap flow. The off-chain guard in `src/swap/refund.rs` is bypassed
+/// here intentionally — we call `LezClient::refund` directly to exercise the
+/// runtime's ValidityWindow check.
+#[tokio::test]
+async fn test_refund_rejected_before_timelock_accepted_after() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let env = setup().await;
+    let maker = env.maker_client();
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // ── Phase 1: early refund must be rejected ──────────────────────
+    // Lock with a timelock 1 hour in the future.
+    let (_, hashlock_future) = make_preimage_and_hashlock(0x10);
+    let future_timelock_secs = now_secs + 3600;
+    maker
+        .lock(hashlock_future, env.taker_id, 1000, future_timelock_secs)
+        .await
+        .unwrap();
+    tokio::time::sleep(BLOCK_WAIT * 2).await;
+
+    // Refund: the transaction is submitted to the sequencer, but the runtime
+    // should reject it because the current block timestamp is before the
+    // validity window start (timelock).
+    let _ = maker.refund(&hashlock_future).await;
+    tokio::time::sleep(BLOCK_WAIT * 2).await;
+
+    // Escrow must still be Locked — the early refund had no on-chain effect.
+    let escrow = maker
+        .get_escrow(&hashlock_future)
+        .await
+        .unwrap()
+        .expect("escrow should still exist");
+    assert_eq!(
+        escrow.state,
+        HTLCState::Locked,
+        "runtime should reject refund before timelock expiry"
+    );
+
+    // ── Phase 2: refund after timelock must succeed ─────────────────
+    // Lock with an already-expired timelock (1 second in the past).
+    let (_, hashlock_past) = make_preimage_and_hashlock(0x11);
+    let past_timelock_secs = now_secs.saturating_sub(1);
+    let maker_before = maker.get_balance(&env.maker_id).await.unwrap();
+
+    maker
+        .lock(hashlock_past, env.taker_id, 1000, past_timelock_secs)
+        .await
+        .unwrap();
+    tokio::time::sleep(BLOCK_WAIT * 2).await;
+
+    maker.refund(&hashlock_past).await.unwrap();
+    tokio::time::sleep(BLOCK_WAIT).await;
+
+    let escrow = maker
+        .get_escrow(&hashlock_past)
+        .await
+        .unwrap()
+        .expect("escrow should exist after refund");
+    assert_eq!(
+        escrow.state,
+        HTLCState::Refunded,
+        "refund should succeed after timelock expiry"
+    );
+
+    // Balance restored — maker got the locked amount back.
+    let maker_after = maker.get_balance(&env.maker_id).await.unwrap();
+    assert_eq!(maker_after, maker_before);
 }
