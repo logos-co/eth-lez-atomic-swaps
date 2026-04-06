@@ -196,7 +196,7 @@ swap-cli demo                           # run full swap headlessly (maker + take
 
 - **SHA-256 hashlock** (not keccak) — cross-chain compatibility with LEZ's `risc0_zkvm::sha`
 - **Taker locks first** — taker generates the secret preimage, locks ETH with a longer timelock; maker locks LEZ with a shorter timelock after verifying the ETH lock
-- **LEZ timelock is off-chain** — LSSA programs lack timestamp access; orchestration checks wall-clock time
+- **LEZ timelock is on-chain** — enforced via ValidityWindow timestamp bounds; orchestration checks wall-clock time as a UX optimization
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Scaffold wallet** — LEZ keys managed by `logos-scaffold`; the orchestration library reads signing keys from the scaffold wallet on disk
 - **Messaging is optional** — works without nwaku via manual hashlock exchange
