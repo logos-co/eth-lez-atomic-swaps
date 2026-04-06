@@ -196,7 +196,7 @@ swap-cli demo                           # run full swap headlessly (maker + take
 
 - **SHA-256 hashlock** (not keccak) — cross-chain compatibility with LEZ's `risc0_zkvm::sha`
 - **Taker locks first** — taker generates the secret preimage, locks ETH with a longer timelock; maker locks LEZ with a shorter timelock after verifying the ETH lock
-- **LEZ timelock is enforced off-chain** — the orchestrator checks wall-clock time before submitting refunds. The HTLC program does not yet set a `TimestampValidityWindow` on the Refund instruction (LSSA validity windows landed in PRs #400/#404 — adopting them is planned)
+- **LEZ timelock is enforced on-chain** — the HTLC program attaches `TimestampValidityWindow` (LSSA PRs #400/#404) to the Refund output, so the runtime rejects refund transactions whose block timestamp is before the timelock. The orchestrator's pre-submit wall-clock check is a UX optimization that avoids wasted proof generation
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Scaffold wallet** — LEZ keys managed by `logos-scaffold`; the orchestration library reads signing keys from the scaffold wallet on disk
 - **Messaging is optional** — works without nwaku via manual hashlock exchange
