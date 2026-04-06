@@ -6,10 +6,12 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
+use common::transaction::NSSATransaction;
 use nssa::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
+use sequencer_service_rpc::RpcClient as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::config::LezAuth;
@@ -114,7 +116,10 @@ pub async fn cmd_infra() -> Result<()> {
     eprint!("  [\x1b[32mdeploy\x1b[0m] Deploying LEZ HTLC program...");
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
-    wc.sequencer_client.send_tx_program(tx).await.unwrap();
+    wc.sequencer_client
+        .send_transaction(NSSATransaction::ProgramDeployment(tx))
+        .await
+        .unwrap();
     tokio::time::sleep(BLOCK_WAIT).await;
     eprintln!(" \x1b[32mdeployed\x1b[0m");
 
