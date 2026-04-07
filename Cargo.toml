@@ -21,10 +21,12 @@ alloy = { version = "1", features = [
 futures-util = "0.3"
 
 # LEZ
-nssa = { git = "https://github.com/logos-blockchain/lssa", rev = "d6655404" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "d6655404", features = ["host"] }
-common = { git = "https://github.com/logos-blockchain/lssa", rev = "d6655404" }
-wallet = { git = "https://github.com/logos-blockchain/lssa", rev = "d6655404" }
+nssa = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f", features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
+wallet = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f", features = ["client"] }
+sequencer_service_protocol = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
 # LEZ HTLC types (HTLCInstruction, HTLCEscrow, HTLCState)
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 

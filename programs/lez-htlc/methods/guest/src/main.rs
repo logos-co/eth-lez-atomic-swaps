@@ -1,9 +1,7 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
-    program::{
-        read_nssa_inputs, write_nssa_outputs, AccountPostState, ProgramInput,
-    },
+    program::{read_nssa_inputs, AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput},
 };
 use risc0_zkvm::sha::{Impl, Sha256};
 
@@ -26,7 +24,7 @@ fn main() {
         HTLCInstruction::Refund => execute_refund(&pre_states),
     };
 
-    write_nssa_outputs(instruction_data, pre_states, post_states);
+    ProgramOutput::new(instruction_data, pre_states, post_states).write();
 }
 
 fn execute_lock(
@@ -35,15 +33,15 @@ fn execute_lock(
     taker_id: AccountId,
     amount: u128,
 ) -> Vec<AccountPostState> {
-    assert!(pre_states.len() == 2, "lock requires 2 accounts: [maker, escrow]");
+    assert!(
+        pre_states.len() == 2,
+        "lock requires 2 accounts: [maker, escrow]"
+    );
     let maker = &pre_states[0];
     let escrow_pda = &pre_states[1];
 
     assert!(maker.is_authorized, "maker must be authorized");
-    assert!(
-        maker.account_id != taker_id,
-        "maker and taker must differ"
-    );
+    assert!(maker.account_id != taker_id, "maker and taker must differ");
     assert!(
         escrow_pda.account == Account::default(),
         "escrow PDA must be uninitialized"
@@ -66,15 +64,15 @@ fn execute_lock(
 
     vec![
         AccountPostState::new(maker.account.clone()),
-        AccountPostState::new_claimed(escrow_account),
+        AccountPostState::new_claimed(escrow_account, Claim::Pda(PdaSeed::new(hashlock))),
     ]
 }
 
-fn execute_claim(
-    pre_states: &[AccountWithMetadata],
-    preimage: &[u8],
-) -> Vec<AccountPostState> {
-    assert!(pre_states.len() == 2, "claim requires 2 accounts: [taker, escrow]");
+fn execute_claim(pre_states: &[AccountWithMetadata], preimage: &[u8]) -> Vec<AccountPostState> {
+    assert!(
+        pre_states.len() == 2,
+        "claim requires 2 accounts: [taker, escrow]"
+    );
     assert!(preimage.len() == 32, "preimage must be exactly 32 bytes");
     let taker = &pre_states[0];
     let escrow_pda = &pre_states[1];
@@ -89,10 +87,7 @@ fn execute_claim(
     );
 
     // Verify SHA-256(preimage) == hashlock
-    let computed: [u8; 32] = Impl::hash_bytes(preimage)
-        .as_bytes()
-        .try_into()
-        .unwrap();
+    let computed: [u8; 32] = Impl::hash_bytes(preimage).as_bytes().try_into().unwrap();
     assert!(computed == escrow.hashlock, "invalid preimage");
 
     // Transfer from escrow to taker
@@ -120,7 +115,10 @@ fn execute_claim(
 }
 
 fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
-    assert!(pre_states.len() == 2, "refund requires 2 accounts: [maker, escrow]");
+    assert!(
+        pre_states.len() == 2,
+        "refund requires 2 accounts: [maker, escrow]"
+    );
     let maker = &pre_states[0];
     let escrow_pda = &pre_states[1];
 
@@ -128,10 +126,7 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
 
     let mut escrow = HTLCEscrow::from_bytes(&escrow_pda.account.data);
     assert!(escrow.state == HTLCState::Locked, "escrow must be Locked");
-    assert!(
-        maker.account_id == escrow.maker_id,
-        "only maker can refund"
-    );
+    assert!(maker.account_id == escrow.maker_id, "only maker can refund");
 
     // Transfer from escrow back to maker
     let mut maker_account = maker.account.clone();
@@ -160,7 +155,7 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
 mod tests {
     use super::*;
     use lez_htlc_program::{HTLCEscrow, HTLCState};
-    use nssa_core::account::{Account, AccountId, AccountWithMetadata};
+    use nssa_core::account::{Account, AccountId, AccountWithMetadata, Nonce};
     use nssa_core::program::DEFAULT_PROGRAM_ID;
     use risc0_zkvm::sha::{Impl, Sha256};
 
@@ -218,7 +213,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 0,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: maker_id(),
@@ -239,7 +234,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 500,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: taker_id(),
@@ -248,10 +243,8 @@ mod tests {
                 account: Account {
                     program_owner: PROGRAM_ID,
                     balance: AMOUNT,
-                    data: locked_escrow_data()
-                        .try_into()
-                        .expect("escrow data fits"),
-                    nonce: 0,
+                    data: locked_escrow_data().try_into().expect("escrow data fits"),
+                    nonce: Nonce(0),
                 },
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
@@ -267,7 +260,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 500,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: maker_id(),
@@ -276,10 +269,8 @@ mod tests {
                 account: Account {
                     program_owner: PROGRAM_ID,
                     balance: AMOUNT,
-                    data: locked_escrow_data()
-                        .try_into()
-                        .expect("escrow data fits"),
-                    nonce: 0,
+                    data: locked_escrow_data().try_into().expect("escrow data fits"),
+                    nonce: Nonce(0),
                 },
                 is_authorized: false,
                 account_id: AccountId::new([0xEE; 32]),
@@ -296,10 +287,10 @@ mod tests {
 
         // Maker account unchanged
         assert_eq!(post[0].account().balance, pre[0].account.balance);
-        assert!(!post[0].requires_claim());
+        assert!(post[0].required_claim().is_none());
 
         // Escrow PDA claimed by program, data populated
-        assert!(post[1].requires_claim());
+        assert!(post[1].required_claim().is_some());
         let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
         assert_eq!(escrow.hashlock, hashlock());
         assert_eq!(escrow.maker_id, maker_id());
@@ -341,11 +332,11 @@ mod tests {
 
         // Taker received funds
         assert_eq!(post[0].account().balance, 500 + AMOUNT);
-        assert!(!post[0].requires_claim());
+        assert!(post[0].required_claim().is_none());
 
         // Escrow drained, state updated
         assert_eq!(post[1].account().balance, 0);
-        assert!(!post[1].requires_claim());
+        assert!(post[1].required_claim().is_none());
         let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
         assert_eq!(escrow.state, HTLCState::Claimed);
         assert_eq!(escrow.preimage, Some(SECRET.to_vec()));
@@ -410,11 +401,11 @@ mod tests {
 
         // Maker received funds back
         assert_eq!(post[0].account().balance, 500 + AMOUNT);
-        assert!(!post[0].requires_claim());
+        assert!(post[0].required_claim().is_none());
 
         // Escrow drained, state updated
         assert_eq!(post[1].account().balance, 0);
-        assert!(!post[1].requires_claim());
+        assert!(post[1].required_claim().is_none());
         let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
         assert_eq!(escrow.state, HTLCState::Refunded);
     }
@@ -462,10 +453,9 @@ mod tests {
 
     const XCHAIN_PREIMAGE: &[u8; 32] = b"secret_preimage_for_testing_1234";
     const XCHAIN_HASHLOCK: [u8; 32] = [
-        0x0e, 0xf6, 0x96, 0x11, 0xa9, 0x1e, 0x08, 0x05,
-        0x07, 0x93, 0x87, 0xfe, 0xe0, 0xb8, 0x9f, 0xb7,
-        0xd6, 0xfc, 0xd5, 0x05, 0x22, 0x0d, 0x40, 0x7b,
-        0xac, 0xaa, 0x40, 0xce, 0x03, 0x17, 0x45, 0xdf,
+        0x0e, 0xf6, 0x96, 0x11, 0xa9, 0x1e, 0x08, 0x05, 0x07, 0x93, 0x87, 0xfe, 0xe0, 0xb8, 0x9f,
+        0xb7, 0xd6, 0xfc, 0xd5, 0x05, 0x22, 0x0d, 0x40, 0x7b, 0xac, 0xaa, 0x40, 0xce, 0x03, 0x17,
+        0x45, 0xdf,
     ];
 
     #[test]
@@ -491,7 +481,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 0,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: maker_id(),
@@ -504,7 +494,7 @@ mod tests {
         ];
 
         let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
-        assert!(lock_post[1].requires_claim());
+        assert!(lock_post[1].required_claim().is_some());
 
         // Simulate the transfer that happens after Lock (funds the PDA).
         let mut funded_escrow = lock_post[1].account().clone();
@@ -517,7 +507,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 500,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: taker_id(),
@@ -547,7 +537,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 500,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: maker_id(),
@@ -572,7 +562,7 @@ mod tests {
                     program_owner: DEFAULT_PROGRAM_ID,
                     balance: 500,
                     data: Default::default(),
-                    nonce: 0,
+                    nonce: Nonce(0),
                 },
                 is_authorized: true,
                 account_id: maker_id(),

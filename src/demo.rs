@@ -6,10 +6,12 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
+use common::transaction::NSSATransaction;
 use nssa::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
+use sequencer_service_rpc::RpcClient as _;
 
 use crate::config::{LezAuth, SwapConfig};
 use crate::error::{Result, SwapError};
@@ -109,7 +111,7 @@ impl DemoEnv {
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
         wc.sequencer_client
-            .send_tx_program(tx)
+            .send_transaction(NSSATransaction::ProgramDeployment(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("program deploy failed: {e}")))?;
         tokio::time::sleep(BLOCK_WAIT).await;

@@ -1,11 +1,15 @@
-use common::sequencer_client::SequencerClient;
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction};
 use nssa::{
     AccountId, PrivateKey, PublicKey, PublicTransaction,
     program::Program,
     public_transaction::{Message, WitnessSet},
 };
-use nssa_core::program::{PdaSeed, ProgramId};
+use nssa_core::{
+    account::Nonce,
+    program::{PdaSeed, ProgramId},
+};
+use sequencer_service_protocol::NSSATransaction;
+use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use tracing::{debug, info};
 use url::Url;
 
@@ -61,7 +65,8 @@ impl LezClient {
         let sequencer_url = Url::parse(&config.lez_sequencer_url)
             .map_err(|e| SwapError::InvalidConfig(format!("invalid sequencer URL: {e}")))?;
 
-        let sequencer = SequencerClient::new(sequencer_url)
+        let sequencer = SequencerClientBuilder::default()
+            .build(sequencer_url)
             .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
 
         Ok(Self {
@@ -136,7 +141,7 @@ impl LezClient {
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_account failed: {e}")))?;
 
-        let data: Vec<u8> = resp.account.data.into();
+        let data: Vec<u8> = resp.data.into();
         eprintln!("[get_escrow] pda={} data_len={}", hex::encode(pda.value()), data.len());
         if data.len() < 117 {
             eprintln!("[get_escrow] data too short ({} < 117)", data.len());
@@ -167,7 +172,7 @@ impl LezClient {
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_account_balance failed: {e}")))?;
 
-        Ok(resp.balance)
+        Ok(resp)
     }
 
     /// Transfer LEZ to a recipient using the authenticated transfer program.
@@ -183,13 +188,13 @@ impl LezClient {
         let witness_set = WitnessSet::for_message(&message, &[self.private_key()]);
         let tx = PublicTransaction::new(message, witness_set);
 
-        let resp = self
+        let tx_hash = self
             .sequencer()
-            .send_tx_public(tx)
+            .send_transaction(NSSATransaction::Public(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("transfer failed: {e}")))?;
 
-        let tx_hash = resp.tx_hash.to_string();
+        let tx_hash = tx_hash.to_string();
         info!(tx_hash = %tx_hash, amount, "LEZ transfer submitted");
         Ok(tx_hash)
     }
@@ -299,17 +304,17 @@ impl LezClient {
         let witness_set = WitnessSet::for_message(&message, &[self.private_key()]);
         let tx = PublicTransaction::new(message, witness_set);
 
-        let resp = self
+        let tx_hash = self
             .sequencer()
-            .send_tx_public(tx)
+            .send_transaction(NSSATransaction::Public(tx))
             .await
-            .map_err(|e| SwapError::LezTransaction(format!("send_tx_public failed: {e}")))?;
+            .map_err(|e| SwapError::LezTransaction(format!("send_transaction failed: {e}")))?;
 
-        Ok(resp.tx_hash.to_string())
+        Ok(tx_hash.to_string())
     }
 
     /// Fetch current nonces for the given signer accounts.
-    async fn get_nonces(&self, signers: &[AccountId]) -> Result<Vec<u128>> {
+    async fn get_nonces(&self, signers: &[AccountId]) -> Result<Vec<Nonce>> {
         let ids: Vec<AccountId> = signers.to_vec();
         let resp = self
             .sequencer()
@@ -317,7 +322,7 @@ impl LezClient {
             .await
             .map_err(|e| SwapError::LezSequencer(format!("get_accounts_nonces failed: {e}")))?;
 
-        Ok(resp.nonces)
+        Ok(resp)
     }
 }
 
