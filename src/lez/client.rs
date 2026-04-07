@@ -143,8 +143,8 @@ impl LezClient {
 
         let data: Vec<u8> = resp.data.into();
         eprintln!("[get_escrow] pda={} data_len={}", hex::encode(pda.value()), data.len());
-        if data.len() < 117 {
-            eprintln!("[get_escrow] data too short ({} < 117)", data.len());
+        if data.len() < 125 {
+            eprintln!("[get_escrow] data too short ({} < 125)", data.len());
             return Ok(None);
         }
 
@@ -208,6 +208,7 @@ impl LezClient {
         hashlock: [u8; 32],
         taker_id: AccountId,
         amount: u128,
+        timelock_secs: u64,
     ) -> Result<String> {
         let pda = self.escrow_pda(&hashlock);
 
@@ -216,6 +217,7 @@ impl LezClient {
             hashlock,
             taker_id,
             amount,
+            timelock: timelock_secs * 1000,
         };
 
         let lock_hash = self

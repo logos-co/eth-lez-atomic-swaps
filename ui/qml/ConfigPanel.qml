@@ -187,6 +187,7 @@ ScrollView {
     }
 
     component ConfigField: ColumnLayout {
+        id: fieldRoot
         property alias label: labelText.text
         property alias text: input.text
         property alias echoMode: input.echoMode
@@ -220,7 +221,7 @@ ScrollView {
                 radius: Theme.radiusSmall
                 opacity: input.enabled ? 1.0 : 0.5
             }
-            onTextChanged: () => textEdited(input.text)
+            onTextChanged: fieldRoot.textEdited(input.text)
         }
     }
 }

@@ -117,7 +117,12 @@ pub async fn run_maker(
     // 2. Lock LEZ (short timelock).
     progress::report(&progress, SwapProgress::LezLocking);
     let lez_lock_tx = lez_client
-        .lock(hashlock, config.lez_taker_account_id, config.lez_amount)
+        .lock(
+            hashlock,
+            config.lez_taker_account_id,
+            config.lez_amount,
+            config.lez_timelock,
+        )
         .await?;
     info!(tx_hash = %lez_lock_tx, "maker: LEZ locked");
     progress::report(
