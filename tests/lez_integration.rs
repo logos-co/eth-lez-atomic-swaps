@@ -49,7 +49,6 @@ impl TestEnv {
             eth_timelock: 0,
             eth_recipient_address: alloy::primitives::Address::ZERO,
             poll_interval: Duration::from_millis(500),
-            nwaku_url: None,
         };
         LezClient::new(&config).unwrap()
     }

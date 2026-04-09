@@ -126,7 +126,6 @@ impl TestEnv {
             eth_recipient_address: self.maker_eth_addr,
             lez_taker_account_id: self.taker_lez_id,
             poll_interval: Duration::from_millis(500),
-            nwaku_url: None,
         }
     }
 

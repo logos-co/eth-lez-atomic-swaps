@@ -117,8 +117,6 @@ struct FfiConfig {
     lez_taker_account_id: String,
     #[serde(default = "default_poll")]
     poll_interval_ms: String,
-    #[serde(default)]
-    nwaku_url: Option<String>,
 }
 
 fn default_poll() -> String {
@@ -181,7 +179,6 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         eth_recipient_address,
         lez_taker_account_id,
         poll_interval: Duration::from_millis(poll_interval_ms),
-        nwaku_url: c.nwaku_url,
     })
 }
 

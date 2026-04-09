@@ -102,10 +102,6 @@ pub struct ConfigArgs {
     /// Polling interval in milliseconds
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "2000")]
     poll_interval_ms: u64,
-
-    /// Nwaku REST API URL for messaging coordination (optional)
-    #[arg(long, env = "NWAKU_URL")]
-    nwaku_url: Option<String>,
 }
 
 impl ConfigArgs {
@@ -167,7 +163,6 @@ impl ConfigArgs {
             eth_recipient_address,
             lez_taker_account_id,
             poll_interval: Duration::from_millis(self.poll_interval_ms),
-            nwaku_url: self.nwaku_url,
         })
     }
 }

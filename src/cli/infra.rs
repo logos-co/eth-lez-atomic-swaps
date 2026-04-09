@@ -16,8 +16,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::config::LezAuth;
 use crate::error::{Result, SwapError};
-use crate::messaging::client::MessagingClient;
-use crate::messaging::types::{DEFAULT_NWAKU_URL, OFFERS_TOPIC};
 use crate::scaffold;
 
 sol! {
@@ -26,7 +24,6 @@ sol! {
     "contracts/out/EthHTLC.sol/EthHTLC.json"
 }
 
-const NWAKU_URL: &str = DEFAULT_NWAKU_URL;
 const BLOCK_WAIT: Duration = Duration::from_secs(4);
 
 // ── Color-coded log prefixes ───────────────────────────────────────
@@ -55,17 +52,7 @@ pub async fn cmd_infra() -> Result<()> {
     println!("\x1b[1m=== Atomic Swap Infrastructure ===\x1b[0m");
     println!();
 
-    // 1. Check nwaku health.
-    eprint!("  [\x1b[35mnwaku\x1b[0m] Checking {}...", NWAKU_URL);
-    let messaging = MessagingClient::new(NWAKU_URL);
-    messaging.subscribe(&[OFFERS_TOPIC]).await.map_err(|_| {
-        SwapError::Messaging(format!(
-            "cannot reach nwaku at {NWAKU_URL} — run `make nwaku` first"
-        ))
-    })?;
-    eprintln!(" \x1b[35mOK\x1b[0m");
-
-    // 2. Read scaffold wallet via WalletCore.
+    // 1. Read scaffold wallet via WalletCore.
     eprint!("  [\x1b[36mlez\x1b[0m]   Reading scaffold wallet...");
     let wc = scaffold::wallet_core(&scaffold::wallet_home())?;
     let accounts = scaffold::public_accounts(&wc)?;
