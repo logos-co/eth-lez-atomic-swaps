@@ -309,6 +309,10 @@ void SwapBackend::loadConfig(const QJsonObject &config)
 
 void SwapBackend::fetchBalances()
 {
+    // Skip if a balance fetch is already in flight to avoid flooding the thread pool.
+    if (m_balanceWatcher.isRunning())
+        return;
+
     QByteArray cfg = configJson();
 
     auto future = QtConcurrent::run(m_threadPool, [cfg]() -> QString {
@@ -477,17 +481,15 @@ extern "C" void messagingSendTrampoline(const char *topic, const char *payload, 
 {
     Q_UNUSED(topic);
     auto *ctx = static_cast<MessagingContext *>(userData);
-    auto *self = ctx->backend;
 
-    // The delivery module's send() must be called from the Qt main thread.
-    QString t = OFFERS_TOPIC;
+    // This runs on the Rust worker thread. The delivery RPC call can block,
+    // so we call it directly here (NOT on the main thread) to avoid freezing the UI.
+    auto *client = ctx->backend->m_deliveryClient;
+    if (!client)
+        return;
+
     QString p = QString::fromUtf8(payload);
-    QMetaObject::invokeMethod(self, [self, t, p]() {
-        if (self->m_deliveryClient) {
-            self->m_deliveryClient->invokeRemoteMethod(
-                "delivery_module", "send", t, p);
-        }
-    }, Qt::QueuedConnection);
+    client->invokeRemoteMethod("delivery_module", "send", OFFERS_TOPIC, p);
 }
 #endif
 
@@ -497,8 +499,11 @@ extern "C" void messagingSendTrampoline(const char *topic, const char *payload, 
 
 void SwapBackend::startAutoAccept()
 {
-    if (m_autoAcceptRunning || m_makerRunning)
+    qDebug() << "[AtomicSwap] startAutoAccept called";
+    if (m_autoAcceptRunning || m_makerRunning) {
+        qDebug() << "[AtomicSwap] already running, returning";
         return;
+    }
 
     m_autoAcceptRunning = true;
     emit autoAcceptRunningChanged();
@@ -520,9 +525,13 @@ void SwapBackend::startAutoAccept()
     QByteArray cfg = configJson();
     auto *progressCtx = &m_makerProgressCtx;
 
+    qDebug() << "[AtomicSwap] dispatching run_maker_loop to thread pool";
+
 #ifdef LOGOS_APP_PLUGIN
     auto *msgCtx = m_deliveryClient ? &m_messagingCtx : nullptr;
+    qDebug() << "[AtomicSwap] delivery client:" << (m_deliveryClient ? "yes" : "no");
     auto future = QtConcurrent::run(m_threadPool, [cfg, progressCtx, msgCtx]() -> QString {
+        qDebug() << "[AtomicSwap] thread pool: calling swap_ffi_run_maker_loop";
         auto *result = swap_ffi_run_maker_loop(
             cfg.constData(),
             progressCallbackTrampoline,

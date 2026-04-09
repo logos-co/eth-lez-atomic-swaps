@@ -55,12 +55,14 @@ impl EthClient {
 
         let ws = WsConnect::new(&config.eth_rpc_url);
 
-        let provider = ProviderBuilder::new()
-            .wallet(signer)
-            .connect_ws(ws)
-            .await
-            .map_err(|e| SwapError::EthRpc(format!("WebSocket connect failed: {e}")))?
-            .erased();
+        let provider = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            ProviderBuilder::new().wallet(signer).connect_ws(ws),
+        )
+        .await
+        .map_err(|_| SwapError::EthRpc(format!("WebSocket connect timed out after 10s: {}", config.eth_rpc_url)))?
+        .map_err(|e| SwapError::EthRpc(format!("WebSocket connect failed: {e}")))?
+        .erased();
 
         let contract = EthHTLC::new(config.eth_htlc_address, provider);
 
