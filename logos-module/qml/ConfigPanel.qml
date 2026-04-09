@@ -224,7 +224,7 @@ ScrollView {
                 radius: Theme.radiusSmall
                 opacity: input.enabled ? 1.0 : 0.5
             }
-            onTextChanged: () => textEdited(input.text)
+            onTextChanged: function() { textEdited(input.text) }
         }
     }
 }

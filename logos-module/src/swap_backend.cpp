@@ -571,8 +571,10 @@ void SwapBackend::setLogosAPI(LogosAPI *api)
 
 void SwapBackend::publishOffer()
 {
-    if (!m_deliveryClient)
+    if (!m_deliveryClient) {
+        emit offerPublished(QStringLiteral(R"({"error":"delivery module not available"})"));
         return;
+    }
 
     // Build offer JSON from config properties.
     QJsonObject offer;
@@ -589,60 +591,38 @@ void SwapBackend::publishOffer()
     QString payload = QString::fromUtf8(
         QJsonDocument(offer).toJson(QJsonDocument::Compact));
 
-    QVariant result = m_deliveryClient->invokeRemoteMethod(
-        "delivery_module", "send", OFFERS_TOPIC, payload);
+    // Run on thread pool to avoid blocking the UI.
+    auto *client = m_deliveryClient;
+    auto future = QtConcurrent::run(m_threadPool, [client, payload]() -> QString {
+        QVariant result = client->invokeRemoteMethod(
+            "delivery_module", "send", OFFERS_TOPIC, payload);
+        QJsonObject obj;
+        obj["ok"] = result.isValid();
+        return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    });
 
-    QJsonObject resultObj;
-    resultObj["ok"] = result.isValid();
-    emit offerPublished(QString::fromUtf8(
-        QJsonDocument(resultObj).toJson(QJsonDocument::Compact)));
+    m_publishWatcher.setFuture(future);
 }
 
 void SwapBackend::fetchOffers()
 {
-    if (!m_deliveryClient)
+    if (!m_deliveryClient) {
+        emit offersFetched(QStringLiteral(R"({"offers":[],"error":"delivery module not available"})"));
         return;
+    }
 
-    // Subscribe to offers topic via delivery module.
-    m_deliveryClient->invokeRemoteMethod(
-        "delivery_module", "subscribe", OFFERS_TOPIC);
+    // Run subscription + event setup on thread pool.
+    auto *client = m_deliveryClient;
+    auto future = QtConcurrent::run(m_threadPool, [client]() -> QString {
+        // Subscribe to offers topic via delivery module.
+        client->invokeRemoteMethod(
+            "delivery_module", "subscribe", OFFERS_TOPIC);
 
-    // Listen for incoming messages.
-    m_deliveryClient->onEvent(nullptr, this, "message_received",
-        [this](const QString &eventName, const QVariantList &data) {
-            Q_UNUSED(eventName);
-            if (data.size() < 2)
-                return;
+        // Return empty for now — real offers arrive via event callback.
+        return QStringLiteral(R"({"offers":[]})");
+    });
 
-            // data format from delivery module: [messageHash, messageJson, ...]
-            // The message payload is base64-decoded by the delivery module.
-            QString messageJson = data.at(1).toString();
-            auto doc = QJsonDocument::fromJson(messageJson.toUtf8());
-            if (!doc.isObject())
-                return;
-
-            auto msg = doc.object();
-            QString contentTopic = msg["contentTopic"].toString();
-            if (contentTopic != OFFERS_TOPIC)
-                return;
-
-            // Decode the base64 payload.
-            QByteArray payload = QByteArray::fromBase64(
-                msg["payload"].toString().toUtf8());
-
-            // Parse the offer.
-            auto offerDoc = QJsonDocument::fromJson(payload);
-            if (offerDoc.isObject()) {
-                QJsonArray offersArr;
-                offersArr.append(offerDoc.object());
-                QJsonObject result;
-                result["offers"] = offersArr;
-                emit offersFetched(QString::fromUtf8(
-                    QJsonDocument(result).toJson(QJsonDocument::Compact)));
-            }
-        });
-
-    emit offersFetched(QStringLiteral(R"({"offers":[]})"));
+    m_fetchWatcher.setFuture(future);
 }
 
 #else // !LOGOS_APP_PLUGIN
