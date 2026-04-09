@@ -16,6 +16,7 @@ use swap_orchestrator::{
     eth::client::EthClient,
     lez::client::LezClient,
     messaging::client::{MessagingClient, decode_waku_payload},
+    messaging::sender::MessagingSender,
     messaging::types::{SwapOffer, OFFERS_TOPIC},
     swap::{
         maker::{run_maker, run_maker_loop, AutoAcceptConfig},
@@ -721,9 +722,19 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
         eth_timelock_minutes,
     };
 
+    // Wrap the optional messaging callback.
+    let sender = send_cb.map(|cb| MessagingSender::new(cb, send_data));
+
     runtime().block_on(async {
         let progress = forward_progress(cb, user_data);
-        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress).await;
+        let result = run_maker_loop(
+            &base_config,
+            &auto_config,
+            &MAKER_LOOP_CANCEL,
+            progress,
+            sender.as_ref(),
+        )
+        .await;
         let json = serde_json::json!({
             "completed": result.total_completed,
             "failed": result.total_failed,

@@ -12,7 +12,7 @@ use crate::{
     lez::client::LezClient,
     lez::watcher as lez_watcher,
     lez::watcher::LezHtlcEvent,
-    messaging::client::MessagingClient,
+    messaging::sender::MessagingSender,
     messaging::types::{SwapOffer, OFFERS_TOPIC},
     swap::{
         progress::{self, ProgressSender, SwapProgress},
@@ -231,6 +231,7 @@ pub async fn run_maker_loop(
     auto_config: &AutoAcceptConfig,
     cancel: &AtomicBool,
     progress: Option<ProgressSender>,
+    messaging: Option<&MessagingSender>,
 ) -> AutoAcceptResult {
     let mut completed: u32 = 0;
     let mut failed: u32 = 0;
@@ -294,8 +295,8 @@ pub async fn run_maker_loop(
             _ => {} // balance sufficient
         }
 
-        // Publish offer (if messaging configured).
-        if let Some(nwaku_url) = &fresh_config.nwaku_url {
+        // Publish offer via delivery module (if messaging callback provided).
+        if let Some(sender) = &messaging {
             let offer = SwapOffer {
                 hashlock: String::new(),
                 lez_amount: fresh_config.lez_amount,
@@ -313,12 +314,8 @@ pub async fn run_maker_loop(
                 ),
                 eth_htlc_address: format!("{}", fresh_config.eth_htlc_address),
             };
-            let messaging = MessagingClient::new(nwaku_url);
-            let _ = messaging.subscribe(&[OFFERS_TOPIC]).await;
-            match messaging.publish(OFFERS_TOPIC, &offer).await {
-                Ok(_) => info!(iteration, "maker: offer published"),
-                Err(e) => info!(iteration, %e, "maker: failed to publish offer (continuing)"),
-            }
+            sender.publish(OFFERS_TOPIC, &offer);
+            info!(iteration, "maker: offer published via delivery module");
         }
 
         progress::report(
