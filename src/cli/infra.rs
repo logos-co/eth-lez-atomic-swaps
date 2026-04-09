@@ -175,12 +175,11 @@ pub async fn cmd_infra() -> Result<()> {
     println!("│  \x1b[33mAnvil (ETH)\x1b[0m:   {:<33}│", &anvil_ws);
     println!("│  \x1b[32mETH HTLC\x1b[0m:      {}           │", eth_htlc_address);
     println!("│  \x1b[36mLEZ Sequencer\x1b[0m: {:<33}│", &sequencer_url);
-    println!("│  \x1b[35mNwaku\x1b[0m:         {:<33}│", NWAKU_URL);
     println!("│  Maker .env:    {:<33}│", ".env");
     println!("│  Taker .env:    {:<33}│", ".env.taker");
     println!("\x1b[1m└──────────────────────────────────────────────────┘\x1b[0m");
     println!();
-    println!("  \x1b[2mLogs: \x1b[33m[anvil]\x1b[0m\x1b[2m  \x1b[35m[nwaku]\x1b[0m\x1b[2m → docker compose logs -f\x1b[0m");
+    println!("  \x1b[2mLogs: \x1b[33m[anvil]\x1b[0m");
     println!("  Press Ctrl-C to stop all services.");
     println!();
 
@@ -254,9 +253,6 @@ LEZ_TAKER_ACCOUNT_ID={lez_taker}
 # Polling
 POLL_INTERVAL_MS=500
 
-# Logos Messaging
-NWAKU_URL={nwaku}
-
 # Wallet home (used by wallet::WalletCore::from_env)
 NSSA_WALLET_HOME_DIR={wallet_home}
 ",
@@ -270,7 +266,6 @@ NSSA_WALLET_HOME_DIR={wallet_home}
         eth_amount = p.eth_amount,
         eth_recipient = p.eth_recipient,
         lez_taker = p.lez_taker_account,
-        nwaku = NWAKU_URL,
         wallet_home = p.nssa_wallet_home_dir,
     );
 

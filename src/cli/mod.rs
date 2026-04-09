@@ -180,7 +180,7 @@ enum Commands {
     /// Run a full demo: start local chains, deploy contracts, run both sides
     #[cfg(feature = "demo")]
     Demo,
-    /// Start infrastructure (Anvil + LEZ sequencer + nwaku), write .env files, block until Ctrl-C
+    /// Start infrastructure (Anvil + LEZ sequencer), write .env files, block until Ctrl-C
     #[cfg(feature = "demo")]
     Infra,
 }

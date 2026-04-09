@@ -1,4 +1,4 @@
-.PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra nwaku nwaku-stop \
+.PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra \
        setup localnet-start localnet-stop test \
        logos-module-configure logos-module-build logos-module-plugin logos-module-run \
        plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
@@ -51,17 +51,11 @@ test: contracts localnet-start
 
 # --- Demo / Infra ---
 
-demo: contracts nwaku
+demo: contracts
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
 
-infra: contracts nwaku localnet-start
-	trap 'logos-scaffold localnet stop; docker compose down' EXIT INT TERM; cargo run --features demo -- infra
-
-nwaku:
-	docker compose up -d
-
-nwaku-stop:
-	docker compose down
+infra: contracts localnet-start
+	trap 'logos-scaffold localnet stop' EXIT INT TERM; cargo run --features demo -- infra
 
 # --- Logos Core module ---
 
