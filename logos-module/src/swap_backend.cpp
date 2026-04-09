@@ -32,6 +32,7 @@ SwapBackend::SwapBackend(QThreadPool *pool, QObject *parent)
     , m_threadPool(pool)
     , m_makerProgressCtx{this, true}
     , m_takerProgressCtx{this, false}
+    , m_messagingCtx{this}
 {
     connect(&m_makerWatcher, &QFutureWatcher<QString>::finished, this, [this]() {
         setMakerResultJson(m_makerWatcher.result());
@@ -465,6 +466,26 @@ void SwapBackend::startTaker(const QString &preimageHex)
 }
 
 // ---------------------------------------------------------------------------
+// Messaging send trampoline (extern "C" to match MessagingSendCallback)
+// ---------------------------------------------------------------------------
+
+extern "C" void messagingSendTrampoline(const char *topic, const char *payload, void *userData)
+{
+    auto *ctx = static_cast<MessagingContext *>(userData);
+    auto *self = ctx->backend;
+
+    // The delivery module's send() must be called from the Qt main thread.
+    QString t = QString::fromUtf8(topic);
+    QString p = QString::fromUtf8(payload);
+    QMetaObject::invokeMethod(self, [self, t, p]() {
+        if (self->m_deliveryClient) {
+            self->m_deliveryClient->invokeRemoteMethod(
+                "delivery_module", "send", OFFERS_TOPIC, p);
+        }
+    }, Qt::QueuedConnection);
+}
+
+// ---------------------------------------------------------------------------
 // Auto-accept loop
 // ---------------------------------------------------------------------------
 
@@ -491,13 +512,16 @@ void SwapBackend::startAutoAccept()
     clearMakerProgress();
 
     QByteArray cfg = configJson();
-    auto *ctx = &m_makerProgressCtx;
+    auto *progressCtx = &m_makerProgressCtx;
+    auto *msgCtx = m_deliveryClient ? &m_messagingCtx : nullptr;
 
-    auto future = QtConcurrent::run(m_threadPool, [cfg, ctx]() -> QString {
+    auto future = QtConcurrent::run(m_threadPool, [cfg, progressCtx, msgCtx]() -> QString {
         auto *result = swap_ffi_run_maker_loop(
             cfg.constData(),
             progressCallbackTrampoline,
-            ctx);
+            progressCtx,
+            msgCtx ? messagingSendTrampoline : nullptr,
+            msgCtx);
         return ffiToQString(result);
     });
 

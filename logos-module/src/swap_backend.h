@@ -17,12 +17,18 @@ struct ProgressContext {
     bool isMaker; // true = maker, false = taker
 };
 
+struct MessagingContext {
+    SwapBackend *backend;
+};
+
 extern "C" void progressCallbackTrampoline(const char *json, void *userData);
+extern "C" void messagingSendTrampoline(const char *topic, const char *payload, void *userData);
 
 class SwapBackend : public QObject
 {
     Q_OBJECT
     friend void progressCallbackTrampoline(const char *json, void *userData);
+    friend void messagingSendTrampoline(const char *topic, const char *payload, void *userData);
 
     // Config properties (two-way bound to QML)
     Q_PROPERTY(QString ethRpcUrl READ ethRpcUrl WRITE setEthRpcUrl NOTIFY ethRpcUrlChanged)
@@ -288,6 +294,9 @@ private:
     // Progress callback contexts (stable pointers for FFI)
     ProgressContext m_makerProgressCtx;
     ProgressContext m_takerProgressCtx;
+
+    // Messaging callback context (stable pointer for FFI)
+    MessagingContext m_messagingCtx;
 };
 
 #endif // SWAP_BACKEND_H
