@@ -34,6 +34,12 @@ fn runtime() -> &'static Runtime {
 /// Callback invoked on each progress event (called from a worker thread).
 pub type ProgressCallback = Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
 
+/// Callback invoked when Rust needs to publish a message (e.g. offer broadcast).
+/// The C++ side implements this by forwarding to the delivery module.
+///
+/// Parameters: `(topic, payload_json, user_data)`.
+pub type MessagingSendCallback = Option<unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void)>;
+
 // ---------------------------------------------------------------------------
 // JSON helpers
 // ---------------------------------------------------------------------------
@@ -670,6 +676,10 @@ static MAKER_LOOP_CANCEL: AtomicBool = AtomicBool::new(false);
 /// Run the maker in an auto-accept loop. Blocks until cancelled, out of funds,
 /// or an unrecoverable error. Returns JSON: `{ "completed": N, "failed": M }`.
 ///
+/// If `send_cb` is non-null, each iteration publishes a standing offer via the
+/// callback (routed to the delivery module on the C++ side). Pass null to skip
+/// messaging entirely.
+///
 /// # Safety
 /// `config_json` must be a valid null-terminated JSON C string.
 #[unsafe(no_mangle)]
@@ -677,6 +687,8 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
     config_json: *const c_char,
     cb: ProgressCallback,
     user_data: *mut c_void,
+    send_cb: MessagingSendCallback,
+    send_data: *mut c_void,
 ) -> *mut c_char {
     MAKER_LOOP_CANCEL.store(false, Ordering::SeqCst);
 

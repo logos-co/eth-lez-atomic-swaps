@@ -38,6 +38,12 @@ extern "C" {
  */
 typedef void (*ProgressCallback)(const char*, void*);
 
+/**
+ * Callback invoked when Rust needs to publish a message via the delivery module.
+ * Parameters: (topic, payload_json, user_data).
+ */
+typedef void (*MessagingSendCallback)(const char*, const char*, void*);
+
 char *swap_ffi_load_env(const char *path);
 
 char *swap_ffi_run_maker(const char *config_json,
@@ -65,7 +71,9 @@ char *swap_ffi_fetch_balances(const char *config_json);
 
 char *swap_ffi_run_maker_loop(const char *config_json,
                               ProgressCallback cb,
-                              void *user_data);
+                              void *user_data,
+                              MessagingSendCallback send_cb,
+                              void *send_data);
 
 void swap_ffi_stop_maker_loop(void);
 
