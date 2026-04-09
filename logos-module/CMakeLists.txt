@@ -89,6 +89,10 @@ if(BUILD_APP_PLUGIN)
 
     if(LOGOS_CPP_SDK_DIR)
         target_include_directories(lez_atomic_swap_module PRIVATE ${LOGOS_CPP_SDK_DIR})
+        # Build logos-cpp-sdk as a subdirectory for LogosAPI symbols.
+        find_package(Qt6 6.5 REQUIRED COMPONENTS RemoteObjects)
+        add_subdirectory(${LOGOS_CPP_SDK_DIR} ${CMAKE_BINARY_DIR}/logos_sdk)
+        target_link_libraries(lez_atomic_swap_module PRIVATE logos_sdk)
     endif()
 
     target_link_libraries(lez_atomic_swap_module PRIVATE
@@ -125,29 +129,7 @@ elseif(BUILD_PLUGIN)
     target_compile_definitions(lez_atomic_swap_module PRIVATE LOGOS_CORE_PLUGIN)
 
 else()
-    # ── Standalone executable ──
-    qt_add_executable(lez_atomic_swap_module
-        ${SHARED_SOURCES}
-        src/main.cpp
-    )
-
-    if(APPLE)
-        set_target_properties(lez_atomic_swap_module PROPERTIES
-            MACOSX_BUNDLE TRUE
-            INSTALL_RPATH "@executable_path"
-            BUILD_WITH_INSTALL_RPATH TRUE
-        )
-    else()
-        set_target_properties(lez_atomic_swap_module PROPERTIES
-            INSTALL_RPATH "$ORIGIN"
-            BUILD_WITH_INSTALL_RPATH TRUE
-        )
-    endif()
-
-    # Copy dylib next to executable so RPATH finds it.
-    add_custom_command(TARGET lez_atomic_swap_module POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FFI_LIB}" "$<TARGET_FILE_DIR:lez_atomic_swap_module>"
-    )
+    message(FATAL_ERROR "Set -DBUILD_APP_PLUGIN=ON or -DBUILD_PLUGIN=ON")
 endif()
 
 # --- Include paths ---

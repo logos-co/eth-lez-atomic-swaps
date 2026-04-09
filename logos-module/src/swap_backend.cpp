@@ -469,21 +469,27 @@ void SwapBackend::startTaker(const QString &preimageHex)
 // Messaging send trampoline (extern "C" to match MessagingSendCallback)
 // ---------------------------------------------------------------------------
 
+#ifdef LOGOS_APP_PLUGIN
+
+static const QString OFFERS_TOPIC = QStringLiteral("/atomic-swaps/1/offers/json");
+
 extern "C" void messagingSendTrampoline(const char *topic, const char *payload, void *userData)
 {
+    Q_UNUSED(topic);
     auto *ctx = static_cast<MessagingContext *>(userData);
     auto *self = ctx->backend;
 
     // The delivery module's send() must be called from the Qt main thread.
-    QString t = QString::fromUtf8(topic);
+    QString t = OFFERS_TOPIC;
     QString p = QString::fromUtf8(payload);
     QMetaObject::invokeMethod(self, [self, t, p]() {
         if (self->m_deliveryClient) {
             self->m_deliveryClient->invokeRemoteMethod(
-                "delivery_module", "send", OFFERS_TOPIC, p);
+                "delivery_module", "send", t, p);
         }
     }, Qt::QueuedConnection);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Auto-accept loop
@@ -513,8 +519,9 @@ void SwapBackend::startAutoAccept()
 
     QByteArray cfg = configJson();
     auto *progressCtx = &m_makerProgressCtx;
-    auto *msgCtx = m_deliveryClient ? &m_messagingCtx : nullptr;
 
+#ifdef LOGOS_APP_PLUGIN
+    auto *msgCtx = m_deliveryClient ? &m_messagingCtx : nullptr;
     auto future = QtConcurrent::run(m_threadPool, [cfg, progressCtx, msgCtx]() -> QString {
         auto *result = swap_ffi_run_maker_loop(
             cfg.constData(),
@@ -524,6 +531,17 @@ void SwapBackend::startAutoAccept()
             msgCtx);
         return ffiToQString(result);
     });
+#else
+    auto future = QtConcurrent::run(m_threadPool, [cfg, progressCtx]() -> QString {
+        auto *result = swap_ffi_run_maker_loop(
+            cfg.constData(),
+            progressCallbackTrampoline,
+            progressCtx,
+            nullptr,
+            nullptr);
+        return ffiToQString(result);
+    });
+#endif
 
     m_autoAcceptWatcher.setFuture(future);
 }
@@ -534,8 +552,10 @@ void SwapBackend::stopAutoAccept()
 }
 
 // ---------------------------------------------------------------------------
-// Delivery module (LogosAPI)
+// Delivery module (LogosAPI) — only available in logos-app plugin mode
 // ---------------------------------------------------------------------------
+
+#ifdef LOGOS_APP_PLUGIN
 
 void SwapBackend::setLogosAPI(LogosAPI *api)
 {
@@ -548,12 +568,6 @@ void SwapBackend::setLogosAPI(LogosAPI *api)
     m_deliveryClient = api->getClient("delivery_module");
     emit deliveryAvailableChanged();
 }
-
-// ---------------------------------------------------------------------------
-// Messaging (via delivery module)
-// ---------------------------------------------------------------------------
-
-static const QString OFFERS_TOPIC = QStringLiteral("/atomic-swaps/1/offers/json");
 
 void SwapBackend::publishOffer()
 {
@@ -630,6 +644,17 @@ void SwapBackend::fetchOffers()
 
     emit offersFetched(QStringLiteral(R"({"offers":[]})"));
 }
+
+#else // !LOGOS_APP_PLUGIN
+
+void SwapBackend::setLogosAPI(LogosAPI *) {}
+void SwapBackend::publishOffer() {}
+void SwapBackend::fetchOffers()
+{
+    emit offersFetched(QStringLiteral(R"({"offers":[]})"));
+}
+
+#endif // LOGOS_APP_PLUGIN
 
 void SwapBackend::refundLez(const QString &hashlockHex)
 {

@@ -1,15 +1,13 @@
 .PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra \
        setup localnet-start localnet-stop test \
-       logos-module-configure logos-module-build logos-module-plugin logos-module-run \
+       logos-module-plugin \
        plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
 
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
   UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
-  LOGOS_BIN = logos-module/build/lez_atomic_swap_module.app/Contents/MacOS/lez_atomic_swap_module
 else
   UI_BIN = ui/build/atomic-swaps-ui
-  LOGOS_BIN = logos-module/build/lez_atomic_swap_module
 endif
 
 swap-ffi:
@@ -59,18 +57,9 @@ infra: contracts localnet-start
 
 # --- Logos Core module ---
 
-logos-module-configure:
-	cmake -B logos-module/build -S logos-module -DCMAKE_BUILD_TYPE=Debug
-
-logos-module-build: logos-module-configure
-	cmake --build logos-module/build
-
 logos-module-plugin:
 	cmake -B logos-module/build -S logos-module -DBUILD_PLUGIN=ON -DCMAKE_BUILD_TYPE=Debug
 	cmake --build logos-module/build
-
-logos-module-run: logos-module-build
-	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_BIN) &
 
 # --- logos-app IComponent plugin ---
 
