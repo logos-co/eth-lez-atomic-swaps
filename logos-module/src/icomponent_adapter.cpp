@@ -32,7 +32,6 @@ public:
 
     QWidget *createWidget(LogosAPI *logosAPI) override
     {
-        Q_UNUSED(logosAPI);
         qDebug() << "[AtomicSwap] createWidget called";
 
         if (m_widget)
@@ -60,6 +59,10 @@ public:
         // Initialize our module
         m_module = new LezAtomicSwapModule(this);
         m_module->initLogos();
+
+        // Wire up delivery module communication via LogosAPI.
+        if (logosAPI)
+            m_module->setLogosAPI(logosAPI);
 
         // Create the QQuickWidget that hosts our QML
         m_widget = new QQuickWidget();

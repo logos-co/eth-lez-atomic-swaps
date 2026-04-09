@@ -1,11 +1,17 @@
 #include "swap_backend.h"
 
 #include <QDateTime>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QtConcurrent>
 #include <cstdlib>
+
+#ifdef LOGOS_APP_PLUGIN
+#include <logos_api.h>
+#include <logos_api_client.h>
+#endif
 
 // Helper: call FFI, take ownership of returned string, free it.
 static QString ffiToQString(char *raw)
@@ -110,7 +116,6 @@ SETTER(EthTimelockMinutes, m_ethTimelockMinutes, ethTimelockMinutesChanged)
 SETTER(EthRecipientAddress, m_ethRecipientAddress, ethRecipientAddressChanged)
 SETTER(LezTakerAccountId, m_lezTakerAccountId, lezTakerAccountIdChanged)
 SETTER(PollIntervalMs, m_pollIntervalMs, pollIntervalMsChanged)
-SETTER(NwakuUrl, m_nwakuUrl, nwakuUrlChanged)
 
 #undef SETTER
 
@@ -225,7 +230,6 @@ QByteArray SwapBackend::configJson() const
     obj["eth_recipient_address"] = m_ethRecipientAddress;
     obj["lez_taker_account_id"] = m_lezTakerAccountId;
     obj["poll_interval_ms"] = m_pollIntervalMs;
-    obj["nwaku_url"] = m_nwakuUrl;
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -261,7 +265,6 @@ void SwapBackend::loadEnv()
     setEthRecipientAddress(env("ETH_RECIPIENT_ADDRESS"));
     setLezTakerAccountId(env("LEZ_TAKER_ACCOUNT_ID"));
     setPollIntervalMs(env("POLL_INTERVAL_MS", "2000"));
-    setNwakuUrl(env("NWAKU_URL"));
 
     fetchBalances();
 }
@@ -295,7 +298,6 @@ void SwapBackend::loadConfig(const QJsonObject &config)
     setEthRecipientAddress(val("eth_recipient_address"));
     setLezTakerAccountId(val("lez_taker_account_id"));
     setPollIntervalMs(val("poll_interval_ms", "2000"));
-    setNwakuUrl(val("nwaku_url"));
 
     fetchBalances();
 }
@@ -508,38 +510,101 @@ void SwapBackend::stopAutoAccept()
 }
 
 // ---------------------------------------------------------------------------
-// Messaging (nwaku REST)
+// Delivery module (LogosAPI)
 // ---------------------------------------------------------------------------
+
+void SwapBackend::setLogosAPI(LogosAPI *api)
+{
+    m_logosAPI = api;
+    if (!api) {
+        m_deliveryClient = nullptr;
+        emit deliveryAvailableChanged();
+        return;
+    }
+    m_deliveryClient = api->getClient("delivery_module");
+    emit deliveryAvailableChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Messaging (via delivery module)
+// ---------------------------------------------------------------------------
+
+static const QString OFFERS_TOPIC = QStringLiteral("/atomic-swaps/1/offers/json");
 
 void SwapBackend::publishOffer()
 {
-    if (m_nwakuUrl.isEmpty())
+    if (!m_deliveryClient)
         return;
 
-    QByteArray cfg = configJson();
-    QByteArray url = m_nwakuUrl.toUtf8();
+    // Build offer JSON from config properties.
+    QJsonObject offer;
+    offer["hashlock"] = QString();
+    offer["lez_amount"] = m_lezAmount;
+    offer["eth_amount"] = m_ethAmount;
+    offer["maker_eth_address"] = m_ethRecipientAddress;
+    offer["maker_lez_account"] = m_lezAccount;
+    offer["lez_timelock"] = m_lezTimelockMinutes;
+    offer["eth_timelock"] = m_ethTimelockMinutes;
+    offer["lez_htlc_program_id"] = m_lezHtlcProgramId;
+    offer["eth_htlc_address"] = m_ethHtlcAddress;
 
-    auto future = QtConcurrent::run(m_threadPool, [cfg, url]() -> QString {
-        auto *result = swap_ffi_publish_offer(cfg.constData(), url.constData());
-        return ffiToQString(result);
-    });
+    QString payload = QString::fromUtf8(
+        QJsonDocument(offer).toJson(QJsonDocument::Compact));
 
-    m_publishWatcher.setFuture(future);
+    QVariant result = m_deliveryClient->invokeRemoteMethod(
+        "delivery_module", "send", OFFERS_TOPIC, payload);
+
+    QJsonObject resultObj;
+    resultObj["ok"] = result.isValid();
+    emit offerPublished(QString::fromUtf8(
+        QJsonDocument(resultObj).toJson(QJsonDocument::Compact)));
 }
 
 void SwapBackend::fetchOffers()
 {
-    if (m_nwakuUrl.isEmpty())
+    if (!m_deliveryClient)
         return;
 
-    QByteArray url = m_nwakuUrl.toUtf8();
+    // Subscribe to offers topic via delivery module.
+    m_deliveryClient->invokeRemoteMethod(
+        "delivery_module", "subscribe", OFFERS_TOPIC);
 
-    auto future = QtConcurrent::run(m_threadPool, [url]() -> QString {
-        auto *result = swap_ffi_fetch_offers(url.constData());
-        return ffiToQString(result);
-    });
+    // Listen for incoming messages.
+    m_deliveryClient->onEvent(nullptr, this, "message_received",
+        [this](const QString &eventName, const QVariantList &data) {
+            Q_UNUSED(eventName);
+            if (data.size() < 2)
+                return;
 
-    m_fetchWatcher.setFuture(future);
+            // data format from delivery module: [messageHash, messageJson, ...]
+            // The message payload is base64-decoded by the delivery module.
+            QString messageJson = data.at(1).toString();
+            auto doc = QJsonDocument::fromJson(messageJson.toUtf8());
+            if (!doc.isObject())
+                return;
+
+            auto msg = doc.object();
+            QString contentTopic = msg["contentTopic"].toString();
+            if (contentTopic != OFFERS_TOPIC)
+                return;
+
+            // Decode the base64 payload.
+            QByteArray payload = QByteArray::fromBase64(
+                msg["payload"].toString().toUtf8());
+
+            // Parse the offer.
+            auto offerDoc = QJsonDocument::fromJson(payload);
+            if (offerDoc.isObject()) {
+                QJsonArray offersArr;
+                offersArr.append(offerDoc.object());
+                QJsonObject result;
+                result["offers"] = offersArr;
+                emit offersFetched(QString::fromUtf8(
+                    QJsonDocument(result).toJson(QJsonDocument::Compact)));
+            }
+        });
+
+    emit offersFetched(QStringLiteral(R"({"offers":[]})"));
 }
 
 void SwapBackend::refundLez(const QString &hashlockHex)

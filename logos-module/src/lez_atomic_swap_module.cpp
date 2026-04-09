@@ -20,6 +20,12 @@ void LezAtomicSwapModule::initLogos()
     m_swapBackend->loadEnv();
 }
 
+void LezAtomicSwapModule::setLogosAPI(LogosAPI *api)
+{
+    if (m_swapBackend)
+        m_swapBackend->setLogosAPI(api);
+}
+
 void LezAtomicSwapModule::registerQmlTypes(QQmlEngine *engine)
 {
     if (!m_swapBackend)

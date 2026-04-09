@@ -9,6 +9,8 @@
 #include "swap_ffi.h"
 
 class SwapBackend;
+class LogosAPI;
+class LogosAPIClient;
 
 struct ProgressContext {
     SwapBackend *backend;
@@ -38,7 +40,7 @@ class SwapBackend : public QObject
     Q_PROPERTY(QString ethRecipientAddress READ ethRecipientAddress WRITE setEthRecipientAddress NOTIFY ethRecipientAddressChanged)
     Q_PROPERTY(QString lezTakerAccountId READ lezTakerAccountId WRITE setLezTakerAccountId NOTIFY lezTakerAccountIdChanged)
     Q_PROPERTY(QString pollIntervalMs READ pollIntervalMs WRITE setPollIntervalMs NOTIFY pollIntervalMsChanged)
-    Q_PROPERTY(QString nwakuUrl READ nwakuUrl WRITE setNwakuUrl NOTIFY nwakuUrlChanged)
+    Q_PROPERTY(bool deliveryAvailable READ deliveryAvailable NOTIFY deliveryAvailableChanged)
 
     // Role (maker / taker — set via SWAP_ROLE env var or loadConfig)
     Q_PROPERTY(QString swapRole READ swapRole CONSTANT)
@@ -100,7 +102,7 @@ public:
     QString ethRecipientAddress() const { return m_ethRecipientAddress; }
     QString lezTakerAccountId() const { return m_lezTakerAccountId; }
     QString pollIntervalMs() const { return m_pollIntervalMs; }
-    QString nwakuUrl() const { return m_nwakuUrl; }
+    bool deliveryAvailable() const { return m_deliveryClient != nullptr; }
 
     // Config setters
     void setEthRpcUrl(const QString &v);
@@ -118,7 +120,10 @@ public:
     void setEthRecipientAddress(const QString &v);
     void setLezTakerAccountId(const QString &v);
     void setPollIntervalMs(const QString &v);
-    void setNwakuUrl(const QString &v);
+
+    /// Set the LogosAPI instance for delivery module communication.
+    /// Called from icomponent_adapter after plugin initialization.
+    void setLogosAPI(LogosAPI *api);
 
     // Maker state getters
     bool makerRunning() const { return m_makerRunning; }
@@ -170,7 +175,7 @@ signals:
     void ethRecipientAddressChanged();
     void lezTakerAccountIdChanged();
     void pollIntervalMsChanged();
-    void nwakuUrlChanged();
+    void deliveryAvailableChanged();
 
     void ethAddressChanged();
     void ethBalanceChanged();
@@ -259,7 +264,9 @@ private:
     QStringList m_takerProgressSteps;
     QString m_takerResultJson;
 
-    QString m_nwakuUrl;
+    // Delivery module communication (via LogosAPI)
+    LogosAPI *m_logosAPI = nullptr;
+    LogosAPIClient *m_deliveryClient = nullptr;
 
     // Separate watchers for concurrent maker + taker
     QFutureWatcher<QString> m_balanceWatcher;

@@ -155,12 +155,14 @@ ScrollView {
             // --- Messaging ---
             SectionHeader { label: "Messaging" }
 
-            ConfigField {
-                label: "Nwaku URL"
-                text: swapBackend.nwakuUrl
-                onTextEdited: (val) => swapBackend.nwakuUrl = val
-                placeholderText: "http://localhost:8645"
-                fieldEnabled: !configRoot.anyRunning
+            Text {
+                text: swapBackend.deliveryAvailable
+                      ? "Delivery module: connected"
+                      : "Delivery module: not available"
+                color: swapBackend.deliveryAvailable ? "#4ade80" : "#f87171"
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                Layout.leftMargin: Theme.spacingSmall
             }
         }
     }

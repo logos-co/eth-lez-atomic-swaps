@@ -11,6 +11,7 @@
 
 #include "i_lez_atomic_swap_module.h"
 
+class LogosAPI;
 class SwapBackend;
 
 class LezAtomicSwapModule : public QObject
@@ -33,6 +34,9 @@ public:
     void registerQmlTypes(QQmlEngine *engine);
 
     SwapBackend *swapBackend() const { return m_swapBackend; }
+
+    /// Forward LogosAPI to the backend for delivery module communication.
+    void setLogosAPI(LogosAPI *api);
 
 private:
     SwapBackend *m_swapBackend = nullptr;

@@ -82,6 +82,15 @@ if(BUILD_APP_PLUGIN)
         target_include_directories(lez_atomic_swap_module PRIVATE ${LOGOS_APP_INTERFACES_DIR})
     endif()
 
+    # logos-cpp-sdk headers (LogosAPI, LogosAPIClient) for delivery module communication
+    if(NOT LOGOS_CPP_SDK_DIR)
+        set(LOGOS_CPP_SDK_DIR "" CACHE PATH "Path to logos-cpp-sdk/cpp/")
+    endif()
+
+    if(LOGOS_CPP_SDK_DIR)
+        target_include_directories(lez_atomic_swap_module PRIVATE ${LOGOS_CPP_SDK_DIR})
+    endif()
+
     target_link_libraries(lez_atomic_swap_module PRIVATE
         Qt6::Widgets
         Qt6::QuickWidgets
