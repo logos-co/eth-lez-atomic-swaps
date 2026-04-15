@@ -108,7 +108,7 @@ public:
     QString ethRecipientAddress() const { return m_ethRecipientAddress; }
     QString lezTakerAccountId() const { return m_lezTakerAccountId; }
     QString pollIntervalMs() const { return m_pollIntervalMs; }
-    bool deliveryAvailable() const { return m_deliveryClient != nullptr; }
+    bool deliveryAvailable() const { return m_deliveryPlugin != nullptr; }
 
     // Config setters
     void setEthRpcUrl(const QString &v);
@@ -270,9 +270,13 @@ private:
     QStringList m_takerProgressSteps;
     QString m_takerResultJson;
 
-    // Delivery module communication (via LogosAPI)
+    // Delivery module (loaded directly via QPluginLoader)
     LogosAPI *m_logosAPI = nullptr;
-    LogosAPIClient *m_deliveryClient = nullptr;
+    QObject *m_deliveryPlugin = nullptr;
+    bool m_deliveryNodeStarted = false;
+
+    // Load delivery module plugin and start the Waku node.
+    void initDeliveryNode();
 
     // Separate watchers for concurrent maker + taker
     QFutureWatcher<QString> m_balanceWatcher;

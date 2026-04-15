@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use alloy::primitives::U256;
 use tokio::sync::mpsc;
@@ -266,6 +267,7 @@ pub async fn run_maker_loop(
                         error: format!("LEZ client init failed: {e}"),
                     },
                 );
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
@@ -290,6 +292,7 @@ pub async fn run_maker_loop(
                         error: format!("balance check failed: {e}"),
                     },
                 );
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
             _ => {} // balance sufficient
@@ -335,6 +338,7 @@ pub async fn run_maker_loop(
                         error: format!("ETH client init failed: {e}"),
                     },
                 );
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };

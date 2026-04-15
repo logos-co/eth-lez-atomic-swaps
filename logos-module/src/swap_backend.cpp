@@ -7,10 +7,15 @@
 #include <QMetaObject>
 #include <QtConcurrent>
 #include <cstdlib>
+#include <thread>
 
 #ifdef LOGOS_APP_PLUGIN
 #include <logos_api.h>
 #include <logos_api_client.h>
+#include <QPluginLoader>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
 #endif
 
 // Helper: call FFI, take ownership of returned string, free it.
@@ -481,15 +486,18 @@ extern "C" void messagingSendTrampoline(const char *topic, const char *payload, 
 {
     Q_UNUSED(topic);
     auto *ctx = static_cast<MessagingContext *>(userData);
-
-    // This runs on the Rust worker thread. The delivery RPC call can block,
-    // so we call it directly here (NOT on the main thread) to avoid freezing the UI.
-    auto *client = ctx->backend->m_deliveryClient;
-    if (!client)
+    auto *plugin = ctx->backend->m_deliveryPlugin;
+    if (!plugin)
         return;
 
+    // Fire-and-forget: detach a short-lived thread so the Rust worker thread
+    // is never blocked.  The delivery plugin's send() blocks internally.
     QString p = QString::fromUtf8(payload);
-    client->invokeRemoteMethod("delivery_module", "send", OFFERS_TOPIC, p);
+    std::thread([plugin, p]() {
+        QMetaObject::invokeMethod(plugin, "send",
+                                  Q_ARG(QString, OFFERS_TOPIC),
+                                  Q_ARG(QString, p));
+    }).detach();
 }
 #endif
 
@@ -528,8 +536,8 @@ void SwapBackend::startAutoAccept()
     qDebug() << "[AtomicSwap] dispatching run_maker_loop to thread pool";
 
 #ifdef LOGOS_APP_PLUGIN
-    auto *msgCtx = m_deliveryClient ? &m_messagingCtx : nullptr;
-    qDebug() << "[AtomicSwap] delivery client:" << (m_deliveryClient ? "yes" : "no");
+    auto *msgCtx = m_deliveryPlugin ? &m_messagingCtx : nullptr;
+    qDebug() << "[AtomicSwap] delivery plugin:" << (m_deliveryPlugin ? "yes" : "no");
     auto future = QtConcurrent::run(m_threadPool, [cfg, progressCtx, msgCtx]() -> QString {
         qDebug() << "[AtomicSwap] thread pool: calling swap_ffi_run_maker_loop";
         auto *result = swap_ffi_run_maker_loop(
@@ -569,23 +577,120 @@ void SwapBackend::stopAutoAccept()
 void SwapBackend::setLogosAPI(LogosAPI *api)
 {
     m_logosAPI = api;
-    if (!api) {
-        m_deliveryClient = nullptr;
-        emit deliveryAvailableChanged();
+
+    // Load delivery module directly (bypasses framework RPC which can't load it).
+    if (!m_deliveryPlugin) {
+        initDeliveryNode();
+    }
+
+    emit deliveryAvailableChanged();
+}
+
+void SwapBackend::initDeliveryNode()
+{
+    // Resolve the delivery module dylib from the standard modules directory.
+    // Non-portable (Nix) builds append "Nix" to AppDataLocation.
+    QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QString pluginPath = appData + QStringLiteral("Nix/modules/delivery_module/delivery_module_plugin.dylib");
+    if (!QFile::exists(pluginPath)) {
+        // Fallback: portable build (no "Nix" suffix).
+        pluginPath = appData + QStringLiteral("/modules/delivery_module/delivery_module_plugin.dylib");
+    }
+
+    qDebug() << "[AtomicSwap] loading delivery module from:" << pluginPath;
+
+    auto *loader = new QPluginLoader(pluginPath, this);
+    if (!loader->load()) {
+        qWarning() << "[AtomicSwap] failed to load delivery module:" << loader->errorString();
+        delete loader;
         return;
     }
-    m_deliveryClient = api->getClient("delivery_module");
-    emit deliveryAvailableChanged();
+
+    m_deliveryPlugin = loader->instance();
+    if (!m_deliveryPlugin) {
+        qWarning() << "[AtomicSwap] delivery module instance is null";
+        return;
+    }
+
+    qDebug() << "[AtomicSwap] delivery module loaded:" << m_deliveryPlugin->metaObject()->className();
+
+    // Run createNode + start + subscribe on thread pool (they block internally).
+    bool isMaker = (m_swapRole != QStringLiteral("taker"));
+    auto *plugin = m_deliveryPlugin;
+    QtConcurrent::run(m_threadPool, [this, plugin, isMaker]() {
+        uint16_t p2pPort = isMaker ? 60000 : 60001;
+        uint16_t discv5Port = isMaker ? 9000 : 9001;
+
+        QJsonObject networkingConfig;
+        networkingConfig["listenIpv4"] = QStringLiteral("0.0.0.0");
+        networkingConfig["p2pTcpPort"] = p2pPort;
+        networkingConfig["discv5UdpPort"] = discv5Port;
+
+        QJsonObject autoSharding;
+        autoSharding["numShardsInCluster"] = 1;
+
+        QJsonObject messageValidation;
+        messageValidation["maxMessageSize"] = QStringLiteral("150 KiB");
+
+        QJsonObject protocolsConfig;
+        protocolsConfig["entryNodes"] = QJsonArray({
+            QStringLiteral("enrtree://AIRVQ5DDA4FFWLRBCHJWUWOO6X6S4ZTZ5B667LQ6AJU6PEYDLRD5O@sandbox.waku.nodes.status.im")
+        });
+        protocolsConfig["clusterId"] = 1;
+        protocolsConfig["autoShardingConfig"] = autoSharding;
+        protocolsConfig["messageValidation"] = messageValidation;
+
+        QJsonObject nodeConfig;
+        nodeConfig["mode"] = QStringLiteral("Core");
+        nodeConfig["networkingConfig"] = networkingConfig;
+        nodeConfig["protocolsConfig"] = protocolsConfig;
+        nodeConfig["logLevel"] = QStringLiteral("DEBUG");
+
+        QString cfgJson = QString::fromUtf8(
+            QJsonDocument(nodeConfig).toJson(QJsonDocument::Compact));
+
+        qDebug() << "[AtomicSwap] delivery createNode config:" << cfgJson;
+
+        bool createOk = false;
+        QMetaObject::invokeMethod(plugin, "createNode", Qt::DirectConnection,
+                                  Q_RETURN_ARG(bool, createOk),
+                                  Q_ARG(QString, cfgJson));
+        qDebug() << "[AtomicSwap] delivery createNode:" << createOk;
+        if (!createOk) {
+            qWarning() << "[AtomicSwap] delivery createNode failed";
+            return;
+        }
+
+        bool startOk = false;
+        QMetaObject::invokeMethod(plugin, "start", Qt::DirectConnection,
+                                  Q_RETURN_ARG(bool, startOk));
+        qDebug() << "[AtomicSwap] delivery start:" << startOk;
+        if (!startOk) {
+            qWarning() << "[AtomicSwap] delivery start failed";
+            return;
+        }
+
+        bool subOk = false;
+        QMetaObject::invokeMethod(plugin, "subscribe", Qt::DirectConnection,
+                                  Q_RETURN_ARG(bool, subOk),
+                                  Q_ARG(QString, OFFERS_TOPIC));
+        qDebug() << "[AtomicSwap] delivery subscribe:" << subOk;
+
+        QMetaObject::invokeMethod(this, [this]() {
+            m_deliveryNodeStarted = true;
+            emit deliveryAvailableChanged();
+            qDebug() << "[AtomicSwap] delivery node started and subscribed to" << OFFERS_TOPIC;
+        }, Qt::QueuedConnection);
+    });
 }
 
 void SwapBackend::publishOffer()
 {
-    if (!m_deliveryClient) {
+    if (!m_deliveryPlugin) {
         emit offerPublished(QStringLiteral(R"({"error":"delivery module not available"})"));
         return;
     }
 
-    // Build offer JSON from config properties.
     QJsonObject offer;
     offer["hashlock"] = QString();
     offer["lez_amount"] = m_lezAmount;
@@ -600,13 +705,13 @@ void SwapBackend::publishOffer()
     QString payload = QString::fromUtf8(
         QJsonDocument(offer).toJson(QJsonDocument::Compact));
 
-    // Run on thread pool to avoid blocking the UI.
-    auto *client = m_deliveryClient;
-    auto future = QtConcurrent::run(m_threadPool, [client, payload]() -> QString {
-        QVariant result = client->invokeRemoteMethod(
-            "delivery_module", "send", OFFERS_TOPIC, payload);
+    auto *plugin = m_deliveryPlugin;
+    auto future = QtConcurrent::run(m_threadPool, [plugin, payload]() -> QString {
+        QMetaObject::invokeMethod(plugin, "send", Qt::DirectConnection,
+                                  Q_ARG(QString, OFFERS_TOPIC),
+                                  Q_ARG(QString, payload));
         QJsonObject obj;
-        obj["ok"] = result.isValid();
+        obj["ok"] = true;
         return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact));
     });
 
@@ -615,19 +720,19 @@ void SwapBackend::publishOffer()
 
 void SwapBackend::fetchOffers()
 {
-    if (!m_deliveryClient) {
+    if (!m_deliveryPlugin) {
         emit offersFetched(QStringLiteral(R"({"offers":[],"error":"delivery module not available"})"));
         return;
     }
 
-    // Run subscription + event setup on thread pool.
-    auto *client = m_deliveryClient;
-    auto future = QtConcurrent::run(m_threadPool, [client]() -> QString {
-        // Subscribe to offers topic via delivery module.
-        client->invokeRemoteMethod(
-            "delivery_module", "subscribe", OFFERS_TOPIC);
-
-        // Return empty for now — real offers arrive via event callback.
+    auto *plugin = m_deliveryPlugin;
+    auto future = QtConcurrent::run(m_threadPool, [plugin]() -> QString {
+        bool subOk = false;
+        QMetaObject::invokeMethod(plugin, "subscribe", Qt::DirectConnection,
+                                  Q_RETURN_ARG(bool, subOk),
+                                  Q_ARG(QString, OFFERS_TOPIC));
+        qDebug() << "[AtomicSwap] fetchOffers subscribe:" << subOk;
+        // Offers arrive via event callback — return empty for now.
         return QStringLiteral(R"({"offers":[]})");
     });
 
