@@ -68,6 +68,8 @@ make infra                # starts Anvil, LEZ sequencer, nwaku; deploys contract
                           # keeps running — Ctrl-C to stop
 ```
 
+> Under the hood, `make infra` shells out to `logos-scaffold` for LEZ-side work: `localnet start` to boot the sequencer (and `localnet stop` on Ctrl-C), plus `wallet topup` to fund the maker and taker accounts. Anvil, contract deployment, and nwaku are managed directly by the orchestrator.
+
 ### 2. Pick an Interface
 
 Open a new terminal and choose one:
