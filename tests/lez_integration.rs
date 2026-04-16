@@ -3,8 +3,10 @@ use std::time::Duration;
 
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use lez_htlc_program::HTLCState;
+use common::transaction::NSSATransaction;
 use nssa::{AccountId, ProgramDeploymentTransaction, program_deployment_transaction::Message as ProgramDeploymentMessage};
 use nssa_core::program::ProgramId;
+use sequencer_service_rpc::RpcClient as _;
 use sha2::{Digest, Sha256};
 use swap_orchestrator::{
     config::{LezAuth, SwapConfig},
@@ -79,7 +81,7 @@ async fn setup() -> TestEnv {
     // Deploy LEZ HTLC program.
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
-    wc.sequencer_client.send_tx_program(tx).await.unwrap();
+    wc.sequencer_client.send_transaction(NSSATransaction::ProgramDeployment(tx)).await.unwrap();
 
     // Wait for deployment block.
     tokio::time::sleep(BLOCK_WAIT).await;
