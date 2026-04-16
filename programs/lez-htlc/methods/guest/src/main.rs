@@ -14,17 +14,27 @@ fn main() {
         instruction_data,
     ) = read_nssa_inputs::<HTLCInstruction>();
 
-    let post_states = match instruction {
+    match instruction {
         HTLCInstruction::Lock {
             hashlock,
             taker_id,
             amount,
-        } => execute_lock(&pre_states, hashlock, taker_id, amount),
-        HTLCInstruction::Claim { preimage } => execute_claim(&pre_states, &preimage),
-        HTLCInstruction::Refund => execute_refund(&pre_states),
+            timelock,
+        } => {
+            let post_states = execute_lock(&pre_states, hashlock, taker_id, amount, timelock);
+            ProgramOutput::new(instruction_data, pre_states, post_states).write();
+        }
+        HTLCInstruction::Claim { preimage } => {
+            let post_states = execute_claim(&pre_states, &preimage);
+            ProgramOutput::new(instruction_data, pre_states, post_states).write();
+        }
+        HTLCInstruction::Refund => {
+            let (post_states, timelock) = execute_refund(&pre_states);
+            ProgramOutput::new(instruction_data, pre_states, post_states)
+                .with_timestamp_validity_window(timelock..)
+                .write();
+        }
     };
-
-    ProgramOutput::new(instruction_data, pre_states, post_states).write();
 }
 
 fn execute_lock(
@@ -32,6 +42,7 @@ fn execute_lock(
     hashlock: [u8; 32],
     taker_id: AccountId,
     amount: u128,
+    timelock: u64,
 ) -> Vec<AccountPostState> {
     assert!(
         pre_states.len() == 2,
@@ -53,6 +64,7 @@ fn execute_lock(
         taker_id,
         amount,
         state: HTLCState::Locked,
+        timelock,
         preimage: None,
     };
 
@@ -114,7 +126,7 @@ fn execute_claim(pre_states: &[AccountWithMetadata], preimage: &[u8]) -> Vec<Acc
     ]
 }
 
-fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
+fn execute_refund(pre_states: &[AccountWithMetadata]) -> (Vec<AccountPostState>, u64) {
     assert!(
         pre_states.len() == 2,
         "refund requires 2 accounts: [maker, escrow]"
@@ -127,6 +139,7 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
     let mut escrow = HTLCEscrow::from_bytes(&escrow_pda.account.data);
     assert!(escrow.state == HTLCState::Locked, "escrow must be Locked");
     assert!(maker.account_id == escrow.maker_id, "only maker can refund");
+    let timelock = escrow.timelock;
 
     // Transfer from escrow back to maker
     let mut maker_account = maker.account.clone();
@@ -145,10 +158,13 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> Vec<AccountPostState> {
         .try_into()
         .expect("escrow data fits in Data");
 
-    vec![
-        AccountPostState::new(maker_account),
-        AccountPostState::new(escrow_account),
-    ]
+    (
+        vec![
+            AccountPostState::new(maker_account),
+            AccountPostState::new(escrow_account),
+        ],
+        timelock,
+    )
 }
 
 #[cfg(test)]
@@ -160,6 +176,7 @@ mod tests {
     use risc0_zkvm::sha::{Impl, Sha256};
 
     const AMOUNT: u128 = 1_000;
+    const TIMELOCK: u64 = 1_700_000_000_000;
     const SECRET: &[u8; 32] = b"supersecretpreimage_padding_0123";
     const PROGRAM_ID: [u32; 8] = [5; 8];
 
@@ -184,6 +201,7 @@ mod tests {
             taker_id: taker_id(),
             amount: AMOUNT,
             state: HTLCState::Locked,
+            timelock: TIMELOCK,
             preimage: None,
         }
         .to_bytes()
@@ -196,6 +214,7 @@ mod tests {
             taker_id: taker_id(),
             amount: AMOUNT,
             state,
+            timelock: TIMELOCK,
             preimage: if state == HTLCState::Claimed {
                 Some(SECRET.to_vec())
             } else {
@@ -283,7 +302,7 @@ mod tests {
     #[test]
     fn test_lock_happy_path() {
         let pre = lock_pre_states();
-        let post = execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+        let post = execute_lock(&pre, hashlock(), taker_id(), AMOUNT, TIMELOCK);
 
         // Maker account unchanged
         assert_eq!(post[0].account().balance, pre[0].account.balance);
@@ -297,6 +316,7 @@ mod tests {
         assert_eq!(escrow.taker_id, taker_id());
         assert_eq!(escrow.amount, AMOUNT);
         assert_eq!(escrow.state, HTLCState::Locked);
+        assert_eq!(escrow.timelock, TIMELOCK);
         assert_eq!(escrow.preimage, None);
     }
 
@@ -305,7 +325,7 @@ mod tests {
     fn test_lock_unauthorized_maker() {
         let mut pre = lock_pre_states();
         pre[0].is_authorized = false;
-        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+        execute_lock(&pre, hashlock(), taker_id(), AMOUNT, TIMELOCK);
     }
 
     #[test]
@@ -313,14 +333,14 @@ mod tests {
     fn test_lock_escrow_already_initialized() {
         let mut pre = lock_pre_states();
         pre[1].account.balance = AMOUNT; // non-default account
-        execute_lock(&pre, hashlock(), taker_id(), AMOUNT);
+        execute_lock(&pre, hashlock(), taker_id(), AMOUNT, TIMELOCK);
     }
 
     #[test]
     #[should_panic(expected = "maker and taker must differ")]
     fn test_lock_self_swap() {
         let pre = lock_pre_states();
-        execute_lock(&pre, hashlock(), maker_id(), AMOUNT);
+        execute_lock(&pre, hashlock(), maker_id(), AMOUNT, TIMELOCK);
     }
 
     // ── Claim tests ─────────────────────────────────────────────────
@@ -397,7 +417,7 @@ mod tests {
     #[test]
     fn test_refund_happy_path() {
         let pre = refund_pre_states();
-        let post = execute_refund(&pre);
+        let (post, timelock) = execute_refund(&pre);
 
         // Maker received funds back
         assert_eq!(post[0].account().balance, 500 + AMOUNT);
@@ -408,6 +428,7 @@ mod tests {
         assert!(post[1].required_claim().is_none());
         let escrow = HTLCEscrow::from_bytes(&post[1].account().data);
         assert_eq!(escrow.state, HTLCState::Refunded);
+        assert_eq!(timelock, TIMELOCK);
     }
 
     #[test]
@@ -415,7 +436,7 @@ mod tests {
     fn test_refund_wrong_maker() {
         let mut pre = refund_pre_states();
         pre[0].account_id = wrong_id();
-        execute_refund(&pre);
+        let _ = execute_refund(&pre);
     }
 
     #[test]
@@ -423,7 +444,7 @@ mod tests {
     fn test_refund_not_authorized() {
         let mut pre = refund_pre_states();
         pre[0].is_authorized = false;
-        execute_refund(&pre);
+        let _ = execute_refund(&pre);
     }
 
     #[test]
@@ -433,7 +454,7 @@ mod tests {
         pre[1].account.data = escrow_data_with_state(HTLCState::Claimed)
             .try_into()
             .expect("fits");
-        execute_refund(&pre);
+        let _ = execute_refund(&pre);
     }
 
     #[test]
@@ -443,7 +464,7 @@ mod tests {
         pre[1].account.data = escrow_data_with_state(HTLCState::Refunded)
             .try_into()
             .expect("fits");
-        execute_refund(&pre);
+        let _ = execute_refund(&pre);
     }
 
     // ── Cross-chain compatibility tests ─────────────────────────────
@@ -493,7 +514,7 @@ mod tests {
             },
         ];
 
-        let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
+        let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT, TIMELOCK);
         assert!(lock_post[1].required_claim().is_some());
 
         // Simulate the transfer that happens after Lock (funds the PDA).
@@ -549,7 +570,7 @@ mod tests {
             },
         ];
 
-        let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT);
+        let lock_post = execute_lock(&lock_pre, XCHAIN_HASHLOCK, taker_id(), AMOUNT, TIMELOCK);
 
         // Simulate the transfer that happens after Lock (funds the PDA).
         let mut funded_escrow = lock_post[1].account().clone();
@@ -574,10 +595,11 @@ mod tests {
             },
         ];
 
-        let refund_post = execute_refund(&refund_pre);
+        let (refund_post, timelock) = execute_refund(&refund_pre);
 
         assert_eq!(refund_post[0].account().balance, 500 + AMOUNT);
         let escrow = HTLCEscrow::from_bytes(&refund_post[1].account().data);
         assert_eq!(escrow.state, HTLCState::Refunded);
+        assert_eq!(timelock, TIMELOCK);
     }
 }

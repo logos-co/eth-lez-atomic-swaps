@@ -8,7 +8,7 @@ use crate::{
     lez::client::LezClient,
 };
 
-/// Check that the LEZ timelock has expired. Pure function, no I/O.
+/// UX guard — on-chain enforcement via ValidityWindow is the security mechanism.
 pub fn check_lez_timelock(lez_timelock: u64) -> Result<()> {
     let now = now_unix();
     if now < lez_timelock {
@@ -19,8 +19,7 @@ pub fn check_lez_timelock(lez_timelock: u64) -> Result<()> {
 
 /// Refund LEZ from the HTLC escrow after the timelock has expired.
 ///
-/// LEZ has no on-chain timelock enforcement, so we check off-chain before
-/// submitting the refund instruction.
+/// On-chain enforcement via ValidityWindow; this off-chain check prevents wasted proof generation.
 pub async fn refund_lez(
     lez_client: &LezClient,
     hashlock: &[u8; 32],

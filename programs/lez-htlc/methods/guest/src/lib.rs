@@ -12,6 +12,8 @@ pub enum HTLCInstruction {
         taker_id: AccountId,
         /// Amount of λ to lock.
         amount: u128,
+        /// Absolute Unix timestamp in milliseconds used for refund validity.
+        timelock: u64,
     },
     /// Taker reveals the preimage to claim the locked λ.
     Claim {
@@ -20,7 +22,7 @@ pub enum HTLCInstruction {
         preimage: Vec<u8>,
     },
     /// Maker reclaims λ from the escrow.
-    /// Timelock is enforced off-chain by the CLI before submitting this instruction.
+    /// Timelock enforced on-chain via TimestampValidityWindow on the program output.
     Refund,
 }
 
@@ -46,6 +48,8 @@ pub struct HTLCEscrow {
     pub amount: u128,
     /// Current state of the escrow.
     pub state: HTLCState,
+    /// Absolute Unix timestamp in milliseconds enforced on refund.
+    pub timelock: u64,
     /// Preimage, populated when the taker claims.
     pub preimage: Option<Vec<u8>>,
 }
@@ -70,6 +74,8 @@ impl HTLCEscrow {
         // state: 1 byte
         buf.push(self.state as u8);
 
+        buf.extend_from_slice(&self.timelock.to_le_bytes());
+
         // preimage: 4 bytes length prefix + data
         match &self.preimage {
             Some(p) => {
@@ -86,8 +92,7 @@ impl HTLCEscrow {
 
     /// Deserialize from bytes stored in account data.
     pub fn from_bytes(data: &[u8]) -> Self {
-        // Minimum size: 32 + 32 + 32 + 16 + 1 + 4 = 117 bytes
-        assert!(data.len() >= 117, "escrow data too short");
+        assert!(data.len() >= 125, "escrow data too short");
 
         let hashlock: [u8; 32] = data[0..32].try_into().unwrap();
         let maker_id = AccountId::new(data[32..64].try_into().unwrap());
@@ -99,17 +104,18 @@ impl HTLCEscrow {
             2 => HTLCState::Refunded,
             s => panic!("invalid escrow state: {s}"),
         };
+        let timelock = u64::from_le_bytes(data[113..121].try_into().unwrap());
 
-        let preimage_len = u32::from_le_bytes(data[113..117].try_into().unwrap()) as usize;
+        let preimage_len = u32::from_le_bytes(data[121..125].try_into().unwrap()) as usize;
         let preimage = if preimage_len > 0 {
-            let required = 117usize
+            let required = 125usize
                 .checked_add(preimage_len)
                 .expect("preimage length overflow");
             assert!(
                 data.len() >= required,
                 "escrow data truncated: expected preimage"
             );
-            Some(data[117..required].to_vec())
+            Some(data[125..required].to_vec())
         } else {
             None
         };
@@ -120,6 +126,7 @@ impl HTLCEscrow {
             taker_id,
             amount,
             state,
+            timelock,
             preimage,
         }
     }
@@ -137,6 +144,7 @@ mod tests {
             taker_id: AccountId::new([2u8; 32]),
             amount: 1_000,
             state: HTLCState::Locked,
+            timelock: 1_700_000_000_000,
             preimage: None,
         }
     }
@@ -162,7 +170,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "escrow data too short")]
     fn test_escrow_from_bytes_too_short() {
-        HTLCEscrow::from_bytes(&[0u8; 50]);
+        HTLCEscrow::from_bytes(&[0u8; 124]);
     }
 
     #[test]
@@ -178,7 +186,7 @@ mod tests {
     fn test_escrow_from_bytes_truncated_preimage() {
         let mut bytes = sample_escrow().to_bytes();
         // Set preimage length to 10 but don't append any preimage data
-        bytes[113..117].copy_from_slice(&10u32.to_le_bytes());
+        bytes[121..125].copy_from_slice(&10u32.to_le_bytes());
         HTLCEscrow::from_bytes(&bytes);
     }
 }
