@@ -1,9 +1,10 @@
 .PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra nwaku nwaku-stop \
-       setup localnet-start localnet-stop test \
+       setup localnet-start localnet-stop test circuits \
        logos-module-configure logos-module-build logos-module-plugin logos-module-run \
        plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
 
 UNAME := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME),Darwin)
   UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
   LOGOS_BIN = logos-module/build/lez_atomic_swap_module.app/Contents/MacOS/lez_atomic_swap_module
@@ -12,7 +13,33 @@ else
   LOGOS_BIN = logos-module/build/lez_atomic_swap_module
 endif
 
-swap-ffi:
+# --- logos-blockchain-circuits (project-local, isolated from ~/.logos-blockchain-circuits/) ---
+# Bump this when the lssa pin (scaffold.toml) requires a newer circuits release.
+CIRCUITS_VERSION := v0.4.2
+CIRCUITS_DIR     := $(CURDIR)/.scaffold/circuits
+
+# Map host to upstream release platform string.
+ifeq ($(UNAME),Darwin)
+  ifeq ($(UNAME_M),arm64)
+    CIRCUITS_PLATFORM := macos-aarch64
+  endif
+endif
+ifeq ($(UNAME),Linux)
+  ifeq ($(UNAME_M),x86_64)
+    CIRCUITS_PLATFORM := linux-x86_64
+  endif
+  ifeq ($(UNAME_M),aarch64)
+    CIRCUITS_PLATFORM := linux-aarch64
+  endif
+endif
+
+CIRCUITS_URL := https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/$(CIRCUITS_VERSION)/logos-blockchain-circuits-$(CIRCUITS_VERSION)-$(CIRCUITS_PLATFORM).tar.gz
+
+# Exported so every recipe (cargo, logos-scaffold, and their children) uses the
+# project-local circuits dir instead of ~/.logos-blockchain-circuits/.
+export LOGOS_BLOCKCHAIN_CIRCUITS := $(CIRCUITS_DIR)
+
+swap-ffi: circuits
 	cd swap-ffi && cargo build
 
 configure: swap-ffi
@@ -23,10 +50,10 @@ build:
 
 run: run-maker
 
-run-maker: configure build
+run-maker: circuits configure build
 	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(UI_BIN) &
 
-run-taker: configure build
+run-taker: circuits configure build
 	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(UI_BIN) &
 
 clean:
@@ -37,7 +64,35 @@ contracts:
 
 # --- Scaffold (LEZ infrastructure) ---
 
-setup:
+# Fetch logos-blockchain-circuits release into $(CIRCUITS_DIR). Idempotent:
+# a VERSION file matching $(CIRCUITS_VERSION) short-circuits the download.
+# The exported LOGOS_BLOCKCHAIN_CIRCUITS env var points lssa (and any cargo
+# build scripts in this repo) at this dir, avoiding collisions with a
+# developer's pre-existing ~/.logos-blockchain-circuits/.
+circuits:
+	@if [ -f "$(CIRCUITS_DIR)/VERSION" ] && grep -qx "$(CIRCUITS_VERSION)" "$(CIRCUITS_DIR)/VERSION"; then \
+		echo "circuits: $(CIRCUITS_VERSION) already present at $(CIRCUITS_DIR)"; \
+		exit 0; \
+	fi; \
+	if [ -z "$(CIRCUITS_PLATFORM)" ]; then \
+		echo "circuits: unsupported host $(UNAME)/$(UNAME_M). No logos-blockchain-circuits release for this platform (macOS Intel is not published upstream)."; \
+		exit 1; \
+	fi; \
+	echo "circuits: fetching $(CIRCUITS_VERSION) for $(CIRCUITS_PLATFORM)"; \
+	rm -rf "$(CIRCUITS_DIR)"; \
+	mkdir -p "$(CIRCUITS_DIR)"; \
+	tmp=$$(mktemp -t circuits.XXXXXX.tar.gz) && \
+	curl -fL --proto '=https' --tlsv1.2 -o "$$tmp" "$(CIRCUITS_URL)" && \
+	tar -xzf "$$tmp" -C "$(CIRCUITS_DIR)" --strip-components=1 && \
+	rm -f "$$tmp"; \
+	got=$$(cat "$(CIRCUITS_DIR)/VERSION" 2>/dev/null || echo "<missing>"); \
+	if [ "$$got" != "$(CIRCUITS_VERSION)" ]; then \
+		echo "circuits: VERSION mismatch. expected $(CIRCUITS_VERSION), got $$got"; \
+		exit 1; \
+	fi; \
+	echo "circuits: installed $(CIRCUITS_VERSION) at $(CIRCUITS_DIR)"
+
+setup: circuits
 	logos-scaffold setup
 
 localnet-start:
@@ -46,15 +101,15 @@ localnet-start:
 localnet-stop:
 	logos-scaffold localnet stop
 
-test: contracts localnet-start
+test: circuits contracts localnet-start
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test; logos-scaffold localnet stop
 
 # --- Demo / Infra ---
 
-demo: contracts nwaku
+demo: circuits contracts nwaku
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
 
-infra: contracts nwaku localnet-start
+infra: circuits contracts nwaku localnet-start
 	trap 'logos-scaffold localnet stop; docker compose down' EXIT INT TERM; cargo run --features demo -- infra
 
 nwaku:
@@ -65,13 +120,13 @@ nwaku-stop:
 
 # --- Logos Core module ---
 
-logos-module-configure:
+logos-module-configure: circuits
 	cmake -B logos-module/build -S logos-module -DCMAKE_BUILD_TYPE=Debug
 
 logos-module-build: logos-module-configure
 	cmake --build logos-module/build
 
-logos-module-plugin:
+logos-module-plugin: circuits
 	cmake -B logos-module/build -S logos-module -DBUILD_PLUGIN=ON -DCMAKE_BUILD_TYPE=Debug
 	cmake --build logos-module/build
 
@@ -91,7 +146,7 @@ NIX_QTDECLARATIVE := /nix/store/fn7iqppsl6z7ikbspxnjirwdz345w8mj-qtdeclarative-6
 NIX_QTSHADERTOOLS := /nix/store/awcf75ll0ynkkknwzam9qi6w663y0q9q-qtshadertools-6.9.2
 NIX_QTSVG         := /nix/store/6mjqccb1hfr5mffqz80icfvh8w0lvqmf-qtsvg-6.9.2
 
-plugin-configure: swap-ffi
+plugin-configure: circuits swap-ffi
 	cmake -B $(PLUGIN_BUILD) -S logos-module \
 		-DBUILD_APP_PLUGIN=ON \
 		-DLOGOS_APP_INTERFACES_DIR=$(LOGOS_APP_INTERFACES) \
