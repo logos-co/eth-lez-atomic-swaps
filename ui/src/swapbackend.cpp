@@ -209,7 +209,7 @@ void SwapBackend::loadEnv()
     setEthTimelockMinutes(env("ETH_TIMELOCK_MINUTES", "5"));
     setEthRecipientAddress(env("ETH_RECIPIENT_ADDRESS"));
     setLezTakerAccountId(env("LEZ_TAKER_ACCOUNT_ID"));
-    setPollIntervalMs(env("POLL_INTERVAL_MS", "2000"));
+    setPollIntervalMs(env("POLL_INTERVAL_MS", "500"));
     setNwakuUrl(env("NWAKU_URL"));
 
     fetchBalances();

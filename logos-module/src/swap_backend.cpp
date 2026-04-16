@@ -260,7 +260,7 @@ void SwapBackend::loadEnv()
     setEthTimelockMinutes(env("ETH_TIMELOCK_MINUTES", "5"));
     setEthRecipientAddress(env("ETH_RECIPIENT_ADDRESS"));
     setLezTakerAccountId(env("LEZ_TAKER_ACCOUNT_ID"));
-    setPollIntervalMs(env("POLL_INTERVAL_MS", "2000"));
+    setPollIntervalMs(env("POLL_INTERVAL_MS", "500"));
     setNwakuUrl(env("NWAKU_URL"));
 
     fetchBalances();
@@ -294,7 +294,7 @@ void SwapBackend::loadConfig(const QJsonObject &config)
     setEthTimelockMinutes(val("eth_timelock_minutes", "5"));
     setEthRecipientAddress(val("eth_recipient_address"));
     setLezTakerAccountId(val("lez_taker_account_id"));
-    setPollIntervalMs(val("poll_interval_ms", "2000"));
+    setPollIntervalMs(val("poll_interval_ms", "500"));
     setNwakuUrl(val("nwaku_url"));
 
     fetchBalances();

@@ -100,7 +100,7 @@ pub struct ConfigArgs {
     eth_timelock_minutes: u64,
 
     /// Polling interval in milliseconds
-    #[arg(long, env = "POLL_INTERVAL_MS", default_value = "2000")]
+    #[arg(long, env = "POLL_INTERVAL_MS", default_value = "500")]
     poll_interval_ms: u64,
 
     /// Nwaku REST API URL for messaging coordination (optional)
