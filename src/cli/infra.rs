@@ -17,7 +17,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::config::LezAuth;
 use crate::error::{Result, SwapError};
 use crate::messaging::client::MessagingClient;
-use crate::messaging::types::{DEFAULT_NWAKU_URL, OFFERS_TOPIC};
+use crate::messaging::node::MessagingNodeConfig;
+use crate::messaging::topics::OFFERS_TOPIC;
 use crate::scaffold;
 
 sol! {
@@ -26,7 +27,10 @@ sol! {
     "contracts/out/EthHTLC.sol/EthHTLC.json"
 }
 
-const NWAKU_URL: &str = DEFAULT_NWAKU_URL;
+/// Fixed listen port for the rendezvous waku node so the multiaddr written
+/// into .env stays valid across infra restarts (with a persisted node_key,
+/// the peer ID is also stable, so the full multiaddr never drifts).
+const WAKU_LISTEN_PORT: u16 = 60010;
 const BLOCK_WAIT: Duration = Duration::from_secs(4);
 
 // ── Color-coded log prefixes ───────────────────────────────────────
@@ -55,15 +59,26 @@ pub async fn cmd_infra() -> Result<()> {
     println!("\x1b[1m=== Atomic Swap Infrastructure ===\x1b[0m");
     println!();
 
-    // 1. Check nwaku health.
-    eprint!("  [\x1b[35mnwaku\x1b[0m] Checking {}...", NWAKU_URL);
-    let messaging = MessagingClient::new(NWAKU_URL);
-    messaging.subscribe(&[OFFERS_TOPIC]).await.map_err(|_| {
-        SwapError::Messaging(format!(
-            "cannot reach nwaku at {NWAKU_URL} — run `make nwaku` first"
-        ))
-    })?;
-    eprintln!(" \x1b[35mOK\x1b[0m");
+    // 1. Spawn embedded waku rendezvous node. Maker/taker (in their own
+    //    processes) dial this node's multiaddr from .env, forming a 3-peer mesh.
+    eprint!("  [\x1b[35mwaku\x1b[0m]  Starting messaging rendezvous node...");
+    let scaffold_dir = std::path::PathBuf::from(".scaffold");
+    let node_key_path = scaffold_dir.join("messaging").join("infra").join("node_key");
+    let messaging = MessagingClient::spawn(MessagingNodeConfig {
+        listen_port: WAKU_LISTEN_PORT,
+        node_key_path: Some(node_key_path),
+        bootstrap_peers: vec![],
+    })
+    .await?;
+    messaging.subscribe(&[OFFERS_TOPIC]).await?;
+    let listen_addrs = messaging.listen_addresses().await?;
+    let bootstrap_multiaddr = listen_addrs
+        .iter()
+        .find(|m| m.to_string().contains("/ip4/127.0.0.1/"))
+        .or_else(|| listen_addrs.first())
+        .ok_or_else(|| SwapError::Messaging("rendezvous node has no listen addr".into()))?
+        .to_string();
+    eprintln!(" \x1b[35m{bootstrap_multiaddr}\x1b[0m");
 
     // 2. Read scaffold wallet via WalletCore.
     eprint!("  [\x1b[36mlez\x1b[0m]   Reading scaffold wallet...");
@@ -155,6 +170,7 @@ pub async fn cmd_infra() -> Result<()> {
             eth_recipient: &format!("{maker_eth_addr}"),
             lez_taker_account: &accounts[1].account_id_b58,
             nssa_wallet_home_dir: &wallet_home_str,
+            waku_bootstrap_multiaddr: &bootstrap_multiaddr,
         },
     )?;
     eprintln!("  [\x1b[1minfra\x1b[0m] Wrote .env (maker)");
@@ -176,6 +192,7 @@ pub async fn cmd_infra() -> Result<()> {
             eth_recipient: &format!("{maker_eth_addr}"),
             lez_taker_account: &accounts[1].account_id_b58,
             nssa_wallet_home_dir: &wallet_home_str,
+            waku_bootstrap_multiaddr: &bootstrap_multiaddr,
         },
     )?;
     eprintln!("  [\x1b[1minfra\x1b[0m] Wrote .env.taker (taker)");
@@ -188,12 +205,15 @@ pub async fn cmd_infra() -> Result<()> {
     println!("│  \x1b[33mAnvil (ETH)\x1b[0m:   {:<33}│", &anvil_ws);
     println!("│  \x1b[32mETH HTLC\x1b[0m:      {}           │", eth_htlc_address);
     println!("│  \x1b[36mLEZ Sequencer\x1b[0m: {:<33}│", &sequencer_url);
-    println!("│  \x1b[35mNwaku\x1b[0m:         {:<33}│", NWAKU_URL);
+    println!(
+        "│  \x1b[35mWaku\x1b[0m:          {:<33}│",
+        format!("rendezvous on tcp:{WAKU_LISTEN_PORT}")
+    );
     println!("│  Maker .env:    {:<33}│", ".env");
     println!("│  Taker .env:    {:<33}│", ".env.taker");
     println!("\x1b[1m└──────────────────────────────────────────────────┘\x1b[0m");
     println!();
-    println!("  \x1b[2mLogs: \x1b[33m[anvil]\x1b[0m\x1b[2m  \x1b[35m[nwaku]\x1b[0m\x1b[2m → docker compose logs -f\x1b[0m");
+    println!("  \x1b[2mLogs: \x1b[33m[anvil]\x1b[0m\x1b[2m  embedded waku node\x1b[0m");
     println!("  Press Ctrl-C to stop all services.");
     println!();
 
@@ -204,6 +224,9 @@ pub async fn cmd_infra() -> Result<()> {
 
     println!();
     eprintln!("  [\x1b[1minfra\x1b[0m] Shutting down...");
+
+    // Explicit shutdown — WakuNodeHandle has no Drop. See dogfooding #3.
+    let _ = messaging.shutdown().await;
 
     // Anvil drops here.
     drop(anvil);
@@ -223,6 +246,7 @@ struct EnvParams<'a> {
     eth_recipient: &'a str,
     lez_taker_account: &'a str,
     nssa_wallet_home_dir: &'a str,
+    waku_bootstrap_multiaddr: &'a str,
 }
 
 fn write_env_file(path: &str, p: &EnvParams) -> Result<()> {
@@ -267,8 +291,9 @@ LEZ_TAKER_ACCOUNT_ID={lez_taker}
 # Polling
 POLL_INTERVAL_MS=500
 
-# Logos Messaging
-NWAKU_URL={nwaku}
+# Logos Messaging (embedded waku node)
+WAKU_BOOTSTRAP_MULTIADDR={waku_bootstrap}
+WAKU_LISTEN_PORT=0
 
 # Wallet home (used by wallet::WalletCore::from_env)
 NSSA_WALLET_HOME_DIR={wallet_home}
@@ -283,7 +308,7 @@ NSSA_WALLET_HOME_DIR={wallet_home}
         eth_amount = p.eth_amount,
         eth_recipient = p.eth_recipient,
         lez_taker = p.lez_taker_account,
-        nwaku = NWAKU_URL,
+        waku_bootstrap = p.waku_bootstrap_multiaddr,
         wallet_home = p.nssa_wallet_home_dir,
     );
 

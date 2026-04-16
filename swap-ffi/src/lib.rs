@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -12,11 +12,13 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use swap_orchestrator::{
-    config::{LezAuth, SwapConfig, account_id_to_base58, eth_to_wei, parse_base58_account_id, parse_program_id},
+    config::{LezAuth, MessagingConfig, SwapConfig, account_id_to_base58, eth_to_wei, parse_base58_account_id, parse_program_id},
     eth::client::EthClient,
     lez::client::LezClient,
-    messaging::client::{MessagingClient, decode_waku_payload},
-    messaging::types::{SwapOffer, OFFERS_TOPIC},
+    messaging::client::MessagingClient,
+    messaging::node::MessagingNodeConfig,
+    messaging::topics::OFFERS_TOPIC,
+    messaging::types::SwapOffer,
     swap::{
         maker::{run_maker, run_maker_loop, AutoAcceptConfig},
         progress::SwapProgress,
@@ -29,6 +31,15 @@ use swap_orchestrator::{
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
+}
+
+/// Process-wide embedded waku client. Initialized once via
+/// [`swap_ffi_messaging_init`] and torn down via
+/// [`swap_ffi_messaging_shutdown`]. `Arc` so we can hand out cheap
+/// clones to spawned tasks while the global retains ownership.
+fn messaging_slot() -> &'static Mutex<Option<Arc<MessagingClient>>> {
+    static MSG: OnceLock<Mutex<Option<Arc<MessagingClient>>>> = OnceLock::new();
+    MSG.get_or_init(|| Mutex::new(None))
 }
 
 /// Callback invoked on each progress event (called from a worker thread).
@@ -110,8 +121,16 @@ struct FfiConfig {
     lez_taker_account_id: String,
     #[serde(default = "default_poll")]
     poll_interval_ms: String,
+    /// Multiaddr of the messaging rendezvous node (typically written by
+    /// `make infra` into .env). When omitted, messaging is disabled.
     #[serde(default)]
-    nwaku_url: Option<String>,
+    waku_bootstrap_multiaddr: Option<String>,
+    #[serde(default = "default_waku_port")]
+    waku_listen_port: u16,
+}
+
+fn default_waku_port() -> u16 {
+    0
 }
 
 fn default_poll() -> String {
@@ -174,7 +193,10 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         eth_recipient_address,
         lez_taker_account_id,
         poll_interval: Duration::from_millis(poll_interval_ms),
-        nwaku_url: c.nwaku_url,
+        messaging: c.waku_bootstrap_multiaddr.map(|bootstrap_multiaddr| MessagingConfig {
+            bootstrap_multiaddr,
+            listen_port: c.waku_listen_port,
+        }),
     })
 }
 
@@ -465,30 +487,115 @@ pub unsafe extern "C" fn swap_ffi_refund_eth(
     })
 }
 
-/// Publish a standing swap offer via nwaku messaging.
+/// Configuration for [`swap_ffi_messaging_init`].
+#[derive(Deserialize)]
+struct FfiMessagingConfig {
+    /// Multiaddr of the messaging rendezvous node to dial.
+    bootstrap_multiaddr: String,
+    /// libp2p TCP listen port. `0` = OS-assigned.
+    #[serde(default)]
+    listen_port: u16,
+}
+
+/// Initialize the embedded waku messaging client. Spawns a node, dials
+/// the rendezvous peer, and subscribes to the offers topic. Idempotent —
+/// calling twice is a no-op (returns ok). Must be called once per
+/// process before any of the offer-related FFI functions.
+///
+/// # Safety
+/// `config_json` must be a valid null-terminated JSON C string with
+/// shape `{"bootstrap_multiaddr": "...", "listen_port": 0}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_messaging_init(config_json: *const c_char) -> *mut c_char {
+    let json_str = match unsafe { c_str_to_str(config_json) } {
+        Some(s) => s,
+        None => return json_err("null or invalid config_json"),
+    };
+
+    let cfg: FfiMessagingConfig = match serde_json::from_str(json_str) {
+        Ok(c) => c,
+        Err(e) => return json_err(&format!("bad messaging config JSON: {e}")),
+    };
+
+    {
+        let guard = messaging_slot().lock().unwrap();
+        if guard.is_some() {
+            return json_ok();
+        }
+    }
+
+    runtime().block_on(async {
+        let client = match MessagingClient::spawn(MessagingNodeConfig {
+            listen_port: cfg.listen_port,
+            node_key_path: None,
+            bootstrap_peers: vec![cfg.bootstrap_multiaddr.clone()],
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return json_err(&format!("messaging spawn failed: {e}")),
+        };
+        if let Err(e) = client.subscribe(&[OFFERS_TOPIC]).await {
+            return json_err(&format!("subscribe failed: {e}"));
+        }
+        let mut guard = messaging_slot().lock().unwrap();
+        *guard = Some(Arc::new(client));
+        json_ok()
+    })
+}
+
+/// Shut down the embedded waku messaging client (drives stop+destroy).
+/// Required because `WakuNodeHandle` has no `Drop` impl. Safe to call
+/// even if init was never called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_messaging_shutdown() -> *mut c_char {
+    let client_arc = {
+        let mut guard = messaging_slot().lock().unwrap();
+        guard.take()
+    };
+    let Some(arc) = client_arc else {
+        return json_ok();
+    };
+    let Some(client) = Arc::into_inner(arc) else {
+        // Outstanding clones still hold the client (e.g. an in-flight
+        // operation). Safest: leave the slot empty and let the last
+        // clone drop without explicit shutdown. The libwaku node will
+        // leak but the process is presumably exiting.
+        return json_err("messaging client has outstanding references — shutdown skipped");
+    };
+    runtime().block_on(async {
+        match client.shutdown().await {
+            Ok(_) => json_ok(),
+            Err(e) => json_err(&format!("shutdown failed: {e}")),
+        }
+    })
+}
+
+/// Publish a standing swap offer via the embedded messaging client.
 ///
 /// In taker-locks-first, the maker publishes an offer without a hashlock.
 /// The taker will generate the preimage and hashlock when accepting.
+/// Requires [`swap_ffi_messaging_init`] to have been called first.
 ///
 /// # Safety
-/// `config_json` and `nwaku_url` must be valid null-terminated C strings.
+/// `config_json` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn swap_ffi_publish_offer(
     config_json: *const c_char,
-    nwaku_url: *const c_char,
 ) -> *mut c_char {
     let json_str = match unsafe { c_str_to_str(config_json) } {
         Some(s) => s,
         None => return json_err("null or invalid config_json"),
     };
-    let nwaku = match unsafe { c_str_to_str(nwaku_url) } {
-        Some(s) => s,
-        None => return json_err("null or invalid nwaku_url"),
-    };
 
     let config = match parse_config(json_str) {
         Ok(c) => c,
         Err(e) => return json_err(&e),
+    };
+
+    let messaging = match messaging_slot().lock().unwrap().clone() {
+        Some(m) => m,
+        None => return json_err("messaging not initialized — call swap_ffi_messaging_init first"),
     };
 
     runtime().block_on(async {
@@ -515,10 +622,6 @@ pub unsafe extern "C" fn swap_ffi_publish_offer(
             eth_htlc_address: format!("{}", config.eth_htlc_address),
         };
 
-        let messaging = MessagingClient::new(nwaku);
-        if let Err(e) = messaging.subscribe(&[OFFERS_TOPIC]).await {
-            return json_err(&format!("failed to subscribe: {e}"));
-        }
         if let Err(e) = messaging.publish(OFFERS_TOPIC, &offer).await {
             return json_err(&format!("failed to publish offer: {e}"));
         }
@@ -530,55 +633,27 @@ pub unsafe extern "C" fn swap_ffi_publish_offer(
     })
 }
 
-/// Fetch available swap offers from nwaku messaging. Returns JSON array of offers.
-///
-/// # Safety
-/// `nwaku_url` must be a valid null-terminated C string.
+/// Fetch available swap offers from the embedded messaging client.
+/// Returns JSON array of offers seen on the relay since the last call.
+/// Requires [`swap_ffi_messaging_init`] to have been called first.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn swap_ffi_fetch_offers(
-    nwaku_url: *const c_char,
-) -> *mut c_char {
-    let nwaku = match unsafe { c_str_to_str(nwaku_url) } {
-        Some(s) => s,
-        None => return json_err("null or invalid nwaku_url"),
+pub unsafe extern "C" fn swap_ffi_fetch_offers() -> *mut c_char {
+    let messaging = match messaging_slot().lock().unwrap().clone() {
+        Some(m) => m,
+        None => return json_err("messaging not initialized — call swap_ffi_messaging_init first"),
     };
 
     runtime().block_on(async {
-        let messaging = MessagingClient::new(nwaku);
-        if let Err(e) = messaging.subscribe(&[OFFERS_TOPIC]).await {
-            return json_err(&format!("failed to subscribe: {e}"));
-        }
-
         let mut offers: Vec<serde_json::Value> = Vec::new();
-        // Dedup by canonical JSON of the decoded offer (both paths produce the same key).
         let mut seen = std::collections::HashSet::new();
-
-        // Query store for last 30 minutes.
-        let now_ns = std::time::SystemTime::now()
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as i64;
-        let now_ms = now_ns / 1_000_000;
-        let start_ns = now_ns - 30 * 60 * 1_000_000_000;
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
 
-        if let Ok(entries) = messaging.store_query(&[OFFERS_TOPIC], Some(start_ns), Some(50)).await {
-            for entry in &entries {
-                if let Some(ref msg) = entry.message {
-                    if let Ok(offer) = decode_waku_payload::<SwapOffer>(&msg.payload) {
-                        let key = serde_json::to_string(&offer).unwrap_or_default();
-                        if !seen.insert(key) {
-                            continue;
-                        }
-                        let ts_ms = msg.timestamp.map(|t| t / 1_000_000).unwrap_or(now_ms);
-                        let mut val = serde_json::to_value(&offer).unwrap();
-                        val.as_object_mut().unwrap().insert("timestamp_ms".to_string(), serde_json::json!(ts_ms));
-                        offers.push(val);
-                    }
-                }
-            }
-        }
-
-        // Also poll relay cache, dedup against store results.
+        // Drain the relay mailbox. (Store query is a no-op stub — see
+        // delivery-dogfooding.md #12 — so we only have what's been
+        // delivered via gossipsub since this client started.)
         let relay_msgs: Vec<SwapOffer> = messaging.poll_messages(OFFERS_TOPIC).await.unwrap_or_default();
         for offer in relay_msgs {
             let key = serde_json::to_string(&offer).unwrap_or_default();
@@ -589,13 +664,6 @@ pub unsafe extern "C" fn swap_ffi_fetch_offers(
             val.as_object_mut().unwrap().insert("timestamp_ms".to_string(), serde_json::json!(now_ms));
             offers.push(val);
         }
-
-        // Sort newest first.
-        offers.sort_by(|a, b| {
-            let ts_a = a["timestamp_ms"].as_i64().unwrap_or(0);
-            let ts_b = b["timestamp_ms"].as_i64().unwrap_or(0);
-            ts_b.cmp(&ts_a)
-        });
 
         let result = serde_json::json!({ "offers": offers });
         to_c_string(&result.to_string())

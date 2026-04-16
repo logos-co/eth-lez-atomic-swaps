@@ -3,10 +3,12 @@ use std::time::Duration;
 use clap::Args;
 use tracing::{debug, info};
 
-use crate::config::SwapConfig;
+use crate::config::{MessagingConfig, SwapConfig};
 use crate::error::{Result, SwapError};
-use crate::messaging::client::{MessagingClient, decode_waku_payload};
-use crate::messaging::types::{SwapOffer, OFFERS_TOPIC};
+use crate::messaging::client::{decode_waku_payload, MessagingClient};
+use crate::messaging::node::MessagingNodeConfig;
+use crate::messaging::topics::OFFERS_TOPIC;
+use crate::messaging::types::SwapOffer;
 use crate::swap::taker::run_taker;
 
 use super::{create_clients, output};
@@ -35,8 +37,8 @@ pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Resu
     };
 
     // Discover offer via messaging if available.
-    if let Some(nwaku_url) = &config.nwaku_url {
-        discover_offer(nwaku_url, config, json).await?;
+    if let Some(msg_cfg) = &config.messaging {
+        discover_offer(msg_cfg, config, json).await?;
     }
 
     if !json {
@@ -52,11 +54,16 @@ pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Resu
 /// Discover a matching swap offer via Logos Messaging.
 /// Returns once a valid offer is found (doesn't need to wait for escrow — taker locks first now).
 async fn discover_offer(
-    nwaku_url: &str,
+    msg_cfg: &MessagingConfig,
     config: &SwapConfig,
     json: bool,
 ) -> Result<()> {
-    let messaging = MessagingClient::new(nwaku_url);
+    let messaging = MessagingClient::spawn(MessagingNodeConfig {
+        listen_port: msg_cfg.listen_port,
+        node_key_path: None,
+        bootstrap_peers: vec![msg_cfg.bootstrap_multiaddr.clone()],
+    })
+    .await?;
     messaging.subscribe(&[OFFERS_TOPIC]).await?;
 
     if !json {
@@ -64,6 +71,8 @@ async fn discover_offer(
     }
 
     // 1. Query store for recent offers (last 10 minutes).
+    // (Currently a no-op stub — bindings don't expose store-server config.
+    // See delivery-dogfooding.md #12. Falls through to relay polling.)
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -72,12 +81,11 @@ async fn discover_offer(
     let start_time_ns = now_ns - ten_min_ns;
 
     let offer = 'search: {
-        // Try store first.
-        let store_entries = messaging
+        // Try store first (currently no-op, see above).
+        if let Ok(entries) = messaging
             .store_query(&[OFFERS_TOPIC], Some(start_time_ns), Some(50))
-            .await;
-
-        if let Ok(entries) = store_entries {
+            .await
+        {
             for entry in &entries {
                 if let Some(ref waku_msg) = entry.message {
                     if let Ok(offer) = decode_waku_payload::<SwapOffer>(&waku_msg.payload) {
@@ -108,6 +116,7 @@ async fn discover_offer(
             }
 
             if tokio::time::Instant::now() >= deadline {
+                let _ = messaging.shutdown().await;
                 return Err(SwapError::Timeout(
                     "no matching offer found within 5 minutes".into(),
                 ));
@@ -116,6 +125,8 @@ async fn discover_offer(
             tokio::time::sleep(config.poll_interval).await;
         }
     };
+
+    let _ = messaging.shutdown().await;
 
     if json {
         println!(

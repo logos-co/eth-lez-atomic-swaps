@@ -13,7 +13,9 @@ use crate::{
     lez::watcher as lez_watcher,
     lez::watcher::LezHtlcEvent,
     messaging::client::MessagingClient,
-    messaging::types::{SwapOffer, OFFERS_TOPIC},
+    messaging::node::MessagingNodeConfig,
+    messaging::topics::OFFERS_TOPIC,
+    messaging::types::SwapOffer,
     swap::{
         progress::{self, ProgressSender, SwapProgress},
         refund::now_unix,
@@ -241,6 +243,29 @@ pub async fn run_maker_loop(
     let mut failed: u32 = 0;
     let mut iteration: u32 = 0;
 
+    // Spawn one messaging client up-front; reuse across iterations.
+    // Spawning a libwaku node per-iteration would be very expensive.
+    let messaging = if let Some(msg_cfg) = &base_config.messaging {
+        match MessagingClient::spawn(MessagingNodeConfig {
+            listen_port: msg_cfg.listen_port,
+            node_key_path: None,
+            bootstrap_peers: vec![msg_cfg.bootstrap_multiaddr.clone()],
+        })
+        .await
+        {
+            Ok(m) => {
+                let _ = m.subscribe(&[OFFERS_TOPIC]).await;
+                Some(m)
+            }
+            Err(e) => {
+                info!(%e, "maker auto-accept: messaging spawn failed (continuing without)");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     progress::report(&progress, SwapProgress::AutoAcceptStarted);
 
     loop {
@@ -300,7 +325,7 @@ pub async fn run_maker_loop(
         }
 
         // Publish offer (if messaging configured).
-        if let Some(nwaku_url) = &fresh_config.nwaku_url {
+        if let Some(messaging) = &messaging {
             let offer = SwapOffer {
                 hashlock: String::new(),
                 lez_amount: fresh_config.lez_amount,
@@ -318,8 +343,6 @@ pub async fn run_maker_loop(
                 ),
                 eth_htlc_address: format!("{}", fresh_config.eth_htlc_address),
             };
-            let messaging = MessagingClient::new(nwaku_url);
-            let _ = messaging.subscribe(&[OFFERS_TOPIC]).await;
             match messaging.publish(OFFERS_TOPIC, &offer).await {
                 Ok(_) => info!(iteration, "maker: offer published"),
                 Err(e) => info!(iteration, %e, "maker: failed to publish offer (continuing)"),
@@ -394,6 +417,11 @@ pub async fn run_maker_loop(
                 // R1: log error and continue to next iteration
             }
         }
+    }
+
+    // Explicit shutdown — WakuNodeHandle has no Drop. See delivery-dogfooding.md #3.
+    if let Some(m) = messaging {
+        let _ = m.shutdown().await;
     }
 
     progress::report(

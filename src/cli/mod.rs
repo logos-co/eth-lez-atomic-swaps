@@ -13,7 +13,7 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{LezAuth, SwapConfig, eth_to_wei, parse_base58_account_id, parse_program_id};
+use crate::config::{LezAuth, MessagingConfig, SwapConfig, eth_to_wei, parse_base58_account_id, parse_program_id};
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
@@ -103,9 +103,14 @@ pub struct ConfigArgs {
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "2000")]
     poll_interval_ms: u64,
 
-    /// Nwaku REST API URL for messaging coordination (optional)
-    #[arg(long, env = "NWAKU_URL")]
-    nwaku_url: Option<String>,
+    /// Multiaddr of the messaging rendezvous node (typically set by `make infra`
+    /// in .env). When unset, messaging is disabled and coordination is out-of-band.
+    #[arg(long, env = "WAKU_BOOTSTRAP_MULTIADDR")]
+    waku_bootstrap_multiaddr: Option<String>,
+
+    /// libp2p TCP listen port for the embedded waku node. 0 = OS-assigned.
+    #[arg(long, env = "WAKU_LISTEN_PORT", default_value = "0")]
+    waku_listen_port: u16,
 }
 
 impl ConfigArgs {
@@ -167,7 +172,10 @@ impl ConfigArgs {
             eth_recipient_address,
             lez_taker_account_id,
             poll_interval: Duration::from_millis(self.poll_interval_ms),
-            nwaku_url: self.nwaku_url,
+            messaging: self.waku_bootstrap_multiaddr.map(|bootstrap_multiaddr| MessagingConfig {
+                bootstrap_multiaddr,
+                listen_port: self.waku_listen_port,
+            }),
         })
     }
 }

@@ -139,7 +139,7 @@ impl DemoEnv {
             eth_recipient_address: maker_eth_addr,
             lez_taker_account_id: accounts[1].account_id,
             poll_interval: Duration::from_millis(500),
-            nwaku_url: None,
+            messaging: None,
         };
 
         let taker_config = SwapConfig {
@@ -159,7 +159,7 @@ impl DemoEnv {
             eth_recipient_address: maker_eth_addr,
             lez_taker_account_id: accounts[1].account_id,
             poll_interval: Duration::from_millis(500),
-            nwaku_url: None,
+            messaging: None,
         };
 
         let taker_eth_private_key = hex::encode(anvil.keys()[1].to_bytes());

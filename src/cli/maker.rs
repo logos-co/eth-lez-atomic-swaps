@@ -3,7 +3,9 @@ use clap::Args;
 use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
 use crate::messaging::client::MessagingClient;
-use crate::messaging::types::{self, SwapOffer, OFFERS_TOPIC};
+use crate::messaging::node::MessagingNodeConfig;
+use crate::messaging::topics::{self, OFFERS_TOPIC};
+use crate::messaging::types::SwapOffer;
 use crate::swap::maker::run_maker;
 
 use super::{create_clients, output};
@@ -37,14 +39,19 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
     };
 
     // If messaging is enabled, publish a standing offer so takers can discover us.
-    if let Some(nwaku_url) = &config.nwaku_url {
-        let messaging = MessagingClient::new(nwaku_url);
+    let messaging = if let Some(msg_cfg) = &config.messaging {
+        let messaging = MessagingClient::spawn(MessagingNodeConfig {
+            listen_port: msg_cfg.listen_port,
+            node_key_path: None,
+            bootstrap_peers: vec![msg_cfg.bootstrap_multiaddr.clone()],
+        })
+        .await?;
 
-        let mut topics = vec![OFFERS_TOPIC.to_string()];
+        let mut content_topics = vec![OFFERS_TOPIC.to_string()];
         if let Some(hl) = &hashlock {
-            topics.push(types::swap_topic(hl));
+            content_topics.push(topics::swap_topic(hl));
         }
-        let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
+        let topic_refs: Vec<&str> = content_topics.iter().map(|s| s.as_str()).collect();
         messaging.subscribe(&topic_refs).await?;
 
         let offer = SwapOffer {
@@ -68,11 +75,20 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
         if !json {
             println!("Offer published to Logos Messaging. Waiting for taker to lock ETH...");
         }
-    } else if !json {
-        println!("Waiting for taker to lock ETH...");
-    }
+        Some(messaging)
+    } else {
+        if !json {
+            println!("Waiting for taker to lock ETH...");
+        }
+        None
+    };
 
     let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None, None).await?;
+
+    // Explicit shutdown — WakuNodeHandle has no Drop. See delivery-dogfooding.md #3.
+    if let Some(m) = messaging {
+        let _ = m.shutdown().await;
+    }
 
     output::print_swap_outcome(&outcome, json);
     Ok(())

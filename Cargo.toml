@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "swap-ffi"]
+resolver = "2"
+
 [package]
 name = "swap-orchestrator"
 version = "0.1.0"

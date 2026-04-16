@@ -49,8 +49,21 @@ pub struct SwapConfig {
     pub poll_interval: Duration,
 
     // --- Messaging ---
-    /// Nwaku REST API URL. None = messaging disabled, out-of-band coordination.
-    pub nwaku_url: Option<String>,
+    /// Embedded waku node config. None = messaging disabled, out-of-band coordination.
+    pub messaging: Option<MessagingConfig>,
+}
+
+/// Embedded waku node configuration. Spawned per-process; dials the
+/// rendezvous node at `bootstrap_multiaddr` (typically written into
+/// `.env` by `make infra`).
+#[derive(Debug, Clone)]
+pub struct MessagingConfig {
+    /// Multiaddr of the rendezvous node to dial on startup
+    /// (e.g. `/ip4/127.0.0.1/tcp/60010/p2p/<peer-id>`).
+    pub bootstrap_multiaddr: String,
+    /// libp2p TCP listen port. `0` = OS-assigned (typical for CLI;
+    /// `make infra` uses a fixed port for stable rendezvous).
+    pub listen_port: u16,
 }
 
 impl SwapConfig {

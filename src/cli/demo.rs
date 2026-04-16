@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -7,14 +8,14 @@ use crate::demo::DemoEnv;
 use crate::error::Result;
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
-use crate::messaging::client::{MessagingClient, decode_waku_payload};
-use crate::messaging::types::{DEFAULT_NWAKU_URL, SwapOffer, OFFERS_TOPIC};
+use crate::messaging::client::MessagingClient;
+use crate::messaging::node::MessagingNodeConfig;
+use crate::messaging::topics::OFFERS_TOPIC;
+use crate::messaging::types::SwapOffer;
 use crate::scaffold;
 use crate::swap::maker::run_maker;
 use crate::swap::taker::run_taker;
 use crate::swap::types::SwapOutcome;
-
-const NWAKU_URL: &str = DEFAULT_NWAKU_URL;
 
 pub async fn cmd_demo() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
@@ -35,10 +36,40 @@ pub async fn cmd_demo() -> Result<()> {
 }
 
 async fn run_demo() -> Result<()> {
-    // Check if nwaku is reachable — messaging is required for the demo.
-    let messaging = MessagingClient::new(NWAKU_URL);
-    check_nwaku(&messaging).await?;
-    println!("  \x1b[32m\u{2713}\x1b[0m Logos Messaging (nwaku) at {NWAKU_URL}");
+    // Spawn two embedded waku nodes — one for the maker task, one for the taker.
+    // Both bind to OS-assigned ports (avoids leaks if a panic skips shutdown).
+    // The taker dials the maker's listen address so they form a 2-peer mesh.
+    eprint!("  Spawning embedded waku nodes...");
+    let maker_msg = Arc::new(
+        MessagingClient::spawn(MessagingNodeConfig {
+            listen_port: 0,
+            node_key_path: None,
+            bootstrap_peers: vec![],
+        })
+        .await?,
+    );
+    let maker_addrs = maker_msg.listen_addresses().await?;
+    let maker_addr = maker_addrs
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::SwapError::Messaging("maker node has no listen addr".into()))?;
+
+    let taker_msg = Arc::new(
+        MessagingClient::spawn(MessagingNodeConfig {
+            listen_port: 0,
+            node_key_path: None,
+            bootstrap_peers: vec![maker_addr.to_string()],
+        })
+        .await?,
+    );
+    eprintln!(" \x1b[32m\u{2713}\x1b[0m");
+
+    // Subscribe both nodes BEFORE either side publishes — gossipsub doesn't
+    // replay history, and we don't have a store-server (see dogfooding #12).
+    maker_msg.subscribe(&[OFFERS_TOPIC]).await?;
+    taker_msg.subscribe(&[OFFERS_TOPIC]).await?;
+    // Brief pause for the gossipsub mesh to form.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let env = DemoEnv::start(Some(Box::new(|step, label, detail| {
         if detail.is_empty() {
@@ -49,10 +80,8 @@ async fn run_demo() -> Result<()> {
     })))
     .await?;
 
-    let mut maker_config = env.maker_config.clone();
-    maker_config.nwaku_url = Some(NWAKU_URL.to_string());
-    let mut taker_config = env.taker_config.clone();
-    taker_config.nwaku_url = Some(NWAKU_URL.to_string());
+    let maker_config = env.maker_config.clone();
+    let taker_config = env.taker_config.clone();
 
     println!();
     println!("--- Configuration ---");
@@ -60,7 +89,7 @@ async fn run_demo() -> Result<()> {
     println!("  ETH amount:  {} wei", maker_config.eth_amount);
     println!("  ETH HTLC:    {}", maker_config.eth_htlc_address);
     println!("  Sequencer:   {}", maker_config.lez_sequencer_url);
-    println!("  Messaging:   {NWAKU_URL}");
+    println!("  Messaging:   embedded (in-process, 2 nodes)");
     println!();
     println!("--- Running Swap ---");
     println!();
@@ -73,13 +102,10 @@ async fn run_demo() -> Result<()> {
     // watch for preimage on LEZ, claim ETH.
     let maker_handle = {
         let config = maker_config.clone();
+        let messaging = maker_msg.clone();
         tokio::spawn(async move {
             let eth = EthClient::new(&config).await.unwrap();
             let lez = LezClient::new(&config).unwrap();
-
-            // Publish standing offer via Logos Messaging (no hashlock).
-            let messaging = MessagingClient::new(NWAKU_URL);
-            messaging.subscribe(&[OFFERS_TOPIC]).await.unwrap();
 
             let offer = SwapOffer {
                 hashlock: hex::encode(hashlock),
@@ -106,16 +132,17 @@ async fn run_demo() -> Result<()> {
         })
     };
 
-    // Spawn taker: discover offer, generate preimage, lock ETH, wait for LEZ lock, claim LEZ.
+    // Spawn taker: discover offer, lock ETH, wait for LEZ lock, claim LEZ.
     let taker_handle = {
         let config = taker_config.clone();
+        let messaging = taker_msg.clone();
         tokio::spawn(async move {
             let eth = EthClient::new(&config).await.unwrap();
             let lez = LezClient::new(&config).unwrap();
 
             // Discover offer via Logos Messaging.
             eprintln!("  [taker] Listening for offers via Logos Messaging...");
-            discover_offer_demo(&config).await;
+            discover_offer_demo(&messaging, &config).await;
             eprintln!("  [taker] \x1b[34mDiscovered offer via Logos Messaging\x1b[0m");
 
             // Brief pause so maker's ETH event watcher is ready before we lock.
@@ -131,6 +158,14 @@ async fn run_demo() -> Result<()> {
     let maker_outcome = maker_result.unwrap()?;
     let taker_outcome = taker_result.unwrap()?;
 
+    // Explicit shutdown — WakuNodeHandle has no Drop. See dogfooding #3.
+    if let Ok(m) = Arc::try_unwrap(maker_msg) {
+        let _ = m.shutdown().await;
+    }
+    if let Ok(t) = Arc::try_unwrap(taker_msg) {
+        let _ = t.shutdown().await;
+    }
+
     println!();
     println!("--- Results ---");
     println!();
@@ -141,37 +176,12 @@ async fn run_demo() -> Result<()> {
     Ok(())
 }
 
-/// Poll messaging until a matching offer is found. Returns the hashlock.
-async fn discover_offer_demo(config: &crate::config::SwapConfig) {
-    let messaging = MessagingClient::new(NWAKU_URL);
-    messaging.subscribe(&[OFFERS_TOPIC]).await.unwrap();
-
+/// Poll the embedded messaging client until a matching offer arrives.
+async fn discover_offer_demo(messaging: &MessagingClient, config: &crate::config::SwapConfig) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
-        // Try store first (in case offer was published before we subscribed).
-        let now_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as i64;
-        if let Ok(entries) = messaging
-            .store_query(&[OFFERS_TOPIC], Some(now_ns - 120_000_000_000), Some(20))
-            .await
-        {
-            for entry in &entries {
-                if let Some(ref msg) = entry.message {
-                    if let Ok(offer) = decode_waku_payload::<SwapOffer>(&msg.payload) {
-                        if offer.lez_amount == config.lez_amount
-                            && offer.eth_amount == config.eth_amount
-                        {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Poll relay cache.
-        let offers: Vec<SwapOffer> = messaging.poll_messages(OFFERS_TOPIC).await.unwrap_or_default();
+        let offers: Vec<SwapOffer> =
+            messaging.poll_messages(OFFERS_TOPIC).await.unwrap_or_default();
         for offer in offers {
             if offer.lez_amount == config.lez_amount && offer.eth_amount == config.eth_amount {
                 return;
@@ -211,12 +221,4 @@ fn print_outcome(role: &str, outcome: &SwapOutcome) {
             }
         }
     }
-}
-
-async fn check_nwaku(client: &MessagingClient) -> Result<()> {
-    client.subscribe(&[OFFERS_TOPIC]).await.map_err(|_| {
-        crate::error::SwapError::Messaging(format!(
-            "cannot reach nwaku at {NWAKU_URL} — run `make nwaku` first"
-        ))
-    })
 }
