@@ -68,15 +68,16 @@ make infra                # starts Anvil, LEZ sequencer, nwaku; deploys contract
                           # keeps running — Ctrl-C to stop
 ```
 
+> Under the hood, `make infra` shells out to `logos-scaffold` for LEZ-side work: `localnet start` to boot the sequencer (and `localnet stop` on Ctrl-C), plus `wallet topup` to fund the maker and taker accounts. Anvil, contract deployment, and nwaku are managed directly by the orchestrator.
+
 ### 2. Pick an Interface
 
 Open a new terminal and choose one:
 
 **Standalone UI**
 ```bash
-make configure            # first time only — builds FFI bridge + cmake configure
-make run-maker            # open maker UI
-make run-taker            # open taker UI (in another terminal)
+make run-maker            # builds FFI bridge + UI on first run, opens maker UI
+make run-taker            # opens taker UI (in another terminal)
 ```
 
 **logos-app plugin**
@@ -102,9 +103,8 @@ The plugin build uses Nix Qt paths hardcoded in the Makefile (`NIX_QTBASE`, `NIX
 </details>
 
 ```bash
-make plugin-build         # builds FFI bridge + IComponent plugin
-make plugin-run-maker     # launch logos-app as maker (loads .env)
-make plugin-run-taker     # launch logos-app as taker (loads .env.taker, in another terminal)
+make plugin-run-maker     # builds + installs the plugin on first run, launches logos-app as maker (loads .env)
+make plugin-run-taker     # launches logos-app as taker (loads .env.taker, in another terminal)
 ```
 
 Two logos-app instances are needed — one per role (maker/taker), each with its own wallet credentials. The plugin is installed to `~/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap/` (macOS).
@@ -196,7 +196,7 @@ swap-cli demo                           # run full swap headlessly (maker + take
 
 - **SHA-256 hashlock** (not keccak) — cross-chain compatibility with LEZ's `risc0_zkvm::sha`
 - **Taker locks first** — taker generates the secret preimage, locks ETH with a longer timelock; maker locks LEZ with a shorter timelock after verifying the ETH lock
-- **LEZ timelock is off-chain** — LSSA programs lack timestamp access; orchestration checks wall-clock time
+- **LEZ timelock is enforced off-chain** — the orchestrator checks wall-clock time before submitting refunds. The HTLC program does not yet set a `TimestampValidityWindow` on the Refund instruction (LSSA validity windows landed in PRs #400/#404 — adopting them is planned)
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Scaffold wallet** — LEZ keys managed by `logos-scaffold`; the orchestration library reads signing keys from the scaffold wallet on disk
 - **Messaging is optional** — works without nwaku via manual hashlock exchange
