@@ -63,12 +63,14 @@ cd eth-lez-atomic-swaps
 ### 1. Setup & Infrastructure
 
 ```bash
-make setup                # one-time — creates scaffold wallet at .scaffold/wallet
+make setup                # one-time: fetches logos-blockchain-circuits, creates scaffold wallet at .scaffold/wallet
 make infra                # starts Anvil, LEZ sequencer, nwaku; deploys contracts; writes .env files
                           # keeps running — Ctrl-C to stop
 ```
 
 > Under the hood, `make infra` shells out to `logos-scaffold` for LEZ-side work: `localnet start` to boot the sequencer (and `localnet stop` on Ctrl-C), plus `wallet topup` to fund the maker and taker accounts. Anvil, contract deployment, and nwaku are managed directly by the orchestrator.
+
+> **Circuits:** `make setup` downloads `logos-blockchain-circuits` v0.4.2 into `.scaffold/circuits/` and exports `LOGOS_BLOCKCHAIN_CIRCUITS` so it does not touch any pre-existing `~/.logos-blockchain-circuits/` on your machine (which may be pinned to a different version by another Logos install). Every `make` target that builds or runs Rust inherits the env var, so lssa and cargo build scripts both pick up the project-local copy. Bump `CIRCUITS_VERSION` at the top of the `Makefile` when the lssa pin in `scaffold.toml` requires a newer release. Note: upstream does not publish a `macos-x86_64` build, so Intel Macs are unsupported.
 
 ### 2. Pick an Interface
 
