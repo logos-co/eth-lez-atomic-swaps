@@ -28,7 +28,9 @@ Taker                                          Maker
 
 ## Quick Start
 
-**Prerequisites:** Rust 1.85+, Foundry, CMake 3.21+, Qt 6.5+, Docker, [`logos-scaffold`](https://github.com/logos-co/logos-scaffold).
+**Prerequisites:** Rust 1.85+, Foundry, CMake 3.21+, Qt 6.5+, GNU make + a C/C++ toolchain (for `libwaku`), [`logos-scaffold`](https://github.com/logos-co/logos-scaffold).
+
+> The Logos messaging node (`libwaku`) is now embedded in-process — there is no Docker dependency. The first build compiles the Nim-based `libwaku` from source (5–10 min) via `waku-sys`'s vendored `nimbus-build-system`; subsequent builds are cached. See [delivery-dogfooding.md](delivery-dogfooding.md) for integration notes.
 
 <details><summary><b>macOS</b></summary>
 
@@ -37,16 +39,16 @@ brew install qt@6 cmake
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
-Also install [Docker Desktop](https://docs.docker.com/desktop/install/mac-install/). If CMake can't find Qt6: `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`
+If CMake can't find Qt6: `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`. The workspace `.cargo/config.toml` already supplies the macOS aarch64 linker flags `libwaku` needs.
 </details>
 
 <details><summary><b>Linux (Ubuntu/Debian)</b></summary>
 
 ```bash
 # Ubuntu / Debian
-sudo apt install cmake qt6-base-dev qt6-declarative-dev docker.io docker-compose-plugin
+sudo apt install cmake qt6-base-dev qt6-declarative-dev build-essential
 # Fedora
-sudo dnf install cmake qt6-qtbase-devel qt6-qtdeclarative-devel docker-compose
+sudo dnf install cmake qt6-qtbase-devel qt6-qtdeclarative-devel gcc gcc-c++ make
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
@@ -64,11 +66,11 @@ cd eth-lez-atomic-swaps
 
 ```bash
 make setup                # one-time: fetches logos-blockchain-circuits, creates scaffold wallet at .scaffold/wallet
-make infra                # starts Anvil, LEZ sequencer, nwaku; deploys contracts; writes .env files
-                          # keeps running — Ctrl-C to stop
+make infra                # starts Anvil, LEZ sequencer, embedded waku rendezvous node;
+                          # deploys contracts; writes .env files. Keeps running — Ctrl-C to stop.
 ```
 
-> Under the hood, `make infra` shells out to `logos-scaffold` for LEZ-side work: `localnet start` to boot the sequencer (and `localnet stop` on Ctrl-C), plus `wallet topup` to fund the maker and taker accounts. Anvil, contract deployment, and nwaku are managed directly by the orchestrator.
+> Under the hood, `make infra` shells out to `logos-scaffold` for LEZ-side work: `localnet start` to boot the sequencer (and `localnet stop` on Ctrl-C), plus `wallet topup` to fund the maker and taker accounts. Anvil, contract deployment, and the embedded waku rendezvous node are managed directly by the orchestrator. The rendezvous node's multiaddr is written into `.env` / `.env.taker` as `WAKU_BOOTSTRAP_MULTIADDR` so each CLI/UI process spawns its own node and dials in.
 
 > **Circuits:** `make setup` downloads `logos-blockchain-circuits` v0.4.2 into `.scaffold/circuits/` and exports `LOGOS_BLOCKCHAIN_CIRCUITS` so it does not touch any pre-existing `~/.logos-blockchain-circuits/` on your machine (which may be pinned to a different version by another Logos install). Every `make` target that builds or runs Rust inherits the env var, so lssa and cargo build scripts both pick up the project-local copy. Bump `CIRCUITS_VERSION` at the top of the `Makefile` when the lssa pin in `scaffold.toml` requires a newer release. Note: upstream does not publish a `macos-x86_64` build, so Intel Macs are unsupported.
 
@@ -135,7 +137,7 @@ NSSA_WALLET_HOME_DIR=.scaffold/wallet wallet account ls -l
 
 ### 4. Cleanup
 
-Stop with `Ctrl-C` on `make infra`, then `make nwaku-stop` to clean up Docker.
+Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded waku rendezvous node all shut down together.
 
 ## Architecture
 
@@ -169,14 +171,13 @@ Stop with `Ctrl-C` on `make infra`, then `make nwaku-stop` to clean up Docker.
 | Command | Description |
 |---|---|
 | `make setup` | One-time scaffold wallet setup (creates `.scaffold/wallet`) |
-| `make infra` | Start Anvil, LEZ localnet, nwaku; deploy HTLCs on both chains; write `.env` files |
+| `make infra` | Start Anvil, LEZ localnet, embedded waku rendezvous node; deploy HTLCs on both chains; write `.env` files |
 | `make configure` | Build the Rust FFI bridge + run cmake configure for the Qt6 standalone app |
 | `make build` | Build the Qt6 standalone UI |
 | `make run-maker` / `run-taker` | Launch the standalone maker/taker UI (loads `.env` / `.env.taker`) |
 | `make demo` | Run the full swap headlessly — no UI needed |
 | `make test` | Build contracts, start localnet, run all tests, stop localnet |
 | `make contracts` | Build Solidity contracts via Foundry |
-| `make nwaku` / `nwaku-stop` | Start/stop nwaku Docker containers |
 | `make localnet-start` / `localnet-stop` | Start/stop LEZ localnet via `logos-scaffold` |
 | `make plugin-build` | Build the Rust FFI bridge + IComponent plugin for logos-app |
 | `make plugin-run-maker` / `plugin-run-taker` | Launch logos-app as maker/taker (two instances needed) |
@@ -190,7 +191,7 @@ swap-cli maker                         # publish offer, wait for ETH lock, lock 
 swap-cli taker                         # discover offer, generate preimage, lock ETH, claim LEZ
 swap-cli refund lez --hashlock <hex>    # refund LEZ after timelock
 swap-cli refund eth --swap-id <hex>     # refund ETH after timelock
-swap-cli infra                          # start Anvil + LEZ sequencer + nwaku, deploy, write .env
+swap-cli infra                          # start Anvil + LEZ sequencer + embedded waku, deploy, write .env
 swap-cli demo                           # run full swap headlessly (maker + taker)
 ```
 
@@ -201,4 +202,4 @@ swap-cli demo                           # run full swap headlessly (maker + take
 - **LEZ timelock is enforced on-chain** — the HTLC program attaches `TimestampValidityWindow` (LSSA PRs #400/#404) to the Refund output, so the runtime rejects refund transactions whose block timestamp is before the timelock. The orchestrator's pre-submit wall-clock check is a UX optimization that avoids wasted proof generation
 - **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
 - **Scaffold wallet** — LEZ keys managed by `logos-scaffold`; the orchestration library reads signing keys from the scaffold wallet on disk
-- **Messaging is optional** — works without nwaku via manual hashlock exchange
+- **Messaging is embedded** — every process (`make infra` rendezvous node, CLI maker/taker, FFI consumers) spawns a `libwaku` node in-process via [`waku-bindings`](https://github.com/logos-messaging/logos-delivery-rust-bindings) and joins a single gossipsub mesh. No Docker. Messaging stays optional — the swap logic works without it via manual hashlock exchange. See [delivery-dogfooding.md](delivery-dogfooding.md) for integration friction notes
