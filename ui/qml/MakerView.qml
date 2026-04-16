@@ -26,6 +26,23 @@ ScrollView {
         return done
     }
 
+    // Map "in-progress" Rust events to their stepper milestone, so step 1
+    // visibly highlights while waiting for ETH lock, step 2 while locking
+    // LEZ, etc. Without this mapping the stepper has no current step
+    // during the (often long) wait phases.
+    function stepFor(rawStep) {
+        if (rawStep === "WaitingForEthLock" || rawStep === "")
+            return "EthLockDetected"
+        if (rawStep === "LezLocking")
+            return "LezLocked"
+        if (rawStep === "WaitingForPreimage")
+            return "PreimageRevealed"
+        if (rawStep === "ClaimingEth")
+            return "EthClaimed"
+        return rawStep
+    }
+    property string displayCurrentStep: stepFor(swapBackend.currentStep)
+
     property string cumulativeStats: {
         var n = swapBackend.autoAcceptCompleted
         if (n <= 0) return ""
@@ -190,9 +207,9 @@ ScrollView {
                 Layout.fillWidth: true
             }
 
-            // --- Progress (only visible during active swap) ---
+            // --- Progress (always visible during Go Live) ---
             Rectangle {
-                visible: swapBackend.autoAcceptRunning && swapBackend.currentStep !== "" && swapBackend.currentStep !== "WaitingForEthLock"
+                visible: swapBackend.autoAcceptRunning
                 Layout.fillWidth: true
                 implicitHeight: makerStepper.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
@@ -207,13 +224,14 @@ ScrollView {
                         margins: Theme.spacingNormal
                     }
                     steps: makerSteps
-                    currentStep: swapBackend.currentStep
+                    currentStep: makerRoot.displayCurrentStep
                     completedSteps: makerRoot.completedSteps
                 }
             }
 
             // --- Completed Swaps ---
             Rectangle {
+                id: historyCard
                 visible: swapBackend.swapHistory.length > 0
                 Layout.fillWidth: true
                 implicitHeight: historyCol.implicitHeight + Theme.spacingNormal * 2
@@ -221,6 +239,20 @@ ScrollView {
                 border.color: Theme.border
                 border.width: 1
                 radius: Theme.radiusNormal
+                Behavior on border.color { ColorAnimation { duration: 280 } }
+
+                Connections {
+                    target: swapBackend
+                    function onAutoAcceptCompletedChanged() {
+                        historyCard.border.color = Theme.success
+                        flashResetTimer.restart()
+                    }
+                }
+                Timer {
+                    id: flashResetTimer
+                    interval: 700
+                    onTriggered: historyCard.border.color = Theme.border
+                }
 
                 ColumnLayout {
                     id: historyCol

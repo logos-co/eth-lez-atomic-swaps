@@ -25,6 +25,19 @@ ScrollView {
         return done
     }
 
+    // Map "in-progress" Rust events to their stepper milestone, so each
+    // step visibly highlights while the corresponding work is happening.
+    function stepFor(rawStep) {
+        if (rawStep === "LockingEth")
+            return "EthLocked"
+        if (rawStep === "WaitingForLezLock" || rawStep === "")
+            return "LezLockDetected"
+        if (rawStep === "VerifyingLezEscrow" || rawStep === "LezEscrowVerified" || rawStep === "ClaimingLez")
+            return "LezClaimed"
+        return rawStep
+    }
+    property string displayCurrentStep: stepFor(swapBackend.currentStep)
+
     property var discoveredOffers: []
     property bool fetching: false
     property var pendingOffer: null
@@ -394,7 +407,7 @@ ScrollView {
                         margins: Theme.spacingNormal
                     }
                     steps: takerSteps
-                    currentStep: swapBackend.currentStep
+                    currentStep: takerRoot.displayCurrentStep
                     completedSteps: takerRoot.completedSteps
                 }
             }

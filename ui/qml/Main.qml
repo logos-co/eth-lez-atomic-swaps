@@ -244,10 +244,10 @@ ApplicationWindow {
                 anchors.rightMargin: Theme.spacingNormal
 
                 Text {
-                    text: swapBackend.running
-                          ? parent.parent.humanStep(swapBackend.currentStep)
+                    text: (swapBackend.running || swapBackend.autoAcceptRunning)
+                          ? parent.parent.humanStep(swapBackend.currentStep || "WaitingForEthLock")
                           : "Idle"
-                    color: swapBackend.running ? Theme.warning : Theme.textMuted
+                    color: (swapBackend.running || swapBackend.autoAcceptRunning) ? Theme.warning : Theme.textMuted
                     font.pixelSize: Theme.fontSmall
                 }
                 Item { Layout.fillWidth: true }

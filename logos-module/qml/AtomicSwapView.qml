@@ -233,13 +233,13 @@ Item {
                     text: {
                         var hs = parent.parent.humanStep
                         var parts = []
-                        if (swapBackend.makerRunning)
-                            parts.push("Maker: " + hs(swapBackend.makerCurrentStep || "..."))
+                        if (swapBackend.makerRunning || swapBackend.autoAcceptRunning)
+                            parts.push("Maker: " + hs(swapBackend.makerCurrentStep || "WaitingForEthLock"))
                         if (swapBackend.takerRunning)
                             parts.push("Taker: " + hs(swapBackend.takerCurrentStep || "..."))
                         return parts.length > 0 ? parts.join(" | ") : "Idle"
                     }
-                    color: swapBackend.running ? Theme.warning : Theme.textMuted
+                    color: (swapBackend.running || swapBackend.autoAcceptRunning) ? Theme.warning : Theme.textMuted
                     font.pixelSize: Theme.fontSmall
                 }
                 Item { Layout.fillWidth: true }

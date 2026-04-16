@@ -25,6 +25,21 @@ ScrollView {
         return done
     }
 
+    // Map "in-progress" Rust events to their stepper milestone, so each
+    // step visibly highlights while the corresponding work is happening.
+    // Without this, step 4 ("Claim LEZ") appears to skip — claim runs in
+    // 5-10s but the stepper only updates when LezClaimed lands.
+    function stepFor(rawStep) {
+        if (rawStep === "LockingEth")
+            return "EthLocked"
+        if (rawStep === "WaitingForLezLock" || rawStep === "")
+            return "LezLockDetected"
+        if (rawStep === "VerifyingLezEscrow" || rawStep === "LezEscrowVerified" || rawStep === "ClaimingLez")
+            return "LezClaimed"
+        return rawStep
+    }
+    property string displayCurrentStep: stepFor(swapBackend.takerCurrentStep)
+
     property var discoveredOffers: []
     property bool fetching: false
     property var pendingOffer: null
@@ -394,7 +409,7 @@ ScrollView {
                         margins: Theme.spacingNormal
                     }
                     steps: takerSteps
-                    currentStep: swapBackend.takerCurrentStep
+                    currentStep: takerRoot.displayCurrentStep
                     completedSteps: takerRoot.completedSteps
                 }
             }
