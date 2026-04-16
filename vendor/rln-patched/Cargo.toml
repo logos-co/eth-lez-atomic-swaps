@@ -1,0 +1,12 @@
+[package]
+name = "rln"
+# Match the upstream rln 0.3.4 version that waku-bindings depends on,
+# so cargo's [patch.crates-io] in the workspace root replaces the real
+# rln with this stub.
+version = "0.3.4"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Empty stub for rln. We don't enable RLN in libwaku, so its symbols are never referenced. See ../../delivery-dogfooding.md."
+
+[lib]
+crate-type = ["rlib", "staticlib"]

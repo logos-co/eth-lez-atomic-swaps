@@ -63,6 +63,12 @@ borsh = "1.5"
 # Messaging (Logos delivery — embedded waku node via libwaku FFI)
 waku-bindings = { git = "https://github.com/logos-messaging/logos-delivery-rust-bindings", rev = "95040402feae4ebc3038d66e1168390669bd6942" }
 multiaddr = "0.17"
+secp256k1 = { version = "0.26", features = ["rand"] }
+# Pin rln to exactly 0.3.4 so cargo applies the [patch.crates-io] entry below
+# (which only matches version 0.3.4). Without this pin, cargo selects rln 0.3.5+
+# from crates.io and the patch is silently ignored. We don't use rln directly —
+# this dep exists solely to anchor the version for the patch.
+rln = "=0.3.4"
 
 # Demo-only dependencies (behind `demo` feature flag)
 lez_htlc_methods = { path = "programs/lez-htlc/methods", optional = true }
@@ -88,3 +94,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 
 lez_htlc_methods = { path = "programs/lez-htlc/methods" }
 serial_test = "3"
+
+# rln 0.3.4 (transitive dep of waku-bindings) pins ark-serialize =0.4.1
+# exactly, which conflicts with our LEZ deps' ark-serialize ^0.4.2.
+# Locally vendored copy of rln 0.3.4 with that one constraint relaxed to
+# ark-serialize ^0.4. See delivery-dogfooding.md.
+[patch.crates-io]
+# rln is vendored as an empty stub — see vendor/rln-patched/src/lib.rs.
+rln = { path = "vendor/rln-patched" }
+# core2 0.4.0 is yanked but still required by multihash 0.17 (transitive
+# dep of multiaddr 0.17 from waku-bindings). Vendored locally to bypass
+# cargo's yanked-version refusal during fresh resolves.
+core2 = { path = "vendor/core2-vendored" }
