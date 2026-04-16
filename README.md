@@ -194,6 +194,11 @@ swap-cli infra                          # start Anvil + LEZ sequencer + nwaku, d
 swap-cli demo                           # run full swap headlessly (maker + taker)
 ```
 
+## Documentation
+
+- [FURPS+](FURPS.md) — Functional and non-functional requirements (v0.1, v0.2)
+- [ADR](ADR.md) — Architecture Decision Records (v0.1, v0.2)
+
 ## Design Notes
 
 - **SHA-256 hashlock** (not keccak) — cross-chain compatibility with LEZ's `risc0_zkvm::sha`
