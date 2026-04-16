@@ -9,11 +9,13 @@ use alloy::{
     sol,
 };
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
+use common::transaction::NSSATransaction;
 use nssa::{
     AccountId,
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
+use sequencer_service_rpc::RpcClient as _;
 use sha2::{Digest, Sha256};
 use swap_orchestrator::{
     config::{LezAuth, SwapConfig},
@@ -86,7 +88,7 @@ impl TestEnv {
         // Deploy LEZ HTLC program.
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
-        wc.sequencer_client.send_tx_program(tx).await.unwrap();
+        wc.sequencer_client.send_transaction(NSSATransaction::ProgramDeployment(tx)).await.unwrap();
         tokio::time::sleep(BLOCK_WAIT).await;
 
         Self {
@@ -177,7 +179,7 @@ async fn test_atomic_swap_happy_path() {
     let maker_handle = tokio::spawn(async move {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None).await
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None).await
     });
 
     // Brief pause so maker's ETH watcher is ready before taker locks.
@@ -239,7 +241,7 @@ async fn test_maker_refunds_on_timeout() {
     let outcome = {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None).await.unwrap()
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None).await.unwrap()
     };
 
     // Maker should return Refunded with no txs (never locked anything).
