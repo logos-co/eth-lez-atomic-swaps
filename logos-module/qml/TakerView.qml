@@ -92,8 +92,22 @@ ScrollView {
                 function onOffersFetched(offersJson) {
                     takerRoot.fetching = false
                     var obj = JSON.parse(offersJson)
-                    if (obj.offers)
-                        takerRoot.discoveredOffers = obj.offers
+                    if (obj.offers && obj.offers.length > 0) {
+                        // Merge new offers with existing (relay drains are destructive)
+                        var merged = takerRoot.discoveredOffers.slice()
+                        var seen = {}
+                        for (var i = 0; i < merged.length; i++)
+                            seen[merged[i].maker_eth_address + ":" + merged[i].lez_amount + ":" + merged[i].eth_amount] = true
+                        for (var j = 0; j < obj.offers.length; j++) {
+                            var o = obj.offers[j]
+                            var key = o.maker_eth_address + ":" + o.lez_amount + ":" + o.eth_amount
+                            if (!seen[key]) {
+                                merged.push(o)
+                                seen[key] = true
+                            }
+                        }
+                        takerRoot.discoveredOffers = merged
+                    }
                 }
                 function onTakerRunningChanged() {
                     if (!swapBackend.takerRunning && takerRoot.acceptedOffer !== null) {
