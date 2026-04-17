@@ -11,7 +11,8 @@
 //! runtime + bound TCP port. See `delivery-dogfooding.md` entry #3.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use multiaddr::Multiaddr;
 use serde::{de::DeserializeOwned, Serialize};
@@ -39,6 +40,8 @@ pub struct MessagingClient {
     /// Has [`Self::subscribe`] already issued the underlying
     /// `relay_subscribe`? Idempotent across multiple subscribe() calls.
     subscribed: Mutex<bool>,
+    /// Live peer count updated by `ConnectionChange` events.
+    peer_count: Arc<AtomicUsize>,
 }
 
 // SAFETY: WakuNodeHandle wraps a raw `*mut c_void` so it's not auto-Send/Sync,
@@ -73,13 +76,20 @@ impl MessagingClient {
     /// Spawn an embedded node, dial bootstrap peers, and return a
     /// ready-to-use client. Drive [`Self::shutdown`] before drop.
     pub async fn spawn(cfg: MessagingNodeConfig) -> Result<Self> {
-        let NodeBundle { node, inbound } = spawn_node(cfg).await?;
+        let NodeBundle { node, inbound, peer_count } = spawn_node(cfg).await?;
         Ok(Self {
             node,
             inbound: AsyncMutex::new(inbound),
             mailboxes: Mutex::new(HashMap::new()),
             subscribed: Mutex::new(false),
+            peer_count,
         })
+    }
+
+    /// Number of currently connected peers (updated live by
+    /// `ConnectionChange` events from the libwaku callback).
+    pub fn peer_count(&self) -> usize {
+        self.peer_count.load(Ordering::Relaxed)
     }
 
     /// Dial an additional peer after construction (e.g. discovered later).

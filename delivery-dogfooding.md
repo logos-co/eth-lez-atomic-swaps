@@ -377,5 +377,27 @@ init/shutdown lifecycle, is `Send + Sync`, exposes connectivity state,
 and supports sharing across threads would drastically simplify
 embedding. Or address #13 upstream so a single shared node works.
 
+## 19. Peer status APIs exist in libwaku but aren't wrapped by `waku-bindings`
+
+**What:** `libwaku.h` exposes `waku_relay_get_num_connected_peers`,
+`waku_relay_get_num_peers_in_mesh`, `waku_get_connected_peers`,
+`waku_ping_peer`, and `waku_get_my_peerid`. None of these have Rust
+wrappers in `waku-bindings`. We needed connectivity status for the UI
+(show "Connecting..." vs "N peers") and had to track it ourselves via
+`ConnectionChange` callback events and an `AtomicUsize` counter.
+
+**Where:** `waku-sys/vendor/library/libwaku.h` — functions are
+available at the C FFI level but not in `waku-bindings/src/node/`.
+
+**Workaround:** Track `ConnectionChange` events (peer_event =
+"Joined"/"Left") in the `set_event_callback` closure, maintain an
+`AtomicUsize` peer counter, expose it via FFI, poll from the UI
+every 2 seconds.
+
+**Suggested fix:** Wrap the existing `libwaku.h` peer status functions
+in `waku-bindings`. At minimum: `get_num_connected_peers(pubsub_topic)`
+and `get_num_peers_in_mesh(pubsub_topic)`. This would give consumers
+on-demand connectivity status without maintaining their own counters.
+
 ---
 (Append new entries below as we hit them.)

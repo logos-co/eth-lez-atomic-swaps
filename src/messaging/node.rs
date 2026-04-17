@@ -11,6 +11,8 @@
 
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use multiaddr::Multiaddr;
 use secp256k1::{rand::thread_rng, SecretKey};
@@ -61,6 +63,9 @@ impl MessagingNodeConfig {
 pub struct NodeBundle {
     pub node: WakuNodeHandle<Running>,
     pub inbound: UnboundedReceiver<WakuMessage>,
+    /// Live peer count updated by `ConnectionChange` events from the
+    /// libwaku callback. Readable from any thread via `Relaxed` load.
+    pub peer_count: Arc<AtomicUsize>,
 }
 
 /// Spawn a node, register the event callback, start it, and dial any
@@ -97,7 +102,8 @@ pub async fn spawn_node(cfg: MessagingNodeConfig) -> Result<NodeBundle> {
         .map_err(|e| SwapError::Messaging(format!("waku_new failed: {e}")))?;
 
     let (tx, rx) = mpsc::unbounded_channel::<WakuMessage>();
-    register_callback(&node, tx)?;
+    let peer_count = Arc::new(AtomicUsize::new(0));
+    register_callback(&node, tx, Arc::clone(&peer_count))?;
 
     let node = node
         .start()
@@ -114,25 +120,34 @@ pub async fn spawn_node(cfg: MessagingNodeConfig) -> Result<NodeBundle> {
             .map_err(|e| SwapError::Messaging(format!("connect to {addr} failed: {e}")))?;
     }
 
-    Ok(NodeBundle { node, inbound: rx })
+    Ok(NodeBundle { node, inbound: rx, peer_count })
 }
 
 fn register_callback(
     node: &WakuNodeHandle<waku_bindings::Initialized>,
     tx: UnboundedSender<WakuMessage>,
+    peer_count: Arc<AtomicUsize>,
 ) -> Result<()> {
     node.set_event_callback(move |response| {
         // Runs on a Nim thread — must NOT block or .await.
         if let LibwakuResponse::Success(Some(json)) = response {
             match serde_json::from_str::<WakuEvent>(&json) {
                 Ok(WakuEvent::WakuMessage(evt)) => {
-                    // Non-blocking send; receiver is unbounded so this never errors
-                    // unless the receiver is dropped (which means client shutdown).
                     let _ = tx.send(evt.waku_message);
                 }
-                Ok(WakuEvent::ConnectionChange(_)) | Ok(WakuEvent::RelayTopicHealthChange(_)) => {
-                    // Ignored for now.
+                Ok(WakuEvent::ConnectionChange(evt)) => {
+                    if evt.peer_event == "Joined" {
+                        peer_count.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        // Saturating sub: avoid underflow on spurious Leave events.
+                        let _ = peer_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                            if n > 0 { Some(n - 1) } else { None }
+                        });
+                    }
+                    debug!(peer_id = %evt.peer_id, event = %evt.peer_event,
+                           peers = peer_count.load(Ordering::Relaxed), "connection change");
                 }
+                Ok(WakuEvent::RelayTopicHealthChange(_)) => {}
                 Ok(WakuEvent::Unrecognized(v)) => {
                     warn!(?v, "unrecognized waku event");
                 }

@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include "swap_ffi.h"
 
 extern "C" void progressCallbackTrampoline(const char *json, void *userData);
@@ -46,6 +47,10 @@ class SwapBackend : public QObject
     Q_PROPERTY(QString currentStep READ currentStep NOTIFY currentStepChanged)
     Q_PROPERTY(QStringList progressSteps READ progressSteps NOTIFY progressStepsChanged)
     Q_PROPERTY(QString resultJson READ resultJson NOTIFY resultJsonChanged)
+
+    // Messaging status
+    Q_PROPERTY(bool messagingConnected READ messagingConnected NOTIFY messagingStatusChanged)
+    Q_PROPERTY(int messagingPeerCount READ messagingPeerCount NOTIFY messagingStatusChanged)
 
     // Auto-accept state
     Q_PROPERTY(bool autoAcceptRunning READ autoAcceptRunning NOTIFY autoAcceptRunningChanged)
@@ -109,6 +114,10 @@ public:
     QStringList progressSteps() const { return m_progressSteps; }
     QString resultJson() const { return m_resultJson; }
 
+    // Messaging
+    bool messagingConnected() const { return m_messagingConnected; }
+    int messagingPeerCount() const { return m_messagingPeerCount; }
+
     // Auto-accept getters
     bool autoAcceptRunning() const { return m_autoAcceptRunning; }
     int autoAcceptCompleted() const { return m_autoAcceptCompleted; }
@@ -155,6 +164,8 @@ signals:
     void progressStepsChanged();
     void resultJsonChanged();
 
+    void messagingStatusChanged();
+
     void autoAcceptRunningChanged();
     void autoAcceptCompletedChanged();
     void autoAcceptFailedChanged();
@@ -174,6 +185,7 @@ private:
 
     void handleProgress(const QString &json);
     void initMessaging();
+    void pollMessagingStatus();
 
     // Role
     QString m_swapRole;
@@ -208,6 +220,11 @@ private:
     QStringList m_progressSteps;
     QString m_resultJson;
     QString m_publishedPreimage;
+
+    // Messaging status
+    bool m_messagingConnected = false;
+    int m_messagingPeerCount = 0;
+    QTimer *m_messagingPollTimer = nullptr;
 
     // Auto-accept state
     bool m_autoAcceptRunning = false;

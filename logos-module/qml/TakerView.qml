@@ -122,7 +122,7 @@ ScrollView {
             Button {
                 visible: !swapBackend.takerRunning && !takerRoot.swapCompleted
                 text: fetching ? "Fetching..." : "Discover Offers"
-                enabled: !fetching && !swapBackend.takerRunning
+                enabled: !fetching && !swapBackend.takerRunning && swapBackend.messagingConnected
                 Layout.fillWidth: true
                 Layout.preferredHeight: 42
                 font.pixelSize: Theme.fontNormal
@@ -234,9 +234,17 @@ ScrollView {
                 }
             }
 
+            // Connecting hint
+            Text {
+                visible: !swapBackend.messagingConnected && swapBackend.wakuBootstrapMultiaddr !== "" && !swapBackend.takerRunning && !takerRoot.swapCompleted
+                text: "Connecting to messaging network..."
+                color: Theme.warning
+                font.pixelSize: Theme.fontSmall
+            }
+
             // No offers message
             Text {
-                visible: discoveredOffers.length === 0 && !fetching && !swapBackend.takerRunning && !takerRoot.swapCompleted && takerRoot.pendingOffer === null
+                visible: discoveredOffers.length === 0 && !fetching && !swapBackend.takerRunning && !takerRoot.swapCompleted && takerRoot.pendingOffer === null && swapBackend.messagingConnected
                 text: "No offers found. Click \"Discover Offers\" to search."
                 color: Theme.textMuted
                 font.pixelSize: Theme.fontSmall

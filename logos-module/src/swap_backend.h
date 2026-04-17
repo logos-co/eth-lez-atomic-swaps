@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QThreadPool>
+#include <QTimer>
 #include "swap_ffi.h"
 
 class SwapBackend;
@@ -67,6 +68,10 @@ class SwapBackend : public QObject
     Q_PROPERTY(int autoAcceptFailed READ autoAcceptFailed NOTIFY autoAcceptFailedChanged)
     Q_PROPERTY(int autoAcceptIteration READ autoAcceptIteration NOTIFY autoAcceptIterationChanged)
     Q_PROPERTY(QStringList swapHistory READ swapHistory NOTIFY swapHistoryChanged)
+
+    // Messaging status
+    Q_PROPERTY(bool messagingConnected READ messagingConnected NOTIFY messagingStatusChanged)
+    Q_PROPERTY(int messagingPeerCount READ messagingPeerCount NOTIFY messagingStatusChanged)
 
     // Combined running (for status bar / config panel)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
@@ -139,6 +144,10 @@ public:
     int autoAcceptIteration() const { return m_autoAcceptIteration; }
     QStringList swapHistory() const { return m_swapHistory; }
 
+    // Messaging
+    bool messagingConnected() const { return m_messagingConnected; }
+    int messagingPeerCount() const { return m_messagingPeerCount; }
+
     // Combined
     bool running() const { return m_makerRunning || m_takerRunning || m_autoAcceptRunning; }
 
@@ -195,6 +204,8 @@ signals:
     void autoAcceptIterationChanged();
     void swapHistoryChanged();
 
+    void messagingStatusChanged();
+
     void offerPublished(const QString &resultJson);
     void offersFetched(const QString &offersJson);
 
@@ -217,6 +228,7 @@ private:
 
     void handleProgress(const QString &json, bool isMaker);
     void initMessaging();
+    void pollMessagingStatus();
 
     // Dedicated thread pool (not global)
     QThreadPool *m_threadPool;
@@ -278,6 +290,11 @@ private:
     QString m_lastEthTx;
     QString m_lastLezTx;
     QFutureWatcher<QString> m_autoAcceptWatcher;
+
+    // Messaging status
+    bool m_messagingConnected = false;
+    int m_messagingPeerCount = 0;
+    QTimer *m_messagingPollTimer = nullptr;
 
     // Progress callback contexts (stable pointers for FFI)
     ProgressContext m_makerProgressCtx;

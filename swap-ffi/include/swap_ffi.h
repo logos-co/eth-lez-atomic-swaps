@@ -31,6 +31,8 @@ char *swap_ffi_messaging_init(const char *config_json);
 
 char *swap_ffi_messaging_shutdown(void);
 
+char *swap_ffi_messaging_status(void);
+
 char *swap_ffi_publish_offer(const char *config_json);
 
 char *swap_ffi_fetch_offers(void);

@@ -252,6 +252,20 @@ ApplicationWindow {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
+                    visible: swapBackend.wakuBootstrapMultiaddr !== ""
+                    text: swapBackend.messagingConnected
+                          ? swapBackend.messagingPeerCount + " peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                          : "Connecting..."
+                    color: swapBackend.messagingConnected ? Theme.success : Theme.warning
+                    font.pixelSize: Theme.fontSmall
+                }
+                Text {
+                    visible: swapBackend.wakuBootstrapMultiaddr !== ""
+                    text: swapBackend.messagingConnected ? " \u25CF " : " \u25CB "
+                    color: swapBackend.messagingConnected ? Theme.success : Theme.warning
+                    font.pixelSize: Theme.fontSmall
+                }
+                Text {
                     text: "Atomic Swaps PoC"
                     color: Theme.textMuted
                     font.pixelSize: Theme.fontSmall

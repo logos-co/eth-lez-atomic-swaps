@@ -571,6 +571,23 @@ pub unsafe extern "C" fn swap_ffi_messaging_shutdown() -> *mut c_char {
     })
 }
 
+/// Query the embedded messaging client's connection status.
+/// Returns JSON: `{"connected": bool, "peer_count": N}`.
+/// If messaging hasn't been initialized, returns `connected: false, peer_count: 0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_messaging_status() -> *mut c_char {
+    let messaging = match messaging_slot().lock().unwrap().clone() {
+        Some(m) => m,
+        None => return to_c_string(r#"{"connected":false,"peer_count":0}"#),
+    };
+    let pc = messaging.peer_count();
+    let result = serde_json::json!({
+        "connected": pc > 0,
+        "peer_count": pc,
+    });
+    to_c_string(&result.to_string())
+}
+
 /// Publish a standing swap offer via the embedded messaging client.
 ///
 /// In taker-locks-first, the maker publishes an offer without a hashlock.

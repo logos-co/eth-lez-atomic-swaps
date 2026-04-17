@@ -78,6 +78,8 @@ SwapBackend::SwapBackend(QThreadPool *pool, QObject *parent)
 
 SwapBackend::~SwapBackend()
 {
+    if (m_messagingPollTimer)
+        m_messagingPollTimer->stop();
     m_balanceWatcher.waitForFinished();
     m_makerWatcher.waitForFinished();
     m_takerWatcher.waitForFinished();
@@ -586,4 +588,24 @@ void SwapBackend::initMessaging()
     obj["listen_port"] = 0;
     ffiToQString(swap_ffi_messaging_init(
         QJsonDocument(obj).toJson(QJsonDocument::Compact).constData()));
+
+    m_messagingPollTimer = new QTimer(this);
+    connect(m_messagingPollTimer, &QTimer::timeout, this, &SwapBackend::pollMessagingStatus);
+    m_messagingPollTimer->start(2000);
+    pollMessagingStatus();
+}
+
+void SwapBackend::pollMessagingStatus()
+{
+    auto *result = swap_ffi_messaging_status();
+    auto json = ffiToQString(result);
+    auto doc = QJsonDocument::fromJson(json.toUtf8());
+    auto obj = doc.object();
+    bool connected = obj["connected"].toBool();
+    int peers = obj["peer_count"].toInt();
+    if (m_messagingConnected != connected || m_messagingPeerCount != peers) {
+        m_messagingConnected = connected;
+        m_messagingPeerCount = peers;
+        emit messagingStatusChanged();
+    }
 }
