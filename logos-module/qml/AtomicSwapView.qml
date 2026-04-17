@@ -233,7 +233,7 @@ Item {
                     text: {
                         var hs = parent.parent.humanStep
                         var parts = []
-                        if (swapBackend.makerRunning)
+                        if (swapBackend.makerRunning || swapBackend.autoAcceptRunning)
                             parts.push("Maker: " + hs(swapBackend.makerCurrentStep || "..."))
                         if (swapBackend.takerRunning)
                             parts.push("Taker: " + hs(swapBackend.takerCurrentStep || "..."))
