@@ -84,6 +84,7 @@ SwapBackend::~SwapBackend()
     m_autoAcceptWatcher.waitForFinished();
     m_publishWatcher.waitForFinished();
     m_fetchWatcher.waitForFinished();
+    ffiToQString(swap_ffi_messaging_shutdown());
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +111,7 @@ SETTER(EthTimelockMinutes, m_ethTimelockMinutes, ethTimelockMinutesChanged)
 SETTER(EthRecipientAddress, m_ethRecipientAddress, ethRecipientAddressChanged)
 SETTER(LezTakerAccountId, m_lezTakerAccountId, lezTakerAccountIdChanged)
 SETTER(PollIntervalMs, m_pollIntervalMs, pollIntervalMsChanged)
-SETTER(NwakuUrl, m_nwakuUrl, nwakuUrlChanged)
+SETTER(WakuBootstrapMultiaddr, m_wakuBootstrapMultiaddr, wakuBootstrapMultiaddrChanged)
 
 #undef SETTER
 
@@ -225,7 +226,8 @@ QByteArray SwapBackend::configJson() const
     obj["eth_recipient_address"] = m_ethRecipientAddress;
     obj["lez_taker_account_id"] = m_lezTakerAccountId;
     obj["poll_interval_ms"] = m_pollIntervalMs;
-    obj["nwaku_url"] = m_nwakuUrl;
+    if (!m_wakuBootstrapMultiaddr.isEmpty())
+        obj["waku_bootstrap_multiaddr"] = m_wakuBootstrapMultiaddr;
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -261,8 +263,9 @@ void SwapBackend::loadEnv()
     setEthRecipientAddress(env("ETH_RECIPIENT_ADDRESS"));
     setLezTakerAccountId(env("LEZ_TAKER_ACCOUNT_ID"));
     setPollIntervalMs(env("POLL_INTERVAL_MS", "2000"));
-    setNwakuUrl(env("NWAKU_URL"));
+    setWakuBootstrapMultiaddr(env("WAKU_BOOTSTRAP_MULTIADDR"));
 
+    initMessaging();
     fetchBalances();
 }
 
@@ -295,8 +298,9 @@ void SwapBackend::loadConfig(const QJsonObject &config)
     setEthRecipientAddress(val("eth_recipient_address"));
     setLezTakerAccountId(val("lez_taker_account_id"));
     setPollIntervalMs(val("poll_interval_ms", "2000"));
-    setNwakuUrl(val("nwaku_url"));
+    setWakuBootstrapMultiaddr(val("waku_bootstrap_multiaddr"));
 
+    initMessaging();
     fetchBalances();
 }
 
@@ -513,14 +517,10 @@ void SwapBackend::stopAutoAccept()
 
 void SwapBackend::publishOffer()
 {
-    if (m_nwakuUrl.isEmpty())
-        return;
-
     QByteArray cfg = configJson();
-    QByteArray url = m_nwakuUrl.toUtf8();
 
-    auto future = QtConcurrent::run(m_threadPool, [cfg, url]() -> QString {
-        auto *result = swap_ffi_publish_offer(cfg.constData(), url.constData());
+    auto future = QtConcurrent::run(m_threadPool, [cfg]() -> QString {
+        auto *result = swap_ffi_publish_offer(cfg.constData());
         return ffiToQString(result);
     });
 
@@ -529,13 +529,8 @@ void SwapBackend::publishOffer()
 
 void SwapBackend::fetchOffers()
 {
-    if (m_nwakuUrl.isEmpty())
-        return;
-
-    QByteArray url = m_nwakuUrl.toUtf8();
-
-    auto future = QtConcurrent::run(m_threadPool, [url]() -> QString {
-        auto *result = swap_ffi_fetch_offers(url.constData());
+    auto future = QtConcurrent::run(m_threadPool, []() -> QString {
+        auto *result = swap_ffi_fetch_offers();
         return ffiToQString(result);
     });
 
@@ -576,4 +571,19 @@ void SwapBackend::refundEth(const QString &swapIdHex)
     });
 
     m_takerWatcher.setFuture(future);
+}
+
+// ---------------------------------------------------------------------------
+// Messaging lifecycle
+// ---------------------------------------------------------------------------
+
+void SwapBackend::initMessaging()
+{
+    if (m_wakuBootstrapMultiaddr.isEmpty())
+        return;
+    QJsonObject obj;
+    obj["bootstrap_multiaddr"] = m_wakuBootstrapMultiaddr;
+    obj["listen_port"] = 0;
+    ffiToQString(swap_ffi_messaging_init(
+        QJsonDocument(obj).toJson(QJsonDocument::Compact).constData()));
 }

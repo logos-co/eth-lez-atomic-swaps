@@ -30,7 +30,7 @@ class SwapBackend : public QObject
     Q_PROPERTY(QString ethRecipientAddress READ ethRecipientAddress WRITE setEthRecipientAddress NOTIFY ethRecipientAddressChanged)
     Q_PROPERTY(QString lezTakerAccountId READ lezTakerAccountId WRITE setLezTakerAccountId NOTIFY lezTakerAccountIdChanged)
     Q_PROPERTY(QString pollIntervalMs READ pollIntervalMs WRITE setPollIntervalMs NOTIFY pollIntervalMsChanged)
-    Q_PROPERTY(QString nwakuUrl READ nwakuUrl WRITE setNwakuUrl NOTIFY nwakuUrlChanged)
+    Q_PROPERTY(QString wakuBootstrapMultiaddr READ wakuBootstrapMultiaddr WRITE setWakuBootstrapMultiaddr NOTIFY wakuBootstrapMultiaddrChanged)
 
     // Role (maker / taker — set via SWAP_ROLE env var)
     Q_PROPERTY(QString swapRole READ swapRole CONSTANT)
@@ -83,7 +83,7 @@ public:
     QString ethRecipientAddress() const { return m_ethRecipientAddress; }
     QString lezTakerAccountId() const { return m_lezTakerAccountId; }
     QString pollIntervalMs() const { return m_pollIntervalMs; }
-    QString nwakuUrl() const { return m_nwakuUrl; }
+    QString wakuBootstrapMultiaddr() const { return m_wakuBootstrapMultiaddr; }
 
     // Config setters
     void setEthRpcUrl(const QString &v);
@@ -101,7 +101,7 @@ public:
     void setEthRecipientAddress(const QString &v);
     void setLezTakerAccountId(const QString &v);
     void setPollIntervalMs(const QString &v);
-    void setNwakuUrl(const QString &v);
+    void setWakuBootstrapMultiaddr(const QString &v);
 
     // State getters
     bool running() const { return m_running || m_autoAcceptRunning; }
@@ -143,7 +143,7 @@ signals:
     void ethRecipientAddressChanged();
     void lezTakerAccountIdChanged();
     void pollIntervalMsChanged();
-    void nwakuUrlChanged();
+    void wakuBootstrapMultiaddrChanged();
 
     void ethAddressChanged();
     void ethBalanceChanged();
@@ -173,6 +173,7 @@ private:
     void setResultJson(const QString &v);
 
     void handleProgress(const QString &json);
+    void initMessaging();
 
     // Role
     QString m_swapRole;
@@ -193,7 +194,7 @@ private:
     QString m_ethRecipientAddress;
     QString m_lezTakerAccountId;
     QString m_pollIntervalMs;
-    QString m_nwakuUrl;
+    QString m_wakuBootstrapMultiaddr;
 
     // Balances
     QString m_ethAddress;

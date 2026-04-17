@@ -40,7 +40,9 @@ CIRCUITS_URL := https://github.com/logos-blockchain/logos-blockchain-circuits/re
 export LOGOS_BLOCKCHAIN_CIRCUITS := $(CIRCUITS_DIR)
 
 swap-ffi: circuits
-	cd swap-ffi && cargo build
+	cargo build -p swap-ffi
+	@mkdir -p swap-ffi/target/debug
+	@cp target/debug/libswap_ffi.dylib swap-ffi/target/debug/ 2>/dev/null || true
 
 configure: swap-ffi
 	cmake -B ui/build -S ui -DCMAKE_BUILD_TYPE=Debug

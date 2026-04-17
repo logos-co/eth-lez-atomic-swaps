@@ -156,10 +156,10 @@ ScrollView {
             SectionHeader { label: "Messaging" }
 
             ConfigField {
-                label: "Nwaku URL"
-                text: swapBackend.nwakuUrl
-                onTextEdited: (val) => swapBackend.nwakuUrl = val
-                placeholderText: "http://localhost:8645"
+                label: "Bootstrap Multiaddr"
+                text: swapBackend.wakuBootstrapMultiaddr
+                onTextEdited: (val) => swapBackend.wakuBootstrapMultiaddr = val
+                placeholderText: "/ip4/127.0.0.1/tcp/60010/p2p/..."
                 fieldEnabled: !configRoot.anyRunning
             }
         }

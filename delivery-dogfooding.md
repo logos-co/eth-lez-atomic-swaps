@@ -342,5 +342,40 @@ waku-bindings — but waku-bindings docs could surface it.
 **Suggested fix:** N/A on the bindings side; just a note that
 multi-crate downstream consumers need a real workspace.
 
+## 18. Embedded node lifecycle is burdensome for FFI / UI consumers
+
+**What:** With the old Docker/REST approach, each messaging call was
+stateless — fire an HTTP request, get a response. With embedded nodes,
+UI consumers must manage an explicit lifecycle:
+
+1. Call `init` once (spawn node, dial peers, subscribe) before any
+   messaging call. Forgetting means all calls fail silently.
+2. Call `shutdown` on exit (no `Drop` impl — see #3). Forgetting leaks
+   the Nim runtime + bound TCP port.
+3. Multiple subsystems in the same process (e.g. auto-accept loop +
+   standalone publish/fetch) each need their own node because
+   `WakuNodeHandle` is `!Send + !Sync` (#13), so a single shared node
+   can't be passed across `tokio::spawn` boundaries naturally.
+4. No way to query connectivity state after `connect()`. The
+   `ConnectionChange` and `RelayTopicHealthChange` events exist in the
+   callback but aren't documented or queryable — the UI can't show
+   "connected to N peers" or "mesh healthy" status.
+
+**Where:** Consequence of `waku-bindings`' current API surface — no
+single wrapper type manages the full lifecycle.
+
+**Workaround:**
+- FFI layer (`swap-ffi/src/lib.rs`) exposes `swap_ffi_messaging_init`
+  / `swap_ffi_messaging_shutdown` as explicit lifecycle calls. The Qt
+  UI calls init in `loadEnv()` and shutdown in the destructor.
+- The auto-accept loop spawns its own separate node (two nodes in one
+  process, both dialing the same rendezvous peer). Wasteful but
+  functionally correct since libwaku supports concurrent instances.
+
+**Suggested fix:** A higher-level "managed node" wrapper that handles
+init/shutdown lifecycle, is `Send + Sync`, exposes connectivity state,
+and supports sharing across threads would drastically simplify
+embedding. Or address #13 upstream so a single shared node works.
+
 ---
 (Append new entries below as we hit them.)

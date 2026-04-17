@@ -27,10 +27,13 @@ char *swap_ffi_run_taker(const char *config_json,
                          ProgressCallback cb,
                          void *user_data);
 
-char *swap_ffi_publish_offer(const char *config_json,
-                             const char *nwaku_url);
+char *swap_ffi_messaging_init(const char *config_json);
 
-char *swap_ffi_fetch_offers(const char *nwaku_url);
+char *swap_ffi_messaging_shutdown(void);
+
+char *swap_ffi_publish_offer(const char *config_json);
+
+char *swap_ffi_fetch_offers(void);
 
 char *swap_ffi_refund_lez(const char *config_json,
                           const char *hashlock_hex);
