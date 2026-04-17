@@ -352,14 +352,11 @@ UI consumers must manage an explicit lifecycle:
    messaging call. Forgetting means all calls fail silently.
 2. Call `shutdown` on exit (no `Drop` impl — see #3). Forgetting leaks
    the Nim runtime + bound TCP port.
-3. Multiple subsystems in the same process (e.g. auto-accept loop +
-   standalone publish/fetch) each need their own node because
-   `WakuNodeHandle` is `!Send + !Sync` (#13), so a single shared node
-   can't be passed across `tokio::spawn` boundaries naturally.
-4. No way to query connectivity state after `connect()`. The
+3. No way to query connectivity state after `connect()`. The
    `ConnectionChange` and `RelayTopicHealthChange` events exist in the
    callback but aren't documented or queryable — the UI can't show
-   "connected to N peers" or "mesh healthy" status.
+   "connected to N peers" or "mesh healthy" status without maintaining
+   its own counter (see #19).
 
 **Where:** Consequence of `waku-bindings`' current API surface — no
 single wrapper type manages the full lifecycle.
@@ -368,9 +365,12 @@ single wrapper type manages the full lifecycle.
 - FFI layer (`swap-ffi/src/lib.rs`) exposes `swap_ffi_messaging_init`
   / `swap_ffi_messaging_shutdown` as explicit lifecycle calls. The Qt
   UI calls init in `loadEnv()` and shutdown in the destructor.
-- The auto-accept loop spawns its own separate node (two nodes in one
-  process, both dialing the same rendezvous peer). Wasteful but
-  functionally correct since libwaku supports concurrent instances.
+- A process-wide `Arc<MessagingClient>` singleton is shared across
+  subsystems (the auto-accept loop reuses the UI's singleton instead
+  of spawning a second node). The `!Send + !Sync` constraint (#13) is
+  worked around with `block_in_place` trampolines.
+- Peer count is tracked via `ConnectionChange` callback events and an
+  `AtomicUsize` counter, polled every 2s from a QTimer.
 
 **Suggested fix:** A higher-level "managed node" wrapper that handles
 init/shutdown lifecycle, is `Send + Sync`, exposes connectivity state,
@@ -398,6 +398,47 @@ every 2 seconds.
 in `waku-bindings`. At minimum: `get_num_connected_peers(pubsub_topic)`
 and `get_num_peers_in_mesh(pubsub_topic)`. This would give consumers
 on-demand connectivity status without maintaining their own counters.
+
+## 20. `connect()` is fire-and-forget — returns Ok before connection is established
+
+**What:** `waku_connect` (the C FFI function) returns `RET_OK`
+immediately after dispatching the dial attempt. The Rust wrapper in
+`waku-bindings` treats this as success and returns `Ok(())`. But the
+actual libp2p connection forms asynchronously inside the Nim runtime —
+the peer_manager retries in the background.
+
+This means `MessagingClient::spawn()` returns a "ready" client that
+has **zero connected peers**. Any `publish` immediately after spawn
+fails silently:
+```
+PUBLISH failed — "Message not sent because no peers found."
+```
+
+There is no way to block until the connection is actually established.
+The only signal is a `ConnectionChange` event with
+`peer_event = "Joined"` arriving via the callback some time later
+(typically 1-5 seconds on localhost).
+
+**Where:** `waku-bindings/src/node/peers.rs:19-36` — the `waku_connect`
+wrapper. `waku-bindings/src/general/libwaku_response.rs:35-49` — the
+`handle_no_response` handler that treats `RET_OK` + no callback as
+success.
+
+**Impact for us:** UI shows "Connecting..." for several seconds after
+startup even on localhost. If the user triggers messaging actions
+before the connection forms, they silently fail. We had to add a
+connectivity status indicator and gate UI actions on `peer_count > 0`.
+
+**Workaround:** Track `ConnectionChange` events (see #19), show
+connection status in the UI, disable messaging actions until
+`peer_count > 0`. The auto-accept maker loop reuses the UI's
+already-connected singleton node to avoid a second connection delay.
+
+**Suggested fix:** Either make `waku_connect` block until the
+connection is established (or return an error on failure), or document
+it as fire-and-forget and provide a `waku_wait_for_peers(n, timeout)`
+helper. Alternatively, expose `waku_relay_get_num_peers_in_mesh` (#19)
+so callers can poll until the mesh forms.
 
 ---
 (Append new entries below as we hit them.)
