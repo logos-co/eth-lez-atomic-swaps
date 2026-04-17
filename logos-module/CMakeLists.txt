@@ -15,14 +15,7 @@ if(APPLE AND NOT CMAKE_OSX_SYSROOT)
     set(CMAKE_OSX_SYSROOT "${_sdk_path}" CACHE PATH "macOS SDK")
 endif()
 
-option(BUILD_PLUGIN     "Build as Logos Core module plugin" OFF)
-option(BUILD_APP_PLUGIN "Build as logos-app IComponent UI plugin" OFF)
-
-find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Concurrent)
-
-if(BUILD_APP_PLUGIN)
-    find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets QuickWidgets)
-endif()
+find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Concurrent Widgets QuickWidgets)
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -62,82 +55,44 @@ set(SHARED_SOURCES
     src/swap_backend.cpp
 )
 
-# --- Build mode ---
-if(BUILD_APP_PLUGIN)
-    # ── logos-app IComponent UI plugin ──
-    # Produces a shared library that logos-app loads as a UI plugin.
-    # Requires logos-cpp-sdk headers and logos-app IComponent.h.
-    qt_add_library(lez_atomic_swap_module SHARED
-        ${SHARED_SOURCES}
-        src/icomponent_adapter.cpp
-    )
-    target_compile_definitions(lez_atomic_swap_module PRIVATE LOGOS_APP_PLUGIN)
+# --- logos-app IComponent UI plugin ---
+# Produces a shared library that logos-app loads as a UI plugin.
+qt_add_library(lez_atomic_swap_module SHARED
+    ${SHARED_SOURCES}
+    src/icomponent_adapter.cpp
+)
+target_compile_definitions(lez_atomic_swap_module PRIVATE LOGOS_APP_PLUGIN)
 
-    # logos-app interface header (IComponent.h)
-    if(NOT LOGOS_APP_INTERFACES_DIR)
-        set(LOGOS_APP_INTERFACES_DIR "" CACHE PATH "Path to logos-app/app/interfaces/")
-    endif()
+# logos-app interface header (IComponent.h)
+if(NOT LOGOS_APP_INTERFACES_DIR)
+    set(LOGOS_APP_INTERFACES_DIR "" CACHE PATH "Path to logos-app/app/interfaces/")
+endif()
 
-    if(LOGOS_APP_INTERFACES_DIR)
-        target_include_directories(lez_atomic_swap_module PRIVATE ${LOGOS_APP_INTERFACES_DIR})
-    endif()
+if(LOGOS_APP_INTERFACES_DIR)
+    target_include_directories(lez_atomic_swap_module PRIVATE ${LOGOS_APP_INTERFACES_DIR})
+endif()
 
-    target_link_libraries(lez_atomic_swap_module PRIVATE
-        Qt6::Widgets
-        Qt6::QuickWidgets
-    )
+target_link_libraries(lez_atomic_swap_module PRIVATE
+    Qt6::Widgets
+    Qt6::QuickWidgets
+)
 
-    # Output: logos-app expects <name>/<name>.dylib in the plugins dir.
-    # Set OUTPUT_NAME so we get lez_atomic_swap.dylib (not liblez_atomic_swap_module.dylib).
+# Output: logos-app expects <name>/<name>.dylib in the plugins dir.
+set_target_properties(lez_atomic_swap_module PROPERTIES
+    OUTPUT_NAME "lez_atomic_swap"
+    PREFIX ""
+)
+
+# RPATH: find libswap_ffi.dylib next to the plugin at runtime
+if(APPLE)
     set_target_properties(lez_atomic_swap_module PROPERTIES
-        OUTPUT_NAME "lez_atomic_swap"
-        PREFIX ""
+        INSTALL_RPATH "@loader_path"
+        BUILD_WITH_INSTALL_RPATH TRUE
     )
-
-    # RPATH: find libswap_ffi.dylib next to the plugin at runtime
-    if(APPLE)
-        set_target_properties(lez_atomic_swap_module PROPERTIES
-            INSTALL_RPATH "@loader_path"
-            BUILD_WITH_INSTALL_RPATH TRUE
-        )
-    else()
-        set_target_properties(lez_atomic_swap_module PROPERTIES
-            INSTALL_RPATH "$ORIGIN"
-            BUILD_WITH_INSTALL_RPATH TRUE
-        )
-    endif()
-
-elseif(BUILD_PLUGIN)
-    # ── Logos Core module plugin ──
-    qt_add_plugin(lez_atomic_swap_module
-        ${SHARED_SOURCES}
-        src/plugin.cpp
-    )
-    target_compile_definitions(lez_atomic_swap_module PRIVATE LOGOS_CORE_PLUGIN)
-
 else()
-    # ── Standalone executable ──
-    qt_add_executable(lez_atomic_swap_module
-        ${SHARED_SOURCES}
-        src/main.cpp
-    )
-
-    if(APPLE)
-        set_target_properties(lez_atomic_swap_module PROPERTIES
-            MACOSX_BUNDLE TRUE
-            INSTALL_RPATH "@executable_path"
-            BUILD_WITH_INSTALL_RPATH TRUE
-        )
-    else()
-        set_target_properties(lez_atomic_swap_module PROPERTIES
-            INSTALL_RPATH "$ORIGIN"
-            BUILD_WITH_INSTALL_RPATH TRUE
-        )
-    endif()
-
-    # Copy dylib next to executable so RPATH finds it.
-    add_custom_command(TARGET lez_atomic_swap_module POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FFI_LIB}" "$<TARGET_FILE_DIR:lez_atomic_swap_module>"
+    set_target_properties(lez_atomic_swap_module PROPERTIES
+        INSTALL_RPATH "$ORIGIN"
+        BUILD_WITH_INSTALL_RPATH TRUE
     )
 endif()
 
@@ -147,7 +102,7 @@ target_include_directories(lez_atomic_swap_module PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
-# --- QML module (shared between all modes) ---
+# --- QML module ---
 # Flatten qml/ subdir paths into the module root so the QML engine
 # resolves types (especially the Theme singleton) correctly (QTP0004).
 set_source_files_properties(qml/Theme.qml             PROPERTIES QT_QML_SINGLETON_TYPE TRUE QT_RESOURCE_ALIAS Theme.qml)

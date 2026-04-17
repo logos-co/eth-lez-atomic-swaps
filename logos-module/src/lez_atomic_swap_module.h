@@ -5,18 +5,11 @@
 #include <QQmlEngine>
 #include <QThreadPool>
 
-#ifdef LOGOS_CORE_PLUGIN
-#include <logos/sdk/plugin_interface.h>
-#endif
-
 #include "i_lez_atomic_swap_module.h"
 
 class SwapBackend;
 
 class LezAtomicSwapModule : public QObject
-#ifdef LOGOS_CORE_PLUGIN
-    , public PluginInterface
-#endif
     , public ILezAtomicSwapModule
 {
     Q_OBJECT

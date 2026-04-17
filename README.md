@@ -14,10 +14,6 @@ Taker                                          Maker
 
 ## Screenshots
 
-**Standalone UI** (maker + taker side-by-side):
-
-![Standalone UI](docs/standalone-ui.gif)
-
 **logos-app plugin:**
 
 | Config | Maker | Taker | Refund |
@@ -74,19 +70,9 @@ make infra                # starts Anvil, LEZ sequencer, embedded waku rendezvou
 
 > **Circuits:** `make setup` downloads `logos-blockchain-circuits` v0.4.2 into `.scaffold/circuits/` and exports `LOGOS_BLOCKCHAIN_CIRCUITS` so it does not touch any pre-existing `~/.logos-blockchain-circuits/` on your machine (which may be pinned to a different version by another Logos install). Every `make` target that builds or runs Rust inherits the env var, so lssa and cargo build scripts both pick up the project-local copy. Bump `CIRCUITS_VERSION` at the top of the `Makefile` when the lssa pin in `scaffold.toml` requires a newer release. Note: upstream does not publish a `macos-x86_64` build, so Intel Macs are unsupported.
 
-### 2. Pick an Interface
+### 2. Launch the UI
 
-Open a new terminal and choose one:
-
-**Standalone UI**
-```bash
-make run-maker            # builds FFI bridge + UI on first run, opens maker UI
-make run-taker            # opens taker UI (in another terminal)
-```
-
-**logos-app plugin**
-
-Runs inside [logos-app](https://github.com/logos-co/logos-app) as an IComponent plugin. Requires Nix (for building logos-app) and the logos-app Qt 6.9 libraries (the plugin must link against the same Qt that logos-app ships).
+Open a new terminal. The UI runs inside [logos-app](https://github.com/logos-co/logos-app) as an IComponent plugin. Requires Nix (for building logos-app) and the logos-app Qt 6.9 libraries (the plugin must link against the same Qt that logos-app ships).
 
 <details><summary><b>First-time logos-app setup</b></summary>
 
@@ -142,10 +128,9 @@ Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded
 ## Architecture
 
 ```
-┌──────────────────┬──────────────────┐
-│  Qt6 UI (ui/)    │ logos-app plugin  │
-│  standalone app  │ (logos-module/)   │
-├──────────────────┴──────────────────┤
+┌─────────────────────────────────────┐
+│  logos-app plugin (logos-module/)    │
+├─────────────────────────────────────┤
 │       swap-ffi (C bridge / cdylib)  │
 ├─────────────────────────────────────┤
 │      Swap orchestration library     │
@@ -162,8 +147,7 @@ Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded
 | `programs/lez-htlc/` | LEZ HTLC program (Risc0 zkVM) — same logic, escrow in PDA |
 | `src/` | Orchestration library — ETH/LEZ clients, watchers, messaging, scaffold integration, maker/taker/refund flows |
 | `swap-ffi/` | C FFI bridge exposing swap functions to the Qt6 UI |
-| `ui/` | Qt6/QML standalone app — Config, Maker, Taker, Refund tabs |
-| `logos-module/` | logos-app IComponent plugin + standalone app (same UI, two build modes) |
+| `logos-module/` | logos-app IComponent plugin (Qt6/QML UI) |
 | `tests/` | Integration tests |
 
 ## Commands
@@ -172,18 +156,12 @@ Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded
 |---|---|
 | `make setup` | One-time scaffold wallet setup (creates `.scaffold/wallet`) |
 | `make infra` | Start Anvil, LEZ localnet, embedded waku rendezvous node; deploy HTLCs on both chains; write `.env` files |
-| `make configure` | Build the Rust FFI bridge + run cmake configure for the Qt6 standalone app |
-| `make build` | Build the Qt6 standalone UI |
-| `make run-maker` / `run-taker` | Launch the standalone maker/taker UI (loads `.env` / `.env.taker`) |
 | `make demo` | Run the full swap headlessly — no UI needed |
 | `make test` | Build contracts, start localnet, run all tests, stop localnet |
 | `make contracts` | Build Solidity contracts via Foundry |
 | `make localnet-start` / `localnet-stop` | Start/stop LEZ localnet via `logos-scaffold` |
 | `make plugin-build` | Build the Rust FFI bridge + IComponent plugin for logos-app |
 | `make plugin-run-maker` / `plugin-run-taker` | Launch logos-app as maker/taker (two instances needed) |
-| `make logos-module-build` | Build the standalone logos-module app (no logos-app needed) |
-| `make logos-module-run-maker` / `logos-module-run-taker` | Run logos-module as maker/taker (two instances needed) |
-| `make clean` | Clean Qt6 UI build artifacts |
 
 **CLI** (config via `.env` or CLI flags — see `.env.example`):
 

@@ -1,18 +1,9 @@
-.PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra \
+.PHONY: swap-ffi contracts demo infra \
        setup localnet-start localnet-stop test circuits \
-       logos-module-configure logos-module-build logos-module-plugin logos-module-run \
-       logos-module-run-maker logos-module-run-taker \
        plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
 
 UNAME := $(shell uname -s)
 UNAME_M := $(shell uname -m)
-ifeq ($(UNAME),Darwin)
-  UI_BIN = ui/build/atomic-swaps-ui.app/Contents/MacOS/atomic-swaps-ui
-  LOGOS_BIN = logos-module/build/lez_atomic_swap_module.app/Contents/MacOS/lez_atomic_swap_module
-else
-  UI_BIN = ui/build/atomic-swaps-ui
-  LOGOS_BIN = logos-module/build/lez_atomic_swap_module
-endif
 
 # --- logos-blockchain-circuits (project-local, isolated from ~/.logos-blockchain-circuits/) ---
 # Bump this when the lssa pin (scaffold.toml) requires a newer circuits release.
@@ -48,23 +39,6 @@ ifeq ($(UNAME),Darwin)
 else
 	@cp target/debug/libswap_ffi.so swap-ffi/target/debug/ 2>/dev/null || true
 endif
-
-configure: swap-ffi
-	cmake -B ui/build -S ui -DCMAKE_BUILD_TYPE=Debug
-
-build:
-	cmake --build ui/build
-
-run: run-maker
-
-run-maker: circuits configure build
-	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(UI_BIN) &
-
-run-taker: circuits configure build
-	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(UI_BIN) &
-
-clean:
-	cmake --build ui/build --target clean
 
 contracts:
 	cd contracts && forge build
@@ -119,26 +93,6 @@ demo: circuits contracts
 infra: circuits contracts localnet-start
 	trap 'logos-scaffold localnet stop' EXIT INT TERM; cargo run --features demo -- infra
 
-# --- Logos Core module ---
-
-logos-module-configure: circuits
-	cmake -B logos-module/build -S logos-module -DCMAKE_BUILD_TYPE=Debug
-
-logos-module-build: swap-ffi logos-module-configure
-	cmake --build logos-module/build
-
-logos-module-plugin: circuits
-	cmake -B logos-module/build -S logos-module -DBUILD_PLUGIN=ON -DCMAKE_BUILD_TYPE=Debug
-	cmake --build logos-module/build
-
-logos-module-run: logos-module-run-maker
-
-logos-module-run-maker: logos-module-build
-	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_BIN) &
-
-logos-module-run-taker: logos-module-build
-	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(LOGOS_BIN) &
-
 # --- logos-app IComponent plugin ---
 
 LOGOS_APP_INTERFACES := $(HOME)/Developer/status/logos-app/app/interfaces
@@ -154,7 +108,6 @@ NIX_QTSVG         := /nix/store/6mjqccb1hfr5mffqz80icfvh8w0lvqmf-qtsvg-6.9.2
 
 plugin-configure: circuits swap-ffi
 	cmake -B $(PLUGIN_BUILD) -S logos-module \
-		-DBUILD_APP_PLUGIN=ON \
 		-DLOGOS_APP_INTERFACES_DIR=$(LOGOS_APP_INTERFACES) \
 		-DCMAKE_PREFIX_PATH="$(NIX_QTBASE)" \
 		-DQT_ADDITIONAL_PACKAGES_PREFIX_PATH="$(NIX_QTDECLARATIVE);$(NIX_QTSHADERTOOLS);$(NIX_QTSVG)" \
