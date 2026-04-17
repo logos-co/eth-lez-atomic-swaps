@@ -1,6 +1,7 @@
 .PHONY: build run run-maker run-taker clean configure swap-ffi contracts demo infra \
        setup localnet-start localnet-stop test circuits \
        logos-module-configure logos-module-build logos-module-plugin logos-module-run \
+       logos-module-run-maker logos-module-run-taker \
        plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
 
 UNAME := $(shell uname -s)
@@ -42,7 +43,11 @@ export LOGOS_BLOCKCHAIN_CIRCUITS := $(CIRCUITS_DIR)
 swap-ffi: circuits
 	cargo build -p swap-ffi
 	@mkdir -p swap-ffi/target/debug
+ifeq ($(UNAME),Darwin)
 	@cp target/debug/libswap_ffi.dylib swap-ffi/target/debug/ 2>/dev/null || true
+else
+	@cp target/debug/libswap_ffi.so swap-ffi/target/debug/ 2>/dev/null || true
+endif
 
 configure: swap-ffi
 	cmake -B ui/build -S ui -DCMAKE_BUILD_TYPE=Debug
@@ -119,15 +124,20 @@ infra: circuits contracts localnet-start
 logos-module-configure: circuits
 	cmake -B logos-module/build -S logos-module -DCMAKE_BUILD_TYPE=Debug
 
-logos-module-build: logos-module-configure
+logos-module-build: swap-ffi logos-module-configure
 	cmake --build logos-module/build
 
 logos-module-plugin: circuits
 	cmake -B logos-module/build -S logos-module -DBUILD_PLUGIN=ON -DCMAKE_BUILD_TYPE=Debug
 	cmake --build logos-module/build
 
-logos-module-run: logos-module-build
+logos-module-run: logos-module-run-maker
+
+logos-module-run-maker: logos-module-build
 	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_BIN) &
+
+logos-module-run-taker: logos-module-build
+	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(LOGOS_BIN) &
 
 # --- logos-app IComponent plugin ---
 

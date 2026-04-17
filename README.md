@@ -181,7 +181,8 @@ Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded
 | `make localnet-start` / `localnet-stop` | Start/stop LEZ localnet via `logos-scaffold` |
 | `make plugin-build` | Build the Rust FFI bridge + IComponent plugin for logos-app |
 | `make plugin-run-maker` / `plugin-run-taker` | Launch logos-app as maker/taker (two instances needed) |
-| `make logos-module-build` / `logos-module-run` | Build / run as standalone app (no logos-app needed) |
+| `make logos-module-build` | Build the standalone logos-module app (no logos-app needed) |
+| `make logos-module-run-maker` / `logos-module-run-taker` | Run logos-module as maker/taker (two instances needed) |
 | `make clean` | Clean Qt6 UI build artifacts |
 
 **CLI** (config via `.env` or CLI flags — see `.env.example`):
