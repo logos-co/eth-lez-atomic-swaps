@@ -796,7 +796,10 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
 
     runtime().block_on(async {
         let progress = forward_progress(cb, user_data);
-        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress).await;
+        // Reuse the FFI singleton messaging client if initialized,
+        // so the auto-accept loop publishes through the already-connected node.
+        let existing_messaging = messaging_slot().lock().unwrap().clone();
+        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress, existing_messaging).await;
         let json = serde_json::json!({
             "completed": result.total_completed,
             "failed": result.total_failed,

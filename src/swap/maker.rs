@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use alloy::primitives::U256;
 use tokio::sync::mpsc;
@@ -238,14 +239,17 @@ pub async fn run_maker_loop(
     auto_config: &AutoAcceptConfig,
     cancel: &AtomicBool,
     progress: Option<ProgressSender>,
+    existing_messaging: Option<Arc<MessagingClient>>,
 ) -> AutoAcceptResult {
     let mut completed: u32 = 0;
     let mut failed: u32 = 0;
     let mut iteration: u32 = 0;
 
-    // Spawn one messaging client up-front; reuse across iterations.
-    // Spawning a libwaku node per-iteration would be very expensive.
-    let messaging = if let Some(msg_cfg) = &base_config.messaging {
+    // Reuse an existing messaging client if provided (e.g. the FFI
+    // singleton), otherwise spawn a fresh one for the CLI path.
+    let (messaging, owns_messaging) = if let Some(m) = existing_messaging {
+        (Some(m), false)
+    } else if let Some(msg_cfg) = &base_config.messaging {
         match MessagingClient::spawn(MessagingNodeConfig {
             listen_port: msg_cfg.listen_port,
             node_key_path: None,
@@ -255,15 +259,15 @@ pub async fn run_maker_loop(
         {
             Ok(m) => {
                 let _ = m.subscribe(&[OFFERS_TOPIC]).await;
-                Some(m)
+                (Some(Arc::new(m)), true)
             }
             Err(e) => {
                 info!(%e, "maker auto-accept: messaging spawn failed (continuing without)");
-                None
+                (None, false)
             }
         }
     } else {
-        None
+        (None, false)
     };
 
     progress::report(&progress, SwapProgress::AutoAcceptStarted);
@@ -420,8 +424,13 @@ pub async fn run_maker_loop(
     }
 
     // Explicit shutdown — WakuNodeHandle has no Drop. See delivery-dogfooding.md #3.
-    if let Some(m) = messaging {
-        let _ = m.shutdown().await;
+    // Only shutdown if we spawned the client ourselves (not the FFI singleton).
+    if owns_messaging {
+        if let Some(m) = messaging {
+            if let Ok(m) = Arc::try_unwrap(m) {
+                let _ = m.shutdown().await;
+            }
+        }
     }
 
     progress::report(
