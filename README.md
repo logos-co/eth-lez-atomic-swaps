@@ -22,11 +22,35 @@ Taker                                          Maker
 
 ![logos-app plugin](docs/logos-app-plugin.gif)
 
-## Quick Start
+## Getting started
 
-**Prerequisites:** Rust 1.85+, Foundry, CMake 3.21+, Qt 6.5+, GNU make + a C/C++ toolchain (for `libwaku`), [`logos-scaffold`](https://github.com/logos-co/logos-scaffold).
+These steps are what you need to clone the repo and run the stack locally.
 
-> The Logos messaging node (`libwaku`) is now embedded in-process — there is no Docker dependency. The first build compiles the Nim-based `libwaku` from source (5–10 min) via `waku-sys`'s vendored `nimbus-build-system`; subsequent builds are cached. See [delivery-dogfooding.md](delivery-dogfooding.md) for integration notes.
+### Requirements
+
+- **OS / CPU:** Apple Silicon macOS or 64-bit Linux (`aarch64` or `x86_64`). **Intel macOS is not supported** for circuits: upstream does not ship a `macos-x86_64` `logos-blockchain-circuits` bundle (see `Makefile` / `make setup`).
+- **Rust** 1.85+ ([rustup](https://rustup.rs/))
+- **Foundry** (`forge`, `anvil`) — [Foundry book](https://book.getfoundry.sh/getting-started/installation)
+- **CMake** 3.21+ and **Qt** 6.5+ (for the optional `logos-module` / `swap-ffi` UI build)
+- **GNU make** and a **C/C++ toolchain** (first build compiles Nim `libwaku` in-process; allow roughly 5–10 minutes, then cached)
+- **[`logos-scaffold`](https://github.com/logos-co/logos-scaffold)** on your `PATH` (install from a clone of that repo: `cargo install --path .` — puts `logos-scaffold` and `lgs` in `~/.cargo/bin`)
+
+**Docker / Podman:** Not required for `libwaku` messaging or for a typical `make setup` / `make infra` flow. [`logos-scaffold doctor`](https://github.com/logos-co/logos-scaffold) may still warn that a container runtime is missing; install Docker or Podman if tooling or LEZ workflows you use expect it.
+
+### Clone
+
+```bash
+git clone --recurse-submodules https://github.com/logos-co/eth-lez-atomic-swaps.git
+cd eth-lez-atomic-swaps
+```
+
+Already cloned without submodules? Run:
+
+```bash
+git submodule update --init --recursive
+```
+
+### System packages
 
 <details><summary><b>macOS</b></summary>
 
@@ -35,10 +59,14 @@ brew install qt@6 cmake
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
-If CMake can't find Qt6: `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`. The workspace `.cargo/config.toml` already supplies the macOS aarch64 linker flags `libwaku` needs.
+
+If CMake cannot find Qt6: `export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"`. Homebrew’s `qt` formula (Qt 6.x) also works; point `CMAKE_PREFIX_PATH` at `$(brew --prefix qt)` if you use that instead.
+
+The workspace [`.cargo/config.toml`](.cargo/config.toml) supplies macOS `aarch64` linker flags `libwaku` needs.
+
 </details>
 
-<details><summary><b>Linux (Ubuntu/Debian)</b></summary>
+<details><summary><b>Linux (Ubuntu / Debian / Fedora)</b></summary>
 
 ```bash
 # Ubuntu / Debian
@@ -48,82 +76,99 @@ sudo dnf install cmake qt6-qtbase-devel qt6-qtdeclarative-devel gcc gcc-c++ make
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 ```
+
 Qt 6.5+ required — Ubuntu 24.10+ ships it. For older distros use [aqtinstall](https://github.com/miurahr/aqtinstall) or the [Qt online installer](https://www.qt.io/download-qt-installer).
+
 </details>
 
-```bash
-git clone --recurse-submodules https://github.com/logos-co/eth-lez-atomic-swaps.git
-cd eth-lez-atomic-swaps
-```
+### One-time setup and local infra
 
-> Already cloned without `--recurse-submodules`? Run `git submodule update --init --recursive`.
-
-### 1. Setup & Infrastructure
+This repo ships a checked-in [`scaffold.toml`](scaffold.toml) with **relative** paths: LEZ is cloned under `.scaffold/lez-cache/` (gitignored), next to `.scaffold/wallet` and `.scaffold/circuits`. You do **not** need `logos-scaffold init` on a fresh clone. Run `make` targets from the repository root so those paths resolve correctly.
 
 ```bash
-make setup                # one-time: fetches logos-blockchain-circuits, creates scaffold wallet at .scaffold/wallet
-make infra                # starts Anvil, LEZ sequencer, embedded waku rendezvous node;
-                          # deploys contracts; writes .env files. Keeps running — Ctrl-C to stop.
+make setup    # downloads logos-blockchain-circuits into .scaffold/circuits, runs logos-scaffold setup (LEZ + wallet)
+make infra    # Anvil, LEZ localnet, embedded waku rendezvous, deploy contracts, write .env / .env.taker — Ctrl-C stops everything
 ```
 
-> Under the hood, `make infra` shells out to `logos-scaffold` for LEZ-side work: `localnet start` to boot the sequencer (and `localnet stop` on Ctrl-C), plus `wallet topup` to fund the maker and taker accounts. Anvil, contract deployment, and the embedded waku rendezvous node are managed directly by the orchestrator. The rendezvous node's multiaddr is written into `.env` / `.env.taker` as `WAKU_BOOTSTRAP_MULTIADDR` so each CLI/UI process spawns its own node and dials in.
+`make setup` exports `LOGOS_BLOCKCHAIN_CIRCUITS` to the project-local circuits directory so builds do not use `~/.logos-blockchain-circuits/`.
 
-> **Circuits:** `make setup` downloads `logos-blockchain-circuits` v0.4.2 into `.scaffold/circuits/` and exports `LOGOS_BLOCKCHAIN_CIRCUITS` so it does not touch any pre-existing `~/.logos-blockchain-circuits/` on your machine (which may be pinned to a different version by another Logos install). Every `make` target that builds or runs Rust inherits the env var, so lssa and cargo build scripts both pick up the project-local copy. Bump `CIRCUITS_VERSION` at the top of the `Makefile` when the lssa pin in `scaffold.toml` requires a newer release. Note: upstream does not publish a `macos-x86_64` build, so Intel Macs are unsupported.
+`make infra` uses `logos-scaffold` for LEZ (`localnet start`, `wallet topup`, `localnet stop` on exit). Anvil, Solidity deploy, and the in-process waku rendezvous node are driven by this repo’s orchestrator; rendezvous multiaddr is written into `.env` / `.env.taker` as `WAKU_BOOTSTRAP_MULTIADDR`.
 
-### 2. Launch the UI
+> The Logos messaging node (`libwaku`) is embedded in-process — there is no separate Docker service for waku. See [delivery-dogfooding.md](delivery-dogfooding.md) for integration notes.
 
-Open a new terminal. The UI runs inside [logos-app](https://github.com/logos-co/logos-app) as an IComponent plugin. Requires Nix (for building logos-app) and the logos-app Qt 6.9 libraries (the plugin must link against the same Qt that logos-app ships).
+### Run a swap (after `make infra`)
+
+**Maker:** Publish Offer → Start Swap → wait for taker ETH lock → lock LEZ → wait for preimage → claim ETH.  
+**Taker:** Discover Offers → select offer → Start Taker → generate preimage, lock ETH → wait for LEZ lock → claim LEZ.
+
+After **`make setup`**, list LEZ accounts from the repo root (`logos-scaffold` reads [`scaffold.toml`](scaffold.toml)):
+
+```bash
+logos-scaffold wallet list --long
+```
+
+### Headless demo and tests
+
+```bash
+make demo     # full swap without UI
+make test     # forge build + localnet + cargo test + localnet stop
+```
+
+### CLI (same binary as `cargo run`)
+
+From the repo root, prefer:
+
+```bash
+cargo run --bin swap-cli -- maker
+cargo run --bin swap-cli -- taker
+cargo run --bin swap-cli -- infra
+cargo run --bin swap-cli -- demo
+cargo run --bin swap-cli -- refund lez --hashlock <hex>
+cargo run --bin swap-cli -- refund eth --swap-id <hex>
+```
+
+Or with two shells and `.env` files after `make infra`:
+
+```bash
+env $(grep -v '^\#' .env | xargs) cargo run --bin swap-cli -- maker
+env $(grep -v '^\#' .env.taker | xargs) cargo run --bin swap-cli -- taker
+```
+
+After `cargo build --release`, you can run `./target/release/swap-cli` instead.
+
+Configuration: [`.env.example`](.env.example).
+
+## logos-app plugin (UI)
+
+The optional UI runs inside [logos-app](https://github.com/logos-co/logos-app) as an IComponent plugin — see **Screenshots** above. Building it needs Nix (for logos-app) and Qt that matches logos-app (see below).
 
 <details><summary><b>First-time logos-app setup</b></summary>
 
 ```bash
 git clone https://github.com/logos-co/logos-app.git
 cd logos-app
-nix build            # builds the app via flake.nix — produces result/bin/logos-app
+nix build            # produces result/bin/logos-app
 ```
 
-The Makefile expects logos-app at `~/Developer/status/logos-app`. If yours is elsewhere, override:
+The [`Makefile`](Makefile) defaults `LOGOS_APP_INTERFACES` and `LOGOS_APP_BIN` to `~/Developer/status/logos-app`. Override if yours differs:
 
 ```bash
 make plugin-build LOGOS_APP_INTERFACES=<path-to-logos-app>/app/interfaces
 make plugin-run-maker LOGOS_APP_BIN=<path-to-logos-app>/result/bin/logos-app
 ```
 
-The plugin build uses Nix Qt paths hardcoded in the Makefile (`NIX_QTBASE`, `NIX_QTDECLARATIVE`, etc.). If your Nix store hashes differ, update them — run `nix build` in logos-app first, then find the paths with `nix path-info .#logos-app --recursive | grep qt`.
+Plugin CMake uses Nix Qt paths hardcoded in the Makefile (`NIX_QTBASE`, …). If your Nix store hashes differ, run `nix build` in logos-app, then refresh those variables (e.g. `nix path-info .#logos-app --recursive | grep qt`).
+
 </details>
 
 ```bash
-make plugin-run-maker     # builds + installs the plugin on first run, launches logos-app as maker (loads .env)
-make plugin-run-taker     # launches logos-app as taker (loads .env.taker, in another terminal)
+make plugin-run-maker     # build + install plugin, launch logos-app as maker (loads .env)
+make plugin-run-taker     # second terminal — taker (loads .env.taker)
 ```
 
-Two logos-app instances are needed — one per role (maker/taker), each with its own wallet credentials. The plugin is installed to `~/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap/` (macOS).
+Two logos-app instances (maker and taker). On macOS the plugin installs under `~/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap/`.
 
-**How it works:** `make plugin-install` copies the compiled plugin (`lez_atomic_swap.dylib`) and the Rust FFI bridge (`libswap_ffi.dylib`) into the logos-app plugin directory. On launch, logos-app discovers and loads the plugin, which registers a `SwapBackend` QML context object. Config is injected via environment variables from `.env` / `.env.taker`.
-
-**CLI** (no UI)
-```bash
-# In two terminals:
-env $(cat .env | grep -v '^\#' | xargs) cargo run -- maker
-env $(cat .env.taker | grep -v '^\#' | xargs) cargo run -- taker
-
-# Or run both sides headlessly in one terminal:
-make demo
-```
-
-### 3. Run a Swap
-
-**Maker** (any interface): Publish Offer → Start Swap → waits for taker to lock ETH → locks LEZ → waits for preimage → claims ETH.
-**Taker** (any interface): Discover Offers → select offer → Start Taker → generates preimage, locks ETH → waits for LEZ lock → claims LEZ.
-
-Verify balances after a swap with the LSSA wallet CLI:
-```bash
-NSSA_WALLET_HOME_DIR=.scaffold/wallet wallet account ls -l
-```
-
-### 4. Cleanup
-
-Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded waku rendezvous node all shut down together.
+**Mechanics:** `make plugin-install` copies `lez_atomic_swap.dylib` and `libswap_ffi.dylib` into the plugin directory; logos-app loads the plugin, which registers a `SwapBackend` QML object. Env vars come from `.env` / `.env.taker`.
 
 ## Architecture
 
@@ -141,44 +186,44 @@ Stop with `Ctrl-C` on `make infra` — Anvil, the LEZ localnet, and the embedded
 └─────────────────┴───────────────────┘
 ```
 
-| Directory | Description |
+| Path | Description |
 |---|---|
+| [`scaffold.toml`](scaffold.toml) | Logos scaffold config (LEZ pin, wallet dir, localnet); committed with relative paths |
 | `contracts/` | Solidity HTLC (Foundry) — `lock()`, `claim()`, `refund()` with SHA-256 hashlock |
-| `programs/lez-htlc/` | LEZ HTLC program (Risc0 zkVM) — same logic, escrow in PDA |
-| `src/` | Orchestration library — ETH/LEZ clients, watchers, messaging, scaffold integration, maker/taker/refund flows |
-| `swap-ffi/` | C FFI bridge exposing swap functions to the Qt6 UI |
-| `logos-module/` | logos-app IComponent plugin (Qt6/QML UI) |
+| `programs/lez-htlc/` | LEZ HTLC program (Risc0 zkVM) |
+| `src/` | Orchestration — ETH/LEZ clients, watchers, messaging, maker/taker/refund |
+| `swap-ffi/` | C FFI for Qt6 UI |
+| `logos-module/` | logos-app IComponent plugin (Qt6/QML) |
 | `tests/` | Integration tests |
 
-## Commands
+## Make targets
 
 | Command | Description |
 |---|---|
-| `make setup` | One-time scaffold wallet setup (creates `.scaffold/wallet`) |
-| `make infra` | Start Anvil, LEZ localnet, embedded waku rendezvous node; deploy HTLCs on both chains; write `.env` files |
-| `make demo` | Run the full swap headlessly — no UI needed |
-| `make test` | Build contracts, start localnet, run all tests, stop localnet |
-| `make contracts` | Build Solidity contracts via Foundry |
-| `make localnet-start` / `localnet-stop` | Start/stop LEZ localnet via `logos-scaffold` |
-| `make plugin-build` | Build the Rust FFI bridge + IComponent plugin for logos-app |
-| `make plugin-run-maker` / `plugin-run-taker` | Launch logos-app as maker/taker (two instances needed) |
+| `make setup` | Circuits tarball + `logos-scaffold setup` (LEZ + wallet under `.scaffold/`) |
+| `make infra` | Anvil, LEZ localnet, waku rendezvous, deploy, write `.env` files |
+| `make demo` | Headless full swap |
+| `make test` | Contracts + localnet + `cargo test` + stop localnet |
+| `make contracts` | `forge build` in `contracts/` |
+| `make localnet-start` / `localnet-stop` | LEZ localnet via `logos-scaffold` |
+| `make plugin-build` | Configure + build Qt plugin (Nix Qt paths in Makefile) |
+| `make plugin-run-maker` / `plugin-run-taker` | Install plugin and launch logos-app |
 
-**CLI** (config via `.env` or CLI flags — see `.env.example`):
+## Design notes
 
-```bash
-swap-cli maker                         # publish offer, wait for ETH lock, lock LEZ, claim ETH
-swap-cli taker                         # discover offer, generate preimage, lock ETH, claim LEZ
-swap-cli refund lez --hashlock <hex>    # refund LEZ after timelock
-swap-cli refund eth --swap-id <hex>     # refund ETH after timelock
-swap-cli infra                          # start Anvil + LEZ sequencer + embedded waku, deploy, write .env
-swap-cli demo                           # run full swap headlessly (maker + taker)
-```
+- **SHA-256 hashlock** (not keccak) — cross-chain alignment with LEZ’s `risc0_zkvm::sha`
+- **Taker locks first** — taker holds the preimage; longer ETH timelock, shorter LEZ timelock after ETH lock is seen
+- **LEZ timelock** — enforced with `TimestampValidityWindow` (LSSA); orchestrator wall-clock checks are UX-only
+- **LEZ escrow** — two-step lock/transfer for LSSA balance rules
+- **Scaffold wallet** — LEZ keys under `.scaffold/wallet`; orchestration reads signing material from disk
+- **Messaging** — in-process `libwaku` via [waku-bindings](https://github.com/logos-messaging/logos-delivery-rust-bindings); swap logic still works without gossip if hashlock is exchanged manually. See [delivery-dogfooding.md](delivery-dogfooding.md)
 
-## Design Notes
+## Troubleshooting
 
-- **SHA-256 hashlock** (not keccak) — cross-chain compatibility with LEZ's `risc0_zkvm::sha`
-- **Taker locks first** — taker generates the secret preimage, locks ETH with a longer timelock; maker locks LEZ with a shorter timelock after verifying the ETH lock
-- **LEZ timelock is enforced on-chain** — the HTLC program attaches `TimestampValidityWindow` (LSSA PRs #400/#404) to the Refund output, so the runtime rejects refund transactions whose block timestamp is before the timelock. The orchestrator's pre-submit wall-clock check is a UX optimization that avoids wasted proof generation
-- **LEZ escrow is two-step** — Lock (claim PDA + metadata) then Transfer (fund PDA), due to LSSA balance rules
-- **Scaffold wallet** — LEZ keys managed by `logos-scaffold`; the orchestration library reads signing keys from the scaffold wallet on disk
-- **Messaging is embedded** — every process (`make infra` rendezvous node, CLI maker/taker, FFI consumers) spawns a `libwaku` node in-process via [`waku-bindings`](https://github.com/logos-messaging/logos-delivery-rust-bindings) and joins a single gossipsub mesh. No Docker. Messaging stays optional — the swap logic works without it via manual hashlock exchange. See [delivery-dogfooding.md](delivery-dogfooding.md) for integration friction notes
+- **Pull blocked by untracked `scaffold.toml`:** Older clones gitignored that file. Run `mv scaffold.toml scaffold.toml.bak`, pull, then compare with the committed [`scaffold.toml`](scaffold.toml) if you had custom `cache_root` or LEZ pin values.
+- **`logos-scaffold: command not found`:** Install the CLI and ensure `~/.cargo/bin` is on your `PATH` (or open a new shell after `rustup` / Foundry installers).
+
+## Maintainer notes
+
+- Bump **`CIRCUITS_VERSION`** in the [`Makefile`](Makefile) when the **lssa** git revisions in [`Cargo.toml`](Cargo.toml) require a newer published `logos-blockchain-circuits` bundle.
+- Bump **`[repos.lez].pin`** (and matching `path` suffix under `cache_root`) in [`scaffold.toml`](scaffold.toml) when intentionally moving to a different [LEZ](https://github.com/logos-blockchain/logos-execution-zone/) revision; keep it consistent with what `logos-scaffold` and this repo expect.
