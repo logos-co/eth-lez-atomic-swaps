@@ -34,6 +34,12 @@ These steps are what you need to clone the repo and run the stack locally.
 - **CMake** 3.21+ and **Qt** 6.5+ (for the optional `logos-module` / `swap-ffi` UI build)
 - **GNU make** and a **C/C++ toolchain** (first build compiles Nim `libwaku` in-process; allow roughly 5–10 minutes, then cached)
 - **[`logos-scaffold`](https://github.com/logos-co/logos-scaffold)** on your `PATH` (install from a clone of that repo: `cargo install --path .` — puts `logos-scaffold` and `lgs` in `~/.cargo/bin`)
+- **RISC Zero zkVM toolchain** — building this workspace compiles the LEZ HTLC **guest** (`lez_htlc_methods` / `risc0_build`). Install [rzup](https://github.com/risc0/risc0/tree/main/rzup) and the Rust target it provides, for example:
+  ```bash
+  curl -L https://risczero.com/install | bash   # installs rzup; follow the script’s PATH hints, or open a new shell
+  rzup install rust
+  ```
+  Without this, `cargo build` / `make infra` fails with `Risc Zero Rust toolchain not found. Try running rzup install rust`.
 
 **Docker / Podman:** Not required for `libwaku` messaging or for a typical `make setup` / `make infra` flow. [`logos-scaffold doctor`](https://github.com/logos-co/logos-scaffold) may still warn that a container runtime is missing; install Docker or Podman if tooling or LEZ workflows you use expect it.
 
@@ -84,6 +90,8 @@ Qt 6.5+ required — Ubuntu 24.10+ ships it. For older distros use [aqtinstall](
 ### One-time setup and local infra
 
 This repo ships a checked-in [`scaffold.toml`](scaffold.toml) with **relative** paths: LEZ is cloned under `.scaffold/lez-cache/` (gitignored), next to `.scaffold/wallet` and `.scaffold/circuits`. You do **not** need `logos-scaffold init` on a fresh clone. Run `make` targets from the repository root so those paths resolve correctly.
+
+**Order matters:** have `logos-scaffold`, `forge`, and the RISC Zero toolchain (see Requirements) on your `PATH`, then run **`make setup` to completion** before **`make infra`**. If `make setup` never ran successfully, `logos-scaffold localnet start` fails with `missing lez at .scaffold/lez-cache/...` because nothing cloned LEZ into that directory yet.
 
 ```bash
 make setup    # downloads logos-blockchain-circuits into .scaffold/circuits, runs logos-scaffold setup (LEZ + wallet)
@@ -222,6 +230,8 @@ Two logos-app instances (maker and taker). On macOS the plugin installs under `~
 
 - **Pull blocked by untracked `scaffold.toml`:** Older clones gitignored that file. Run `mv scaffold.toml scaffold.toml.bak`, pull, then compare with the committed [`scaffold.toml`](scaffold.toml) if you had custom `cache_root` or LEZ pin values.
 - **`logos-scaffold: command not found`:** Install the CLI and ensure `~/.cargo/bin` is on your `PATH` (or open a new shell after `rustup` / Foundry installers).
+- **`missing lez at .scaffold/lez-cache/repos/lez/...`:** `make setup` did not finish successfully (often because `logos-scaffold` was missing). Install `logos-scaffold`, then run `make setup` again so LEZ is cloned and built under `.scaffold/lez-cache/`.
+- **`Risc Zero Rust toolchain not found. Try running rzup install rust`:** Install rzup and run `rzup install rust` (see **Requirements** above), then rebuild.
 
 ## Maintainer notes
 
