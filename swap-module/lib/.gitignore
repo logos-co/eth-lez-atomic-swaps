@@ -1,0 +1,10 @@
+# Vendored Rust FFI binaries — produced by `make swap-vendor-ffi` from swap-ffi/.
+# Tracked-or-not policy: track them in git when you want a reproducible Nix
+# build (Nix only sees git-tracked files), otherwise ignore and rebuild before
+# every nix build.
+#
+# Default: ignored. Run `git add -f swap-module/lib/libswap_ffi.dylib` to
+# pin a specific build into git.
+libswap_ffi.dylib
+libswap_ffi.so
+libswap_ffi.dll

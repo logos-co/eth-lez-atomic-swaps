@@ -1,0 +1,26 @@
+// Qt Remote Objects interface — defines the cross-process API between the
+// QML view (running in Basecamp's process) and the C++ backend plugin
+// (running in its own logos_host subprocess).
+//
+// Properties are auto-synced to QML replicas; slots are callable from QML
+// via logos.watch(backend.<slot>(...), onSuccess, onError).
+//
+// This is intentionally minimal for the initial scaffold. The full property/
+// slot surface (~40 props, ~10 slots from the legacy SwapBackend in
+// logos-module/src/swap_backend.h, recoverable from git history) should be
+// ported into this file as the UI grows.
+
+class SwapUi
+{
+    PROP(QString status READWRITE)
+    PROP(QString swapRole READWRITE)
+    PROP(bool running READWRITE)
+    PROP(QString lastResultJson READWRITE)
+
+    // role: "maker" or "taker". Persisted in this UI session.
+    SLOT(void setRole(const QString& role))
+
+    // Fetch balances by calling the swap core module via LogosAPI.
+    // Result is set on lastResultJson; running toggles around the call.
+    SLOT(void fetchBalances(const QString& configJson))
+}

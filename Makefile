@@ -1,6 +1,6 @@
-.PHONY: swap-ffi contracts demo infra \
+.PHONY: contracts demo infra \
        setup localnet-start localnet-stop test circuits \
-       plugin-configure plugin-build plugin-install plugin-run plugin-run-maker plugin-run-taker
+       swap-vendor-ffi swap-module-build swap-ui-build swap-ui-run
 
 UNAME := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -30,15 +30,6 @@ CIRCUITS_URL := https://github.com/logos-blockchain/logos-blockchain-circuits/re
 # Exported so every recipe (cargo, logos-scaffold, and their children) uses the
 # project-local circuits dir instead of ~/.logos-blockchain-circuits/.
 export LOGOS_BLOCKCHAIN_CIRCUITS := $(CIRCUITS_DIR)
-
-swap-ffi: circuits
-	cargo build -p swap-ffi
-	@mkdir -p swap-ffi/target/debug
-ifeq ($(UNAME),Darwin)
-	@cp target/debug/libswap_ffi.dylib swap-ffi/target/debug/ 2>/dev/null || true
-else
-	@cp target/debug/libswap_ffi.so swap-ffi/target/debug/ 2>/dev/null || true
-endif
 
 contracts:
 	cd contracts && forge build
@@ -85,7 +76,7 @@ localnet-stop:
 test: circuits contracts localnet-start
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test; logos-scaffold localnet stop
 
-# --- Demo / Infra ---
+# --- Demo / Infra (headless CLI flow) ---
 
 demo: circuits contracts
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
@@ -93,49 +84,37 @@ demo: circuits contracts
 infra: circuits contracts localnet-start
 	trap 'logos-scaffold localnet stop' EXIT INT TERM; cargo run --features demo -- infra
 
-# --- logos-app IComponent plugin ---
+# --- Logos modules (built via logos-module-builder / Nix) ---
+#
+# swap-module: type=core, universal C++ wrapping swap-ffi
+# swap-ui    : type=ui_qml, Basecamp UI calling the swap module via Qt Remote Objects
+#
+# Both flakes are standalone. Each builds inside its own subdirectory.
 
-LOGOS_APP_INTERFACES := $(HOME)/Developer/status/logos-app/app/interfaces
-LOGOS_APP_BIN        := $(HOME)/Developer/status/logos-app/result/bin/logos-app
-PLUGIN_BUILD         := logos-module/build-plugin
-PLUGIN_DIR           := $(HOME)/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap
-
-# Use the same Nix Qt 6.9.2 that logos-app ships (not Homebrew Qt)
-NIX_QTBASE        := /nix/store/a9aq909fc6ymnawnk877qcs4gklzm1c1-qtbase-6.9.2
-NIX_QTDECLARATIVE := /nix/store/fn7iqppsl6z7ikbspxnjirwdz345w8mj-qtdeclarative-6.9.2
-NIX_QTSHADERTOOLS := /nix/store/awcf75ll0ynkkknwzam9qi6w663y0q9q-qtshadertools-6.9.2
-NIX_QTSVG         := /nix/store/6mjqccb1hfr5mffqz80icfvh8w0lvqmf-qtsvg-6.9.2
-
-plugin-configure: circuits swap-ffi
-	cmake -B $(PLUGIN_BUILD) -S logos-module \
-		-DLOGOS_APP_INTERFACES_DIR=$(LOGOS_APP_INTERFACES) \
-		-DCMAKE_PREFIX_PATH="$(NIX_QTBASE)" \
-		-DQT_ADDITIONAL_PACKAGES_PREFIX_PATH="$(NIX_QTDECLARATIVE);$(NIX_QTSHADERTOOLS);$(NIX_QTSVG)" \
-		-DQt6QmlTools_DIR=$(NIX_QTDECLARATIVE)/lib/cmake/Qt6QmlTools \
-		-DQt6QuickTools_DIR=$(NIX_QTDECLARATIVE)/lib/cmake/Qt6QuickTools \
-		-DCMAKE_BUILD_TYPE=Debug
-
-plugin-build: plugin-configure
-	cmake --build $(PLUGIN_BUILD)
-
-plugin-install: plugin-build
-	@mkdir -p "$(PLUGIN_DIR)"
-	cp $(PLUGIN_BUILD)/lez_atomic_swap.dylib "$(PLUGIN_DIR)/"
-	@# Always copy latest FFI dylib (prefer release, fall back to debug)
-	@if [ -f swap-ffi/target/release/libswap_ffi.dylib ]; then \
-		cp swap-ffi/target/release/libswap_ffi.dylib "$(PLUGIN_DIR)/"; \
-	elif [ -f swap-ffi/target/debug/libswap_ffi.dylib ]; then \
-		cp swap-ffi/target/debug/libswap_ffi.dylib "$(PLUGIN_DIR)/"; \
-	fi
+# Vendor the swap-ffi cdylib into swap-module/lib/ so Nix can find it during
+# `nix build`. The header is already tracked in git (small, stable). The dylib
+# is gitignored by default; force-add with `git add -f` to pin a build.
+swap-vendor-ffi: circuits
+	cargo build --release -p swap-ffi
 ifeq ($(UNAME),Darwin)
-	@codesign -fs - "$(PLUGIN_DIR)/lez_atomic_swap.dylib" 2>/dev/null || true
-	@codesign -fs - "$(PLUGIN_DIR)/libswap_ffi.dylib" 2>/dev/null || true
+	@cp target/release/libswap_ffi.dylib swap-module/lib/libswap_ffi.dylib
+	@echo "swap-module/lib/libswap_ffi.dylib refreshed"
+	@echo "Reminder: 'git add -f swap-module/lib/libswap_ffi.dylib' before 'nix build' for Nix to see it."
+else
+	@cp target/release/libswap_ffi.so swap-module/lib/libswap_ffi.so
+	@echo "swap-module/lib/libswap_ffi.so refreshed"
+	@echo "Reminder: 'git add -f swap-module/lib/libswap_ffi.so' before 'nix build' for Nix to see it."
 endif
 
-plugin-run: plugin-run-maker
+# Build the swap core module via Nix. Requires `swap-vendor-ffi` to have been
+# run and the resulting binary to be git-tracked (Nix only sees tracked files).
+swap-module-build: swap-vendor-ffi
+	cd swap-module && nix build -L
 
-plugin-run-maker: plugin-install
-	env $$(cat .env | grep -v '^\#' | xargs) SWAP_ROLE=maker $(LOGOS_APP_BIN) &
+# Build the swap UI via Nix. Pulls swap-module via path:../swap-module input.
+swap-ui-build:
+	cd swap-ui && nix build -L
 
-plugin-run-taker: plugin-install
-	env $$(cat .env.taker | grep -v '^\#' | xargs) SWAP_ROLE=taker $(LOGOS_APP_BIN) &
+# Launch the UI in logos-standalone-app (auto-loads the swap module dependency).
+swap-ui-run:
+	cd swap-ui && nix run .

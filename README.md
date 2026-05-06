@@ -6,7 +6,7 @@ This repo includes:
 
 - a headless local demo
 - a CLI for maker, taker, status, and refund flows
-- an optional `logos-app` plugin UI
+- an optional [`logos-basecamp`](https://github.com/logos-co/logos-basecamp) UI app, built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder)
 
 ## How the swap works
 
@@ -57,11 +57,11 @@ Notes:
 - The first full build can take 5-10 minutes because it compiles `libwaku` and the LEZ guest artifacts.
 - Docker or Podman is not required for the normal local flow.
 
-### Optional for the `logos-app` UI
+### Optional for the Basecamp UI
 
-- CMake 3.21+
-- Qt 6.5+
-- [Nix](https://nixos.org/) for building `logos-app`
+- [Nix](https://nixos.org/) with flakes enabled
+
+The UI is built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder), which provides Qt 6, the C++ SDK, and all build tooling through Nix. No host CMake or Qt install is needed.
 
 ### 1. Clone
 
@@ -96,16 +96,11 @@ cd logos-scaffold
 cargo install --path .
 ```
 
-If you want the optional UI as well:
+If you want the optional UI as well, install Nix with flakes:
 
 ```bash
-brew install cmake qt@6
-```
-
-If CMake cannot find Qt6:
-
-```bash
-export CMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+sh <(curl -L https://nixos.org/nix/install)
+mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
 
 The workspace [`.cargo/config.toml`](.cargo/config.toml) already contains the macOS `aarch64` linker flags needed by `libwaku`.
@@ -142,17 +137,12 @@ cd logos-scaffold
 cargo install --path .
 ```
 
-If you want the optional UI as well:
+If you want the optional UI as well, install Nix with flakes:
 
 ```bash
-# Ubuntu / Debian
-sudo apt install cmake qt6-base-dev qt6-declarative-dev
-
-# Fedora
-sudo dnf install cmake qt6-qtbase-devel qt6-qtdeclarative-devel
+sh <(curl -L https://nixos.org/nix/install --daemon)
+mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
-
-Qt 6.5+ is required for the UI. Older distros may need [aqtinstall](https://github.com/miurahr/aqtinstall) or the [Qt online installer](https://www.qt.io/download-qt-installer).
 
 </details>
 
@@ -240,60 +230,60 @@ cargo run --bin swap-cli -- --env-file .env refund lez --hashlock <hex>
 
 If you are not using the local stack from `make infra`, start from [`.env.example`](.env.example) and provide your own RPC endpoints, keys, contract address, and LEZ account details.
 
-## `logos-app` plugin (optional UI)
+## Basecamp UI (optional)
 
-The UI runs inside [logos-app](https://github.com/logos-co/logos-app) as an IComponent plugin.
+The UI is a [logos-basecamp](https://github.com/logos-co/logos-basecamp) app, built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder). It is split into two Logos modules:
 
-### First-time `logos-app` setup
+- **`swap-module/`** — `type: "core"` universal C++ module wrapping `swap-ffi`. Built with `mkLogosModule` + `logos-cpp-generator`. The 13 public methods on `SwapImpl` (the pure-C++ impl class) are auto-exposed as a typed `Swap` client class for other modules / UIs to call.
+- **`swap-ui/`** — `type: "ui_qml"` Basecamp app with a process-isolated C++ backend (Qt Remote Objects, `.rep` interface) and a QML view. Calls into `swap` via the generated `Swap` client.
 
-```bash
-git clone https://github.com/logos-co/logos-app.git
-cd logos-app
-nix build
-```
+Both flakes are standalone — each builds inside its own subdirectory.
 
-That produces `result/bin/logos-app`.
-
-The [`Makefile`](Makefile) assumes these defaults:
-
-- `LOGOS_APP_INTERFACES=$(HOME)/Developer/status/logos-app/app/interfaces`
-- `LOGOS_APP_BIN=$(HOME)/Developer/status/logos-app/result/bin/logos-app`
-
-Override them if your checkout lives elsewhere:
+### First-time UI build
 
 ```bash
-make plugin-build LOGOS_APP_INTERFACES=<path-to-logos-app>/app/interfaces
-make plugin-run-maker LOGOS_APP_BIN=<path-to-logos-app>/result/bin/logos-app
+make swap-vendor-ffi                                  # build libswap_ffi and copy into swap-module/lib/
+git add -f swap-module/lib/libswap_ffi.dylib          # macOS arm64 (or .so on Linux)
+                                                       # Nix only sees git-tracked files
+make swap-module-build                                 # nix build the core swap module
+make swap-ui-build                                     # nix build the UI (depends on swap-module via path:)
 ```
-
-Plugin CMake uses Nix Qt paths hardcoded in the [`Makefile`](Makefile). If your Nix store hashes differ, rebuild `logos-app` and refresh those variables.
 
 ### Run the UI
 
-After `make infra` is running:
+```bash
+make swap-ui-run     # launches in logos-standalone-app with the QML inspector on :3768
+```
+
+### Smoke-test the UI
+
+`mkLogosQmlModule` auto-detects [`swap-ui/tests/smoke.mjs`](swap-ui/tests/smoke.mjs), but the pinned `logos-standalone-app` `mkPluginTest` runner does not bundle module dependencies yet. Use the dependency-bundling `apps.default` runner instead:
 
 ```bash
-make plugin-run-maker
-make plugin-run-taker
+cd swap-ui
+nix build .#test-framework -o result-mcp
+nix run . -- --help >/dev/null
+system=$(nix eval --raw --impure --expr builtins.currentSystem)
+runner=$(nix eval --raw ".#apps.${system}.default.program")
+LOGOS_QT_MCP=$(realpath result-mcp) QT_QPA_PLATFORM=offscreen \
+  node tests/smoke.mjs --ci "$runner" --verbose
 ```
 
-This launches two `logos-app` instances, one as maker and one as taker.
+In sandboxed agent environments, run the smoke command unsandboxed so Logos can create its local IPC sockets.
 
-On macOS, the plugin is installed under:
+To install into Basecamp:
 
-```text
-~/Library/Application Support/Logos/LogosAppNix/plugins/lez_atomic_swap/
+```bash
+cd swap-module && nix build .#lgx
+cd ../swap-ui   && nix build .#lgx
+lgpm install ./result/*.lgx                           # for both
 ```
 
-`make plugin-install` copies `lez_atomic_swap.dylib` and `libswap_ffi.dylib` into that plugin directory. The UI loads `.env` for maker and `.env.taker` for taker.
+Then launch Basecamp; the swap UI shows as a tab and auto-loads its `swap` core dependency.
 
-## Screenshots
+### Migration status
 
-| Config | Maker | Taker | Refund |
-|--------|-------|-------|--------|
-| ![Config](docs/config.png) | ![Maker](docs/maker.png) | ![Taker](docs/taker.png) | ![Refund](docs/refund.png) |
-
-![logos-app plugin](docs/logos-app-plugin.gif)
+This UI is an early scaffold. The rich legacy UI from previous iterations of this repo (config panel, maker/taker/refund views, progress steppers) needs to be ported tab-by-tab into [`swap-ui/src/qml/`](swap-ui/src/qml/) as the [`swap_ui.rep`](swap-ui/src/swap_ui.rep) interface grows to cover the property/slot surface they need. Long-running flows in [`swap-module/src/swap_impl.h`](swap-module/src/swap_impl.h) (`runMaker`, `runTaker`, `runMakerLoop`) currently block their dispatcher thread; they should become non-blocking before this is more than a demo.
 
 ## Project layout
 
@@ -303,9 +293,12 @@ On macOS, the plugin is installed under:
 | `contracts/` | Solidity HTLC contract built with Foundry |
 | `programs/lez-htlc/` | LEZ HTLC program built with RISC Zero |
 | `src/` | Orchestration, clients, messaging, maker/taker/refund CLI flows |
-| `swap-ffi/` | C FFI bridge for the Qt UI |
-| `logos-module/` | `logos-app` plugin |
-| `tests/` | Integration tests |
+| `swap-ffi/` | Rust C-FFI cdylib (`libswap_ffi.{dylib,so}`) — consumed by `swap-module` |
+| `swap-module/` | Universal C++ core module (Logos `type: "core"`) wrapping `swap-ffi`. Built via `logos-module-builder`. |
+| `swap-ui/` | Basecamp UI app (Logos `type: "ui_qml"`) calling `swap` over Qt Remote Objects. |
+| `tests/` | Integration tests for the Rust orchestrator |
+
+The headless CLI flow (`swap-cli`, `make demo`, `make infra`, …) is independent of the UI and works without Nix.
 
 ## Common make targets
 
@@ -318,22 +311,40 @@ On macOS, the plugin is installed under:
 | `make contracts` | Run `forge build` inside `contracts/` |
 | `make localnet-start` | Start the LEZ localnet |
 | `make localnet-stop` | Stop the LEZ localnet |
-| `make plugin-build` | Build the optional Qt plugin |
-| `make plugin-run-maker` | Launch `logos-app` as maker |
-| `make plugin-run-taker` | Launch `logos-app` as taker |
+| `make swap-vendor-ffi` | Build `swap-ffi` and copy `libswap_ffi.{dylib,so}` into `swap-module/lib/` |
+| `make swap-module-build` | Build `swap-module/` via Nix (requires Nix flakes) |
+| `make swap-ui-build` | Build `swap-ui/` via Nix |
+| `make swap-ui-run` | Launch `swap-ui` in `logos-standalone-app` |
 
 ## Architecture
 
 ```text
-+-----------------------------------+
-| logos-app plugin (logos-module/)  |
-+-----------------------------------+
-| swap-ffi (C bridge / cdylib)      |
-+-----------------------------------+
-| Swap orchestration library        |
-+----------------+------------------+
-| alloy (ETH)    | nssa_core (LEZ)  |
-+----------------+------------------+
++--------------------------------------------------------+
+| logos-basecamp                                         |
+|  +--------------------------------------------------+  |
+|  | swap-ui (ui_qml)         │  swap (core)          |  |
+|  |  QML view  ---QRO--->    │  C++ universal impl   |  |
+|  |  (Basecamp process)      │  (logos_host process) |  |
+|  +-------------------------------------+------------+  |
+|                                        |               |
+|                                        | links         |
+|                                        v               |
+|                          +------------------------+    |
+|                          | libswap_ffi (cdylib)   |    |
+|                          +------------------------+    |
+|                                        |               |
+|                                        v               |
+|                          +------------------------+    |
+|                          | swap-orchestrator      |    |
+|                          | (Rust src/)            |    |
+|                          +-----+-------+----------+    |
+|                                |       |               |
+|                                v       v               |
+|                          +-----+--+ +--+-------+       |
+|                          | alloy  | | nssa     |       |
+|                          | (ETH)  | | (LEZ)    |       |
+|                          +--------+ +----------+       |
++--------------------------------------------------------+
 ```
 
 ## Design notes
