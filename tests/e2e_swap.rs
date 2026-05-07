@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use alloy::{
@@ -26,6 +27,8 @@ use swap_orchestrator::{
 };
 
 const BLOCK_WAIT: Duration = Duration::from_secs(4);
+const TEST_LEZ_AMOUNT: u128 = 10;
+static PREIMAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // For deploying the EthHTLC contract (needs full ABI + bytecode).
 sol! {
@@ -39,6 +42,18 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn unique_preimage(seed: u8) -> [u8; 32] {
+    let counter = PREIMAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut preimage = [seed; 32];
+    preimage[..8].copy_from_slice(&counter.to_le_bytes());
+    preimage[8..24].copy_from_slice(&nanos.to_le_bytes());
+    preimage
 }
 
 /// Shared test infrastructure: Anvil + scaffold LEZ localnet + deployed contracts.
@@ -121,7 +136,7 @@ impl TestEnv {
                 account_id: lez_id,
             },
             lez_htlc_program_id: LEZ_HTLC_PROGRAM_ID,
-            lez_amount: 1000,
+            lez_amount: TEST_LEZ_AMOUNT,
             eth_amount: 1_000_000,
             lez_timelock,
             eth_timelock,
@@ -157,9 +172,10 @@ impl TestEnv {
 
 /// Happy path: taker locks ETH first, maker locks LEZ, taker claims LEZ, maker claims ETH.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires logos-scaffold localnet; run after make setup && make infra"]
 async fn test_atomic_swap_happy_path() {
     let env = TestEnv::setup(60).await;
-    let preimage = [0xABu8; 32];
+    let preimage = unique_preimage(0xAB);
     let hashlock: [u8; 32] = Sha256::digest(preimage).into();
 
     let now = now_unix();
@@ -205,8 +221,16 @@ async fn test_atomic_swap_happy_path() {
     // LEZ: exact (no gas).
     let maker_lez_after = balance_lez.get_balance(&env.maker_lez_id).await.unwrap();
     let taker_lez_after = balance_lez.get_balance(&env.taker_lez_id).await.unwrap();
-    assert_eq!(maker_lez_before - maker_lez_after, 1000, "maker should have spent 1000 LEZ");
-    assert_eq!(taker_lez_after - taker_lez_before, 1000, "taker should have gained 1000 LEZ");
+    assert_eq!(
+        maker_lez_before - maker_lez_after,
+        TEST_LEZ_AMOUNT,
+        "maker should have spent {TEST_LEZ_AMOUNT} LEZ"
+    );
+    assert_eq!(
+        taker_lez_after - taker_lez_before,
+        TEST_LEZ_AMOUNT,
+        "taker should have gained {TEST_LEZ_AMOUNT} LEZ"
+    );
 
     // ETH: contract drained, taker lost >= eth_amount, maker only spent gas.
     let contract_balance = env.deployer.get_balance(env.eth_htlc_address).await.unwrap();
@@ -229,9 +253,10 @@ async fn test_atomic_swap_happy_path() {
 // ── Edge case: maker times out when taker never locks ETH ──
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires logos-scaffold localnet; run after make setup && make infra"]
 async fn test_maker_refunds_on_timeout() {
     let env = TestEnv::setup(60).await;
-    let hashlock = [0xCDu8; 32]; // arbitrary hashlock, no taker will lock
+    let hashlock: [u8; 32] = Sha256::digest(unique_preimage(0xCD)).into(); // no taker will lock
 
     // Set ETH timelock to expire very soon (3s). The maker will time out
     // waiting for the taker to lock ETH.
@@ -258,10 +283,11 @@ async fn test_maker_refunds_on_timeout() {
 // ── Edge case: taker times out when maker never locks LEZ ──
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires logos-scaffold localnet; run after make setup && make infra"]
 async fn test_taker_refunds_on_timeout() {
     // Deploy contract with min_timelock_delta=1 so we can use short timelocks.
     let env = TestEnv::setup(1).await;
-    let preimage = [0xEFu8; 32];
+    let preimage = unique_preimage(0xEF);
 
     let now = now_unix();
     // ETH timelock = now + 10s. Short enough to time out quickly.

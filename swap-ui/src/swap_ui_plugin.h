@@ -1,19 +1,21 @@
 #ifndef SWAP_UI_PLUGIN_H
 #define SWAP_UI_PLUGIN_H
 
+#include <QJsonObject>
 #include <QString>
+#include <QStringList>
+#include <QTimer>
 #include <QVariantList>
+#include <functional>
+
 #include "swap_ui_interface.h"
 #include "LogosViewPluginBase.h"
 #include "rep_swap_ui_source.h"
 
 class LogosAPI;
+class LogosObject;
 class Swap;
 
-// Three base classes:
-//   - SwapUiSimpleSource     : generated from swap_ui.rep; property storage + slot decls.
-//   - SwapUiInterface        : extends PluginInterface for Qt plugin loading.
-//   - SwapUiViewPluginBase   : provides setBackend() to wire up Qt Remote Objects.
 class SwapUiPlugin : public SwapUiSimpleSource,
                      public SwapUiInterface,
                      public SwapUiViewPluginBase
@@ -33,14 +35,74 @@ public:
 
     // Slots from swap_ui.rep
     void setRole(const QString& role) override;
-    void fetchBalances(const QString& configJson) override;
+    void setConfigValue(const QString& key, const QString& value) override;
+    void loadConfig(const QString& configJson) override;
+    void loadEnvFile(const QString& path, const QString& role) override;
+    bool validateConfig() override;
 
-signals:
-    void eventResponse(const QString& eventName, const QVariantList& args);
+    void fetchBalances() override;
+    void startMaker(const QString& hashlockHex) override;
+    void startTaker(const QString& preimageHex) override;
+    void acceptOfferAndStartTaker(const QString& offerJson) override;
+    void refundLez(const QString& hashlockHex) override;
+    void refundEth(const QString& swapIdHex) override;
+
+    void initMessaging() override;
+    void publishOffer() override;
+    void fetchOffers() override;
+    void startAutoAccept() override;
+    void stopAutoAccept() override;
 
 private:
+    QString configJson() const;
+    QString messagingConfigJson() const;
+    void applyConfigObject(const QJsonObject& obj);
+    void applyOfferObject(const QJsonObject& offer);
+    bool validateConfigForAction(const QString& action,
+                                 const QString& hexValue = {},
+                                 const QString& hexKey = {});
+
+    void setBusyState();
+    void updateRunning();
+    void clearMakerProgress();
+    void clearTakerProgress();
+    void addMakerProgressStep(const QString& step);
+    void addTakerProgressStep(const QString& step);
+    void setResultStatus(const QString& resultJson,
+                         const QString& successStatus,
+                         const QString& failureStatus);
+    void applyBalancesResult(const QString& resultJson);
+    void handleMakerFinished(const QString& resultJson);
+    void handleTakerFinished(const QString& resultJson);
+    void handleAutoAcceptFinished(const QString& resultJson);
+    void handleJobStartResult(const QString& role, const QString& resultJson);
+    void pollMessagingStatus();
+    void ensureMessagingReady(std::function<void()> continuation = {});
+    void subscribeToSwapEvents();
+    void onSwapEventArgs(const QString& eventName, const QVariantList& args);
+    void onSwapEvent(const QString& eventName, const QString& payloadJson);
+    void handleProgressEvent(const QString& eventName, const QJsonObject& payload);
+    void handleFinishedEvent(const QString& eventName, const QJsonObject& payload);
+    void addValidationError(QJsonObject& errors, const QString& key, const QString& message) const;
+
+    static QJsonObject parseObject(const QString& json);
+    static QString jsonError(const QString& json);
+    static bool isErrorResult(const QString& json);
+    static QString compactJson(const QJsonObject& obj);
+    static QString compactJsonValue(const QJsonValue& value);
+    static QString payloadFromArgs(const QVariantList& args);
+    static QString jobIdFromResult(const QString& json);
+    static bool isPositiveInteger(const QString& value);
+    static bool isPositiveDecimal(const QString& value);
+    static bool isHexBytes(const QString& value, int bytes);
+    static bool isEthAddress(const QString& value);
+    static bool looksLikeBase58(const QString& value);
+
     LogosAPI* m_logosAPI = nullptr;
     Swap* m_swap = nullptr;
+    LogosObject* m_eventObject = nullptr;
+    QTimer m_messagingPollTimer;
+    bool m_messagingInitInFlight = false;
 };
 
 #endif // SWAP_UI_PLUGIN_H

@@ -31,22 +31,41 @@ const { test, run } = await import(
     resolve(root, "test-framework/framework.mjs")
 );
 
-test("swap_ui: loads UI and shows title", async (app) => {
+test("swap_ui: loads UI and shows primary chrome", async (app) => {
     await app.waitFor(
-        async () => { await app.expectTexts(["LEZ ↔ ETH Atomic Swap"]); },
+        async () => { await app.expectTexts(["LEZ Atomic Swap", "Configuration"]); },
         { timeout: 15000, interval: 500, description: "UI to load" }
     );
 });
 
-test("swap_ui: shows role buttons and primary action", async (app) => {
-    await app.expectTexts(["Maker", "Taker", "Fetch Balances"]);
+test("swap_ui: shows config panel", async (app) => {
+    await app.expectTexts([
+        "Configuration",
+        "Load Maker Env",
+        "Load Taker Env",
+        "Ethereum",
+        "LEZ",
+        "Swap Parameters",
+        "Messaging"
+    ]);
 });
 
 test("swap_ui: backend connects", async (app) => {
     await app.waitFor(
-        async () => { await app.expectTexts(["Connected", "Status: Ready"]); },
+        async () => { await app.expectTexts(["Ready"]); },
         { timeout: 15000, interval: 500, description: "backend connection" }
     );
+});
+
+test("swap_ui: validation errors are surfaced", async (app) => {
+    await app.waitFor(
+        async () => { await app.expectTexts(["Required"]); },
+        { timeout: 5000, interval: 250, description: "validation field error text" }
+    );
+});
+
+test("swap_ui: primary action labels are present", async (app) => {
+    await app.expectTexts(["Refresh", "Load Maker Env", "Load Taker Env"]);
 });
 
 run();

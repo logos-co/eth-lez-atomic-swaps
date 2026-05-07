@@ -93,6 +93,57 @@ unsafe fn parse_optional_bytes32(ptr: *const c_char, name: &str) -> std::result:
     }
 }
 
+fn env_key_to_config_key(key: &str) -> Option<&'static str> {
+    match key {
+        "ETH_RPC_URL" => Some("eth_rpc_url"),
+        "ETH_PRIVATE_KEY" => Some("eth_private_key"),
+        "ETH_HTLC_ADDRESS" => Some("eth_htlc_address"),
+        "LEZ_SEQUENCER_URL" => Some("lez_sequencer_url"),
+        "LEZ_SIGNING_KEY" => Some("lez_signing_key"),
+        "LEZ_WALLET_HOME" => Some("lez_wallet_home"),
+        "LEZ_ACCOUNT_ID" => Some("lez_account_id"),
+        "LEZ_HTLC_PROGRAM_ID" => Some("lez_htlc_program_id"),
+        "LEZ_AMOUNT" => Some("lez_amount"),
+        "ETH_AMOUNT" => Some("eth_amount"),
+        "LEZ_TIMELOCK_MINUTES" => Some("lez_timelock_minutes"),
+        "ETH_TIMELOCK_MINUTES" => Some("eth_timelock_minutes"),
+        "ETH_RECIPIENT_ADDRESS" => Some("eth_recipient_address"),
+        "LEZ_TAKER_ACCOUNT_ID" => Some("lez_taker_account_id"),
+        "POLL_INTERVAL_MS" => Some("poll_interval_ms"),
+        "WAKU_BOOTSTRAP_MULTIADDR" => Some("waku_bootstrap_multiaddr"),
+        "WAKU_LISTEN_PORT" => Some("waku_listen_port"),
+        _ => None,
+    }
+}
+
+fn dotenv_config_json(path: &str) -> std::result::Result<String, String> {
+    let iter = dotenvy::from_path_iter(path)
+        .map_err(|e| format!("failed to read env file '{path}': {e}"))?;
+    let mut config = serde_json::Map::new();
+
+    for item in iter {
+        let (key, value) = item.map_err(|e| format!("failed to parse env file '{path}': {e}"))?;
+        if let Some(config_key) = env_key_to_config_key(&key) {
+            config.insert(config_key.to_string(), serde_json::Value::String(value));
+        }
+    }
+
+    if !config.contains_key("eth_timelock_minutes") {
+        config.insert("eth_timelock_minutes".into(), serde_json::Value::String("10".into()));
+    }
+    if !config.contains_key("lez_timelock_minutes") {
+        config.insert("lez_timelock_minutes".into(), serde_json::Value::String("5".into()));
+    }
+    if !config.contains_key("poll_interval_ms") {
+        config.insert("poll_interval_ms".into(), serde_json::Value::String("2000".into()));
+    }
+    if !config.contains_key("waku_listen_port") {
+        config.insert("waku_listen_port".into(), serde_json::Value::String("0".into()));
+    }
+
+    Ok(serde_json::Value::Object(config).to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Config parsing (mirrors ConfigArgs::into_swap_config at src/cli/mod.rs:93)
 // ---------------------------------------------------------------------------
@@ -264,20 +315,18 @@ fn forward_progress(cb: ProgressCallback, user_data: *mut c_void) -> Option<swap
 /// `path` must be a valid null-terminated C string, or null to use the default ".env".
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn swap_ffi_load_env(path: *const c_char) -> *mut c_char {
-    let result = if path.is_null() {
-        dotenvy::dotenv().map(|_| ())
+    let path_str = if path.is_null() {
+        ".env"
     } else {
-        let path_str = match unsafe { c_str_to_str(path) } {
+        match unsafe { c_str_to_str(path) } {
             Some(s) => s,
             None => return json_err("invalid UTF-8 path"),
-        };
-        dotenvy::from_filename(path_str).map(|_| ())
+        }
     };
 
-    match result {
-        Ok(()) => json_ok(),
-        Err(e) if e.not_found() => json_ok(),
-        Err(e) => json_err(&format!("failed to load .env: {e}")),
+    match dotenv_config_json(path_str) {
+        Ok(json) => to_c_string(&json),
+        Err(e) => json_err(&e),
     }
 }
 
@@ -822,5 +871,59 @@ pub extern "C" fn swap_ffi_stop_maker_loop() {
 pub unsafe extern "C" fn swap_ffi_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
         drop(unsafe { CString::from_raw(ptr) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn dotenv_config_json_maps_env_keys_to_ui_config_keys() {
+        let path = std::env::temp_dir().join(format!(
+            "swap-ffi-env-{}.env",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "\
+ETH_RPC_URL=ws://127.0.0.1:8545
+ETH_PRIVATE_KEY=0x1111111111111111111111111111111111111111111111111111111111111111
+ETH_HTLC_ADDRESS=0x2222222222222222222222222222222222222222
+LEZ_SEQUENCER_URL=http://127.0.0.1:3040
+LEZ_WALLET_HOME=.scaffold/wallet
+LEZ_ACCOUNT_ID=7YXq9G
+LEZ_HTLC_PROGRAM_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+LEZ_AMOUNT=10
+ETH_AMOUNT=0.01
+ETH_RECIPIENT_ADDRESS=0x3333333333333333333333333333333333333333
+LEZ_TAKER_ACCOUNT_ID=8ZZq9G
+WAKU_BOOTSTRAP_MULTIADDR=/ip4/127.0.0.1/tcp/60010/p2p/test
+",
+        )
+        .unwrap();
+
+        let json = dotenv_config_json(path.to_str().unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["eth_rpc_url"], "ws://127.0.0.1:8545");
+        assert_eq!(value["lez_wallet_home"], ".scaffold/wallet");
+        assert_eq!(value["eth_timelock_minutes"], "10");
+        assert_eq!(value["lez_timelock_minutes"], "5");
+        assert_eq!(value["poll_interval_ms"], "2000");
+        assert_eq!(value["waku_listen_port"], "0");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dotenv_config_json_reports_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "swap-ffi-missing-{}.env",
+            std::process::id()
+        ));
+        let err = dotenv_config_json(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("failed to read env file"));
     }
 }

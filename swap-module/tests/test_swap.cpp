@@ -1,6 +1,42 @@
 #include <logos_test.h>
 #include "../src/swap_impl.h"
 
+#include <chrono>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+bool waitForContains(SwapImpl& impl, const std::string& jobId, const std::string& needle)
+{
+    for (int i = 0; i < 50; ++i) {
+        if (impl.jobStatus(jobId).find(needle) != std::string::npos) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+std::string extractJobId(const std::string& json)
+{
+    const std::string key = R"("job_id":")";
+    const auto start = json.find(key);
+    if (start == std::string::npos) {
+        return {};
+    }
+    const auto valueStart = start + key.size();
+    const auto valueEnd = json.find('"', valueStart);
+    if (valueEnd == std::string::npos) {
+        return {};
+    }
+    return json.substr(valueStart, valueEnd - valueStart);
+}
+
+} // namespace
+
 LOGOS_TEST(swap_impl_can_be_constructed) {
     SwapImpl impl;
     (void)impl;
@@ -18,16 +54,82 @@ LOGOS_TEST(fetch_balances_returns_ffi_json) {
 
 LOGOS_TEST(run_maker_forwards_progress_events) {
     SwapImpl impl;
-    std::string eventName;
-    std::string eventData;
+    std::string progressData;
     impl.emitEvent = [&](const std::string& name, const std::string& data) {
-        eventName = name;
-        eventData = data;
+        if (name == "maker.progress") {
+            progressData = data;
+        }
     };
 
     LOGOS_ASSERT_CONTAINS(impl.runMaker("{}", ""), R"("method":"runMaker")");
-    LOGOS_ASSERT_EQ(eventName, std::string("maker.progress"));
-    LOGOS_ASSERT_CONTAINS(eventData, "maker-started");
+    LOGOS_ASSERT_CONTAINS(progressData, R"("role":"maker")");
+    LOGOS_ASSERT_CONTAINS(progressData, R"("step":"EthLockDetected")");
+}
+
+LOGOS_TEST(load_env_returns_config_json) {
+    SwapImpl impl;
+    const auto config = impl.loadEnv(".env");
+    LOGOS_ASSERT_CONTAINS(config, R"("eth_rpc_url")");
+    LOGOS_ASSERT_CONTAINS(config, R"("eth_timelock_minutes":"10")");
+    LOGOS_ASSERT_CONTAINS(config, R"("lez_timelock_minutes":"5")");
+}
+
+LOGOS_TEST(start_maker_job_returns_status_and_finished_event) {
+    SwapImpl impl;
+    std::mutex mutex;
+    std::vector<std::string> events;
+    impl.emitEvent = [&](const std::string& name, const std::string& data) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back(name + ":" + data);
+    };
+
+    const auto started = impl.startMakerJob("{}", "");
+    LOGOS_ASSERT_CONTAINS(started, R"("ok":true)");
+    LOGOS_ASSERT_CONTAINS(started, R"("role":"maker")");
+    const auto jobId = extractJobId(started);
+    LOGOS_ASSERT_FALSE(jobId.empty());
+    LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
+
+    bool sawProgress = false;
+    bool sawFinished = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& event : events) {
+            if (event.find("maker.progress:") != std::string::npos
+                && event.find(std::string{R"("job_id":")"} + jobId + R"(")") != std::string::npos) {
+                sawProgress = true;
+            }
+            if (event.find("maker.finished:") != std::string::npos
+                && event.find("runMaker") != std::string::npos) {
+                sawFinished = true;
+            }
+        }
+    }
+    LOGOS_ASSERT_TRUE(sawProgress);
+    LOGOS_ASSERT_TRUE(sawFinished);
+}
+
+LOGOS_TEST(conflicting_maker_job_is_rejected) {
+    SwapImpl impl;
+    const auto first = impl.startMakerJob("{}", "");
+    const auto jobId = extractJobId(first);
+    LOGOS_ASSERT_FALSE(jobId.empty());
+
+    const auto second = impl.startMakerJob("{}", "");
+    LOGOS_ASSERT_CONTAINS(second, R"("ok":false)");
+    LOGOS_ASSERT_CONTAINS(second, "maker job already running");
+    LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
+}
+
+LOGOS_TEST(stop_maker_loop_job_marks_job_and_finishes) {
+    SwapImpl impl;
+    const auto started = impl.startMakerLoopJob("{}");
+    const auto jobId = extractJobId(started);
+    LOGOS_ASSERT_FALSE(jobId.empty());
+
+    const auto stopped = impl.stopJob(jobId);
+    LOGOS_ASSERT_CONTAINS(stopped, R"("cancel_requested":true)");
+    LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
 }
 
 // Note: the rest of the API delegates straight into libswap_ffi.{dylib,so} which

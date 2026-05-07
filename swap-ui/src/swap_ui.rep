@@ -1,26 +1,92 @@
-// Qt Remote Objects interface — defines the cross-process API between the
-// QML view (running in Basecamp's process) and the C++ backend plugin
-// (running in its own logos_host subprocess).
+// Qt Remote Objects interface for the Basecamp swap UI backend.
 //
-// Properties are auto-synced to QML replicas; slots are callable from QML
-// via logos.watch(backend.<slot>(...), onSuccess, onError).
-//
-// This is intentionally minimal for the initial scaffold. The full property/
-// slot surface (~40 props, ~10 slots from the legacy SwapBackend in
-// logos-module/src/swap_backend.h, recoverable from git history) should be
-// ported into this file as the UI grows.
+// QML binds to this surface only. The C++ swap_ui backend owns UI state and
+// calls the process-isolated `swap` core module for actual swap operations.
 
 class SwapUi
 {
+    // Session/status state
     PROP(QString status READWRITE)
+    PROP(QString errorMessage READWRITE)
     PROP(QString swapRole READWRITE)
     PROP(bool running READWRITE)
     PROP(QString lastResultJson READWRITE)
+    PROP(QString validationErrorsJson READWRITE)
 
-    // role: "maker" or "taker". Persisted in this UI session.
+    // Explicit config state. These fields are serialized into the JSON passed
+    // to swap.fetchBalances/runMaker/runTaker/refund*/publishOffer.
+    PROP(QString ethRpcUrl READWRITE)
+    PROP(QString ethPrivateKey READWRITE)
+    PROP(QString ethHtlcAddress READWRITE)
+    PROP(QString lezSequencerUrl READWRITE)
+    PROP(QString lezSigningKey READWRITE)
+    PROP(QString lezWalletHome READWRITE)
+    PROP(QString lezAccountId READWRITE)
+    PROP(QString lezHtlcProgramId READWRITE)
+    PROP(QString lezAmount READWRITE)
+    PROP(QString ethAmount READWRITE)
+    PROP(QString lezTimelockMinutes READWRITE)
+    PROP(QString ethTimelockMinutes READWRITE)
+    PROP(QString ethRecipientAddress READWRITE)
+    PROP(QString lezTakerAccountId READWRITE)
+    PROP(QString pollIntervalMs READWRITE)
+    PROP(QString wakuBootstrapMultiaddr READWRITE)
+
+    // Balances
+    PROP(QString ethAddress READWRITE)
+    PROP(QString ethBalance READWRITE)
+    PROP(QString lezAccount READWRITE)
+    PROP(QString lezBalance READWRITE)
+
+    // Maker state
+    PROP(bool makerRunning READWRITE)
+    PROP(QString makerJobId READWRITE)
+    PROP(QString makerCurrentStep READWRITE)
+    PROP(QStringList makerProgressSteps READWRITE)
+    PROP(QString makerResultJson READWRITE)
+
+    // Taker state
+    PROP(bool takerRunning READWRITE)
+    PROP(QString takerJobId READWRITE)
+    PROP(QString takerCurrentStep READWRITE)
+    PROP(QStringList takerProgressSteps READWRITE)
+    PROP(QString takerResultJson READWRITE)
+
+    // Maker auto-accept state
+    PROP(bool autoAcceptRunning READWRITE)
+    PROP(QString autoAcceptJobId READWRITE)
+    PROP(int autoAcceptCompleted READWRITE)
+    PROP(int autoAcceptFailed READWRITE)
+    PROP(int autoAcceptIteration READWRITE)
+    PROP(QStringList swapHistory READWRITE)
+
+    // Messaging/offers
+    PROP(bool messagingConnected READWRITE)
+    PROP(int messagingPeerCount READWRITE)
+    PROP(QString offersJson READWRITE)
+    PROP(QString offerResultJson READWRITE)
+    PROP(bool balancesLoading READWRITE)
+    PROP(bool messagingLoading READWRITE)
+    PROP(bool offersLoading READWRITE)
+    PROP(bool publishingLoading READWRITE)
+    PROP(bool refundsLoading READWRITE)
+
     SLOT(void setRole(const QString& role))
+    SLOT(void setConfigValue(const QString& key, const QString& value))
+    SLOT(void loadConfig(const QString& configJson))
+    SLOT(void loadEnvFile(const QString& path, const QString& role))
+    SLOT(bool validateConfig())
 
-    // Fetch balances by calling the swap core module via LogosAPI.
-    // Result is set on lastResultJson; running toggles around the call.
-    SLOT(void fetchBalances(const QString& configJson))
+    SLOT(void fetchBalances())
+    SLOT(void startMaker(const QString& hashlockHex))
+    SLOT(void startTaker(const QString& preimageHex))
+    SLOT(void acceptOfferAndStartTaker(const QString& offerJson))
+    SLOT(void refundLez(const QString& hashlockHex))
+    SLOT(void refundEth(const QString& swapIdHex))
+
+    SLOT(void initMessaging())
+    SLOT(void publishOffer())
+    SLOT(void fetchOffers())
+    SLOT(void startAutoAccept())
+    SLOT(void stopAutoAccept())
 }

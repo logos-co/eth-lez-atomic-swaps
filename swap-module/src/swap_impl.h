@@ -16,6 +16,10 @@
 #include <vector>
 #include <cstdint>
 #include <functional>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 
 extern "C" {
     #include "lib/swap_ffi.h"
@@ -30,8 +34,14 @@ public:
     // LogosProviderBase::emitEvent. Used to push progress updates from
     // long-running maker/taker flows back to UI subscribers.
     //
-    // Event names: "maker.progress", "taker.progress", "maker_loop.progress".
-    // Payload is the JSON string emitted by the FFI ProgressCallback.
+    // Event names:
+    // - maker.progress / maker.finished
+    // - taker.progress / taker.finished
+    // - maker_loop.progress / maker_loop.finished
+    //
+    // Payload shape:
+    // {"job_id":"...","role":"maker|taker|maker_loop","step":"...",
+    //  "data":{...},"result":{...},"error":null|string,"timestamp_ms":...}
     std::function<void(const std::string& eventName, const std::string& data)> emitEvent;
 
     // ---- Synchronous queries ----
@@ -75,19 +85,68 @@ public:
     std::string runMakerLoop(const std::string& configJson);
     void stopMakerLoop();
 
+    // ---- Async job API for UI clients ----
+    //
+    // These start worker threads and return immediately with a JSON job
+    // descriptor. The final result is delivered by the corresponding
+    // *.finished event and can also be read via jobStatus(jobId).
+    std::string startMakerJob(const std::string& configJson, const std::string& hashlockHex);
+    std::string startTakerJob(const std::string& configJson, const std::string& preimageHex);
+    std::string startMakerLoopJob(const std::string& configJson);
+    std::string stopJob(const std::string& jobId);
+    std::string jobStatus(const std::string& jobId);
+
 private:
-    // Trampoline used by the FFI ProgressCallback. Forwards (cstring, ctx) to
-    // the impl's `emitEvent` under the appropriate event name.
+    struct EmitterState;
+    struct JobState;
+
+    // Trampoline used by the FFI ProgressCallback. Wraps raw progress JSON in
+    // the enriched job payload shape before emitting.
     struct ProgressCtx {
-        SwapImpl* self;
-        std::string eventName;
+        std::shared_ptr<JobState> job;
+        std::shared_ptr<EmitterState> emitter;
+        std::string progressEventName;
     };
     static void progressTrampoline(const char* json, void* userData);
 
     // Convert a heap-allocated FFI char* to std::string and free it.
     static std::string takeAndFree(char* ptr);
 
+    std::string startJob(const std::string& role,
+                         const std::string& configJson,
+                         const std::string& secretHex);
+    std::shared_ptr<JobState> activeJobForRoleLocked(const std::string& role) const;
+    void setActiveJobForRoleLocked(const std::string& role, const std::shared_ptr<JobState>& job);
+    std::string runBlockingJob(const std::string& role,
+                               const std::string& configJson,
+                               const std::string& secretHex);
+
+    static std::string newJobId(const std::string& role, uint64_t id);
+    static std::string progressEventName(const std::string& role);
+    static std::string finishedEventName(const std::string& role);
+    static std::string normalizeRole(const std::string& role);
+    static bool isTerminalStatus(const std::string& status);
+    static int64_t timestampMs();
+    static void safeEmit(const std::shared_ptr<EmitterState>& emitter,
+                         const std::string& eventName,
+                         const std::string& payload);
+    static std::string progressPayload(const std::shared_ptr<JobState>& job,
+                                       const std::string& rawProgressJson);
+    static std::string finishedPayload(const std::shared_ptr<JobState>& job);
+    static std::string jobJson(const std::shared_ptr<JobState>& job);
+    static std::string errorJson(const std::string& error);
+    static void setJobFinished(const std::shared_ptr<JobState>& job,
+                               const std::string& resultJson);
+
     // Non-copyable, non-movable — owns FFI lifecycle.
     SwapImpl(const SwapImpl&) = delete;
     SwapImpl& operator=(const SwapImpl&) = delete;
+
+    std::shared_ptr<EmitterState> m_emitter;
+    std::atomic<uint64_t> m_nextJobId{1};
+    mutable std::mutex m_jobsMutex;
+    std::unordered_map<std::string, std::shared_ptr<JobState>> m_jobs;
+    std::shared_ptr<JobState> m_makerJob;
+    std::shared_ptr<JobState> m_takerJob;
+    std::shared_ptr<JobState> m_makerLoopJob;
 };
