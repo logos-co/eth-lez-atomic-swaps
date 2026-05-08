@@ -243,11 +243,14 @@ Both flakes are standalone — each builds inside its own subdirectory.
 
 ```bash
 make swap-vendor-ffi                                  # build libswap_ffi and copy into swap-module/lib/
-git add -f swap-module/lib/libswap_ffi.dylib          # macOS arm64 (or .so on Linux)
-                                                       # Nix only sees git-tracked files
 make swap-module-build                                 # nix build the core swap module
 make swap-ui-build                                     # nix build the UI (depends on swap-module via path:)
 ```
+
+`swap-module/lib/libswap_ffi.{dylib,so}` is a local platform artifact and is
+ignored by default. Until `swap-ffi` is built natively inside the Nix flake,
+local Nix builds may need that artifact force-added in a throwaway working tree
+so the flake source can see it; do not include platform binaries in normal PRs.
 
 ### Run the UI
 

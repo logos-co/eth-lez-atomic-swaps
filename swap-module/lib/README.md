@@ -15,13 +15,10 @@ make swap-vendor-ffi
 ```
 
 This runs `cargo build --release -p swap-ffi` and copies the resulting library
-into this directory. **Nix only sees git-tracked files** — for reproducible
-`nix build` of `swap-module`, force-add the relevant binary:
-
-```bash
-git add -f swap-module/lib/libswap_ffi.dylib   # macOS arm64
-git add -f swap-module/lib/libswap_ffi.so      # Linux
-```
+into this directory. The copied library is platform-specific and should stay out
+of normal PRs. If you need to test the current Nix flake locally, force-add the
+relevant binary only in a throwaway working tree because Nix only sees
+git-tracked flake sources.
 
 A future iteration should replace this vendored layout with a Nix-native build
 of `swap-ffi` via `crane` or `naersk` (see `swap-module/flake.nix`).

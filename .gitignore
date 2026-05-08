@@ -30,6 +30,16 @@ swap-ui/result
 swap-ui/result-*
 swap-ui/.direnv
 
-# Logos dev-boost — agent context generated locally; not part of source
+# Logos dev-boost / agent context generated locally; not part of source
 .agents/
 .mcp.json
+.sisyphus/
+AGENTS.md
+
+# Editor-generated agent rules
+.cursor/rules/logos.mdc
+
+# Nix result symlinks
+result
+result-*
+result-basecamp
