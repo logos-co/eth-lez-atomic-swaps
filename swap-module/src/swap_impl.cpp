@@ -6,6 +6,14 @@
 #include <sstream>
 #include <thread>
 
+#include <QCoreApplication>
+#include <QMetaObject>
+#include <QThread>
+
+#ifdef emit
+#undef emit
+#endif
+
 struct SwapImpl::EmitterState {
     std::mutex mutex;
     bool active = true;
@@ -533,15 +541,26 @@ void SwapImpl::safeEmit(const std::shared_ptr<EmitterState>& emitter,
     if (!emitter) {
         return;
     }
-    std::function<void(const std::string&, const std::string&)> emit;
-    {
-        std::lock_guard<std::mutex> lock(emitter->mutex);
-        if (!emitter->active || !emitter->emit) {
-            return;
+
+    auto invoke = [emitter, eventName, payload]() {
+        std::function<void(const std::string&, const std::string&)> emit;
+        {
+            std::lock_guard<std::mutex> lock(emitter->mutex);
+            if (!emitter->active || !emitter->emit) {
+                return;
+            }
+            emit = emitter->emit;
         }
-        emit = emitter->emit;
+        emit(eventName, payload);
+    };
+
+    auto* app = QCoreApplication::instance();
+    if (app && QThread::currentThread() != app->thread()) {
+        QMetaObject::invokeMethod(app, std::move(invoke), Qt::QueuedConnection);
+        return;
     }
-    emit(eventName, payload);
+
+    invoke();
 }
 
 std::string SwapImpl::progressPayload(const std::shared_ptr<JobState>& job,

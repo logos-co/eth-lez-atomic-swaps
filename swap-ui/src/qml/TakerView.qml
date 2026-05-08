@@ -11,16 +11,21 @@ ScrollView {
 
     property var takerSteps: [
         { name: "PreimageGenerated", label: "Generate Preimage" },
-        { name: "EthLocked",         label: "Lock ETH" },
-        { name: "LezLockDetected",   label: "Wait for LEZ Lock" },
-        { name: "LezClaimed",        label: "Claim LEZ" },
+        { name: "LockingEth",        label: "Lock ETH" },
+        { name: "EthLocked",         label: "ETH Locked" },
+        { name: "WaitingForLezLock", label: "Wait for LEZ Lock" },
+        { name: "LezLockDetected",   label: "LEZ Lock Detected" },
+        { name: "VerifyingLezEscrow", label: "Verify LEZ Escrow" },
+        { name: "LezEscrowVerified", label: "LEZ Escrow Verified" },
+        { name: "ClaimingLez",       label: "Claim LEZ" },
+        { name: "LezClaimed",        label: "LEZ Claimed" },
     ]
 
     property var completedSteps: {
         var done = []
         var steps = swapBackend.takerProgressSteps
         for (var i = 0; i < steps.length; i++) {
-            if (done.indexOf(steps[i]) < 0)
+            if (steps[i] !== swapBackend.takerCurrentStep && done.indexOf(steps[i]) < 0)
                 done.push(steps[i])
         }
         return done
@@ -168,6 +173,15 @@ ScrollView {
                 }
             }
 
+            Text {
+                visible: !swapBackend.takerRunning && !takerRoot.swapCompleted
+                text: "Offers are advertisements. A swap can complete only if the maker is live and responding."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
             // Offer list
             Repeater {
                 model: !swapBackend.takerRunning && !takerRoot.swapCompleted ? discoveredOffers : []
@@ -293,6 +307,13 @@ ScrollView {
                         color: Theme.textPrimary
                         font.pixelSize: Theme.fontNormal
                         font.bold: true
+                    }
+                    Text {
+                        text: "Starting will lock ETH and wait for the maker listener to lock LEZ."
+                        color: Theme.warning
+                        font.pixelSize: Theme.fontSmall
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
                     }
                     Text {
                         text: takerRoot.pendingOffer

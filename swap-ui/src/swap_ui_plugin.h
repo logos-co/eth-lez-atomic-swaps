@@ -68,6 +68,7 @@ private:
     void clearTakerProgress();
     void addMakerProgressStep(const QString& step);
     void addTakerProgressStep(const QString& step);
+    bool shouldHandleJobEvent(const QString& eventName, const QJsonObject& payload) const;
     void setResultStatus(const QString& resultJson,
                          const QString& successStatus,
                          const QString& failureStatus);

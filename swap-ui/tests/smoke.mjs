@@ -52,7 +52,7 @@ test("swap_ui: shows config panel", async (app) => {
 
 test("swap_ui: backend connects", async (app) => {
     await app.waitFor(
-        async () => { await app.expectTexts(["Ready"]); },
+        async () => { await app.expectTexts(["Please choose a configuration."]); },
         { timeout: 15000, interval: 500, description: "backend connection" }
     );
 });
@@ -66,6 +66,17 @@ test("swap_ui: validation errors are surfaced", async (app) => {
 
 test("swap_ui: primary action labels are present", async (app) => {
     await app.expectTexts(["Refresh", "Load Maker Env", "Load Taker Env"]);
+});
+
+test("swap_ui: live offer copy is present", async (app) => {
+    await app.click("Maker");
+    await app.expectTexts([
+        "Go Live & Publish Offer",
+        "Publishes your current rate as an actionable offer"
+    ]);
+
+    await app.click("Taker");
+    await app.expectTexts(["Offers are advertisements"]);
 });
 
 run();

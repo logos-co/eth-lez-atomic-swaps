@@ -251,10 +251,18 @@ Item {
                 Item { Layout.fillWidth: true }
                 Text {
                     visible: swapBackend.wakuBootstrapMultiaddr !== ""
-                    text: swapBackend.messagingConnected
-                          ? swapBackend.messagingPeerCount + " peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
-                          : "Connecting..."
-                    color: swapBackend.messagingConnected ? Theme.success : Theme.warning
+                    text: {
+                        if (swapBackend.messagingConnected)
+                            return swapBackend.messagingPeerCount + " peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                        if (swapBackend.messagingLoading)
+                            return "Connecting..."
+                        if (swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
+                            return "Swap in progress"
+                        return "Disconnected"
+                    }
+                    color: (swapBackend.messagingConnected || swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
+                           ? Theme.success
+                           : Theme.warning
                     font.pixelSize: Theme.fontSmall
                 }
                 Text {

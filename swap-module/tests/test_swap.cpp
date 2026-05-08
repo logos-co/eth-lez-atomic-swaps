@@ -1,6 +1,8 @@
 #include <logos_test.h>
 #include "../src/swap_impl.h"
 
+#include <QCoreApplication>
+
 #include <chrono>
 #include <mutex>
 #include <string>
@@ -33,6 +35,27 @@ std::string extractJobId(const std::string& json)
         return {};
     }
     return json.substr(valueStart, valueEnd - valueStart);
+}
+
+bool waitForEvent(std::mutex& mutex,
+                  const std::vector<std::string>& events,
+                  const std::string& firstNeedle,
+                  const std::string& secondNeedle = {})
+{
+    for (int i = 0; i < 50; ++i) {
+        QCoreApplication::processEvents();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for (const auto& event : events) {
+                if (event.find(firstNeedle) != std::string::npos
+                    && (secondNeedle.empty() || event.find(secondNeedle) != std::string::npos)) {
+                    return true;
+                }
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
 }
 
 } // namespace
@@ -90,23 +113,10 @@ LOGOS_TEST(start_maker_job_returns_status_and_finished_event) {
     LOGOS_ASSERT_FALSE(jobId.empty());
     LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
 
-    bool sawProgress = false;
-    bool sawFinished = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        for (const auto& event : events) {
-            if (event.find("maker.progress:") != std::string::npos
-                && event.find(std::string{R"("job_id":")"} + jobId + R"(")") != std::string::npos) {
-                sawProgress = true;
-            }
-            if (event.find("maker.finished:") != std::string::npos
-                && event.find("runMaker") != std::string::npos) {
-                sawFinished = true;
-            }
-        }
-    }
-    LOGOS_ASSERT_TRUE(sawProgress);
-    LOGOS_ASSERT_TRUE(sawFinished);
+    LOGOS_ASSERT_TRUE(waitForEvent(mutex, events,
+                                   "maker.progress:",
+                                   std::string{R"("job_id":")"} + jobId + R"(")"));
+    LOGOS_ASSERT_TRUE(waitForEvent(mutex, events, "maker.finished:", "runMaker"));
 }
 
 LOGOS_TEST(conflicting_maker_job_is_rejected) {

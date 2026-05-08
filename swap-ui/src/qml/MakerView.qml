@@ -10,10 +10,14 @@ ScrollView {
     background: Rectangle { color: Theme.background }
 
     property var makerSteps: [
-        { name: "EthLockDetected",   label: "Wait for ETH Lock" },
-        { name: "LezLocked",        label: "Lock LEZ" },
-        { name: "PreimageRevealed",  label: "Wait for Preimage" },
-        { name: "EthClaimed",        label: "Claim ETH" },
+        { name: "WaitingForEthLock", label: "Wait for ETH Lock" },
+        { name: "EthLockDetected",   label: "ETH Lock Detected" },
+        { name: "LezLocking",        label: "Lock LEZ" },
+        { name: "LezLocked",         label: "LEZ Locked" },
+        { name: "WaitingForPreimage", label: "Wait for Preimage" },
+        { name: "PreimageRevealed",  label: "Preimage Revealed" },
+        { name: "ClaimingEth",       label: "Claim ETH" },
+        { name: "EthClaimed",        label: "ETH Claimed" },
     ]
 
     // Track completed steps based on progress events
@@ -21,7 +25,7 @@ ScrollView {
         var done = []
         var steps = swapBackend.makerProgressSteps
         for (var i = 0; i < steps.length; i++) {
-            if (done.indexOf(steps[i]) < 0)
+            if (steps[i] !== swapBackend.makerCurrentStep && done.indexOf(steps[i]) < 0)
                 done.push(steps[i])
         }
         return done
@@ -39,7 +43,7 @@ ScrollView {
         if (!swapBackend.autoAcceptRunning) {
             if (makerRoot.cumulativeStats)
                 return "Offline \u2014 " + makerRoot.cumulativeStats
-            return "Set your rate and go live to start accepting swaps"
+            return "Set your rate and go live to publish an actionable offer"
         }
         if (swapBackend.makerCurrentStep === "" || swapBackend.makerCurrentStep === "WaitingForEthLock") {
             if (swapBackend.autoAcceptCompleted === 0)
@@ -128,18 +132,10 @@ ScrollView {
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
                     }
-                    Button {
-                        text: swapBackend.publishingLoading ? "Publishing..." : "Publish Offer"
-                        enabled: !swapBackend.running && !swapBackend.publishingLoading
-                                 && swapBackend.wakuBootstrapMultiaddr !== ""
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 36
-                        onClicked: swapBackend.publishOffer()
-                    }
                 }
             }
 
-            // --- Go Live Toggle ---
+            // --- Go Live Action ---
             Rectangle {
                 Layout.fillWidth: true
                 implicitHeight: goLiveCol.implicitHeight + Theme.spacingNormal * 2
@@ -156,38 +152,35 @@ ScrollView {
                     }
                     spacing: 6
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Theme.spacingNormal
-
-                        Text {
-                            text: "Go Live"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontNormal
-                            font.bold: true
-                        }
-
-                        Item { Layout.fillWidth: true }
-
-                        Switch {
-                            checked: swapBackend.autoAcceptRunning
-                            enabled: swapBackend.autoAcceptRunning
-                                     ? !swapBackend.messagingLoading
-                                     : (!swapBackend.makerRunning && !swapBackend.takerRunning && !swapBackend.messagingLoading)
-                            onToggled: {
-                                if (checked) {
-                                    swapBackend.startAutoAccept()
-                                } else {
-                                    swapBackend.stopAutoAccept()
-                                }
-                            }
-                        }
+                    Text {
+                        text: "Live Maker"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
                     }
 
                     Text {
-                        text: "Continuously accept swaps at this rate until stopped"
+                        text: "Publishes your current rate as an actionable offer and starts listening for buyer ETH locks."
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+
+                    Button {
+                        text: swapBackend.autoAcceptRunning ? "Stop Live Maker" : "Go Live & Publish Offer"
+                        enabled: swapBackend.autoAcceptRunning
+                                 ? !swapBackend.messagingLoading
+                                 : (!swapBackend.makerRunning && !swapBackend.takerRunning && !swapBackend.messagingLoading
+                                    && swapBackend.wakuBootstrapMultiaddr !== "")
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 42
+                        onClicked: {
+                            if (swapBackend.autoAcceptRunning)
+                                swapBackend.stopAutoAccept()
+                            else
+                                swapBackend.startAutoAccept()
+                        }
                     }
                 }
             }
@@ -203,7 +196,7 @@ ScrollView {
 
             // --- Progress (only visible during active swap) ---
             Rectangle {
-                visible: swapBackend.autoAcceptRunning && swapBackend.makerCurrentStep !== "" && swapBackend.makerCurrentStep !== "WaitingForEthLock"
+                visible: swapBackend.autoAcceptRunning && swapBackend.makerCurrentStep !== ""
                 Layout.fillWidth: true
                 implicitHeight: makerStepper.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface

@@ -193,7 +193,7 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     m_logosAPI = api;
     m_swap = new Swap(api);
     setBackend(this);
-    setStatus(QStringLiteral("Ready"));
+    setStatus(QStringLiteral("Please choose a configuration."));
     subscribeToSwapEvents();
     m_messagingPollTimer.start();
     qDebug() << "SwapUiPlugin: initialized";
@@ -545,6 +545,24 @@ void SwapUiPlugin::addTakerProgressStep(const QString& step)
     }
 }
 
+bool SwapUiPlugin::shouldHandleJobEvent(const QString& eventName, const QJsonObject& payload) const
+{
+    const auto jobId = valueString(payload, QStringLiteral("job_id"));
+    QString activeJobId;
+    if (eventName.startsWith(QStringLiteral("maker_loop."))) {
+        activeJobId = autoAcceptJobId();
+    } else if (eventName.startsWith(QStringLiteral("maker."))) {
+        activeJobId = makerJobId();
+    } else if (eventName.startsWith(QStringLiteral("taker."))) {
+        activeJobId = takerJobId();
+    }
+
+    if (activeJobId.isEmpty()) {
+        return false;
+    }
+    return !jobId.isEmpty() && jobId == activeJobId;
+}
+
 void SwapUiPlugin::setResultStatus(const QString& resultJson,
                                    const QString& successStatus,
                                    const QString& failureStatus)
@@ -613,6 +631,9 @@ void SwapUiPlugin::loadConfig(const QString& configJson)
     setErrorMessage(QString{});
     setStatus(QStringLiteral("Config loaded"));
     validateConfig();
+    if (!wakuBootstrapMultiaddr().isEmpty()) {
+        initMessaging();
+    }
 }
 
 void SwapUiPlugin::loadEnvFile(const QString& path, const QString& role)
@@ -639,6 +660,9 @@ void SwapUiPlugin::loadEnvFile(const QString& path, const QString& role)
         }
         validateConfig();
         setStatus(QStringLiteral("Config loaded from env"));
+        if (!wakuBootstrapMultiaddr().isEmpty()) {
+            initMessaging();
+        }
     });
 }
 
@@ -785,7 +809,7 @@ void SwapUiPlugin::handleJobStartResult(const QString& role, const QString& resu
         setMakerJobId(jobId);
         setAutoAcceptRunning(true);
         setMakerRunning(true);
-        setStatus(QStringLiteral("Auto-accept running"));
+        setStatus(QStringLiteral("Live maker listener running"));
     }
     updateRunning();
 }
@@ -1026,7 +1050,7 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
     const auto jobId = valueString(payload, QStringLiteral("job_id"));
 
     if (eventName == QStringLiteral("maker.progress")) {
-        if (!makerJobId().isEmpty() && !jobId.isEmpty() && makerJobId() != jobId) {
+        if (!shouldHandleJobEvent(eventName, payload)) {
             return;
         }
         setMakerCurrentStep(step);
@@ -1035,7 +1059,7 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
     }
 
     if (eventName == QStringLiteral("taker.progress")) {
-        if (!takerJobId().isEmpty() && !jobId.isEmpty() && takerJobId() != jobId) {
+        if (!shouldHandleJobEvent(eventName, payload)) {
             return;
         }
         setTakerCurrentStep(step);
@@ -1046,7 +1070,7 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
     if (eventName != QStringLiteral("maker_loop.progress")) {
         return;
     }
-    if (!autoAcceptJobId().isEmpty() && !jobId.isEmpty() && autoAcceptJobId() != jobId) {
+    if (!shouldHandleJobEvent(eventName, payload)) {
         return;
     }
 
@@ -1096,6 +1120,9 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
 
 void SwapUiPlugin::handleFinishedEvent(const QString& eventName, const QJsonObject& payload)
 {
+    if (!shouldHandleJobEvent(eventName, payload)) {
+        return;
+    }
     auto resultJson = compactJsonValue(payload.value(QStringLiteral("result")));
     const auto error = valueString(payload, QStringLiteral("error"));
     if (!error.isEmpty() && jsonError(resultJson).isEmpty()) {
@@ -1176,7 +1203,7 @@ void SwapUiPlugin::startAutoAccept()
         clearMakerProgress();
         setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
         addMakerProgressStep(QStringLiteral("WaitingForEthLock"));
-        setStatus(QStringLiteral("Auto-accept running"));
+        setStatus(QStringLiteral("Live maker listener running"));
         setBusyState();
 
         m_swap->startMakerLoopJobAsync(configJson(), [this](QString result) {
@@ -1191,7 +1218,7 @@ void SwapUiPlugin::stopAutoAccept()
         return;
     }
 
-    setStatus(QStringLiteral("Stopping auto-accept..."));
+    setStatus(QStringLiteral("Stopping live maker listener..."));
     if (!autoAcceptJobId().isEmpty()) {
         m_swap->stopJobAsync(autoAcceptJobId(), [this](QString result) {
             const auto error = jsonError(result);
