@@ -1,10 +1,16 @@
 use clap::Args;
 
-use crate::config::{SwapConfig, account_id_to_base58};
+use crate::config::SwapConfig;
+#[cfg(feature = "waku")]
+use crate::config::account_id_to_base58;
 use crate::error::{Result, SwapError};
+#[cfg(feature = "waku")]
 use crate::messaging::client::MessagingClient;
+#[cfg(feature = "waku")]
 use crate::messaging::node::MessagingNodeConfig;
+#[cfg(feature = "waku")]
 use crate::messaging::topics::{self, OFFERS_TOPIC};
+#[cfg(feature = "waku")]
 use crate::messaging::types::SwapOffer;
 use crate::swap::maker::run_maker;
 
@@ -22,9 +28,8 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
 
     let hashlock = match args.hashlock {
         Some(hex_str) => {
-            let bytes = hex::decode(&hex_str).map_err(|e| {
-                SwapError::InvalidConfig(format!("invalid hashlock hex: {e}"))
-            })?;
+            let bytes = hex::decode(&hex_str)
+                .map_err(|e| SwapError::InvalidConfig(format!("invalid hashlock hex: {e}")))?;
             let arr: [u8; 32] = bytes.try_into().map_err(|_| {
                 SwapError::InvalidConfig("hashlock must be 32 bytes (64 hex chars)".into())
             })?;
@@ -38,6 +43,7 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
         None => None,
     };
 
+    #[cfg(feature = "waku")]
     // If messaging is enabled, publish a standing offer so takers can discover us.
     let messaging = if let Some(msg_cfg) = &config.messaging {
         let messaging = MessagingClient::spawn(MessagingNodeConfig {
@@ -63,7 +69,9 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
             lez_timelock: config.lez_timelock,
             eth_timelock: config.eth_timelock,
             lez_htlc_program_id: hex::encode(
-                config.lez_htlc_program_id.iter()
+                config
+                    .lez_htlc_program_id
+                    .iter()
                     .flat_map(|w| w.to_le_bytes())
                     .collect::<Vec<u8>>(),
             ),
@@ -83,8 +91,14 @@ pub async fn cmd_maker(args: MakerArgs, config: &SwapConfig, json: bool) -> Resu
         None
     };
 
+    #[cfg(not(feature = "waku"))]
+    if !json {
+        println!("Waiting for taker to lock ETH...");
+    }
+
     let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None, None).await?;
 
+    #[cfg(feature = "waku")]
     // Explicit shutdown — WakuNodeHandle has no Drop. See delivery-dogfooding.md #3.
     if let Some(m) = messaging {
         let _ = m.shutdown().await;

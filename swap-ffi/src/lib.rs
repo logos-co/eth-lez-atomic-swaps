@@ -1,6 +1,8 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "waku")]
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -12,15 +14,14 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use swap_orchestrator::{
-    config::{LezAuth, MessagingConfig, SwapConfig, account_id_to_base58, eth_to_wei, parse_base58_account_id, parse_program_id},
+    config::{
+        LezAuth, MessagingConfig, SwapConfig, account_id_to_base58, eth_to_wei,
+        parse_base58_account_id, parse_program_id,
+    },
     eth::client::EthClient,
     lez::client::LezClient,
-    messaging::client::MessagingClient,
-    messaging::node::MessagingNodeConfig,
-    messaging::topics::OFFERS_TOPIC,
-    messaging::types::SwapOffer,
     swap::{
-        maker::{run_maker, run_maker_loop, AutoAcceptConfig},
+        maker::{AutoAcceptConfig, run_maker, run_maker_loop},
         progress::SwapProgress,
         refund::{now_unix, refund_eth, refund_lez},
         taker::run_taker,
@@ -28,11 +29,17 @@ use swap_orchestrator::{
     },
 };
 
+#[cfg(feature = "waku")]
+use swap_orchestrator::messaging::{
+    client::MessagingClient, node::MessagingNodeConfig, topics::OFFERS_TOPIC, types::SwapOffer,
+};
+
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
 }
 
+#[cfg(feature = "waku")]
 /// Process-wide embedded waku client. Initialized once via
 /// [`swap_ffi_messaging_init`] and torn down via
 /// [`swap_ffi_messaging_shutdown`]. `Arc` so we can hand out cheap
@@ -40,6 +47,11 @@ fn runtime() -> &'static Runtime {
 fn messaging_slot() -> &'static Mutex<Option<Arc<MessagingClient>>> {
     static MSG: OnceLock<Mutex<Option<Arc<MessagingClient>>>> = OnceLock::new();
     MSG.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(not(feature = "waku"))]
+fn messaging_disabled_json() -> *mut c_char {
+    to_c_string(r#"{"ok":false,"disabled":true,"error":"messaging disabled in this build"}"#)
 }
 
 /// Callback invoked on each progress event (called from a worker thread).
@@ -71,7 +83,10 @@ unsafe fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
 
 /// Parse an optional 32-byte hex string from a C pointer.
 /// Returns `None` for null pointers or empty strings.
-unsafe fn parse_optional_bytes32(ptr: *const c_char, name: &str) -> std::result::Result<Option<[u8; 32]>, *mut c_char> {
+unsafe fn parse_optional_bytes32(
+    ptr: *const c_char,
+    name: &str,
+) -> std::result::Result<Option<[u8; 32]>, *mut c_char> {
     if ptr.is_null() {
         return Ok(None);
     }
@@ -129,16 +144,28 @@ fn dotenv_config_json(path: &str) -> std::result::Result<String, String> {
     }
 
     if !config.contains_key("eth_timelock_minutes") {
-        config.insert("eth_timelock_minutes".into(), serde_json::Value::String("10".into()));
+        config.insert(
+            "eth_timelock_minutes".into(),
+            serde_json::Value::String("10".into()),
+        );
     }
     if !config.contains_key("lez_timelock_minutes") {
-        config.insert("lez_timelock_minutes".into(), serde_json::Value::String("5".into()));
+        config.insert(
+            "lez_timelock_minutes".into(),
+            serde_json::Value::String("5".into()),
+        );
     }
     if !config.contains_key("poll_interval_ms") {
-        config.insert("poll_interval_ms".into(), serde_json::Value::String("2000".into()));
+        config.insert(
+            "poll_interval_ms".into(),
+            serde_json::Value::String("2000".into()),
+        );
     }
     if !config.contains_key("waku_listen_port") {
-        config.insert("waku_listen_port".into(), serde_json::Value::String("0".into()));
+        config.insert(
+            "waku_listen_port".into(),
+            serde_json::Value::String("0".into()),
+        );
     }
 
     Ok(serde_json::Value::Object(config).to_string())
@@ -189,7 +216,8 @@ fn default_poll() -> String {
 }
 
 fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
-    let c: FfiConfig = serde_json::from_str(json_str).map_err(|e| format!("bad config JSON: {e}"))?;
+    let c: FfiConfig =
+        serde_json::from_str(json_str).map_err(|e| format!("bad config JSON: {e}"))?;
 
     let eth_htlc_address = c
         .eth_htlc_address
@@ -204,7 +232,10 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
     let lez_taker_account_id =
         parse_base58_account_id(&c.lez_taker_account_id).map_err(|e| e.to_string())?;
 
-    let lez_amount: u128 = c.lez_amount.parse().map_err(|e| format!("invalid lez_amount: {e}"))?;
+    let lez_amount: u128 = c
+        .lez_amount
+        .parse()
+        .map_err(|e| format!("invalid lez_amount: {e}"))?;
     let eth_amount: u128 = eth_to_wei(&c.eth_amount)?;
     let lez_timelock_minutes: u64 = c
         .lez_timelock_minutes
@@ -244,10 +275,12 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         eth_recipient_address,
         lez_taker_account_id,
         poll_interval: Duration::from_millis(poll_interval_ms),
-        messaging: c.waku_bootstrap_multiaddr.map(|bootstrap_multiaddr| MessagingConfig {
-            bootstrap_multiaddr,
-            listen_port: c.waku_listen_port,
-        }),
+        messaging: c
+            .waku_bootstrap_multiaddr
+            .map(|bootstrap_multiaddr| MessagingConfig {
+                bootstrap_multiaddr,
+                listen_port: c.waku_listen_port,
+            }),
     })
 }
 
@@ -286,7 +319,10 @@ fn outcome_to_json(outcome: &SwapOutcome, hashlock: &[u8; 32]) -> String {
 // Progress forwarding
 // ---------------------------------------------------------------------------
 
-fn forward_progress(cb: ProgressCallback, user_data: *mut c_void) -> Option<swap_orchestrator::swap::progress::ProgressSender> {
+fn forward_progress(
+    cb: ProgressCallback,
+    user_data: *mut c_void,
+) -> Option<swap_orchestrator::swap::progress::ProgressSender> {
     let cb = cb?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SwapProgress>();
 
@@ -372,12 +408,19 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
             Err(e) => return json_err(&e.to_string()),
         };
 
-        match run_maker(&config, &eth_client, &lez_client, hashlock_opt, None, progress).await {
+        match run_maker(
+            &config,
+            &eth_client,
+            &lez_client,
+            hashlock_opt,
+            None,
+            progress,
+        )
+        .await
+        {
             Ok(ref outcome) => {
                 let hashlock = match outcome {
-                    SwapOutcome::Completed { preimage, .. } => {
-                        Sha256::digest(preimage).into()
-                    }
+                    SwapOutcome::Completed { preimage, .. } => Sha256::digest(preimage).into(),
                     _ => hashlock_opt.unwrap_or([0u8; 32]),
                 };
                 to_c_string(&outcome_to_json(outcome, &hashlock))
@@ -429,12 +472,18 @@ pub unsafe extern "C" fn swap_ffi_run_taker(
             Err(e) => return json_err(&e.to_string()),
         };
 
-        match run_taker(&config, &eth_client, &lez_client, override_preimage, progress).await {
+        match run_taker(
+            &config,
+            &eth_client,
+            &lez_client,
+            override_preimage,
+            progress,
+        )
+        .await
+        {
             Ok(ref outcome) => {
                 let hashlock = match outcome {
-                    SwapOutcome::Completed { preimage, .. } => {
-                        Sha256::digest(preimage).into()
-                    }
+                    SwapOutcome::Completed { preimage, .. } => Sha256::digest(preimage).into(),
                     _ => [0u8; 32],
                 };
                 to_c_string(&outcome_to_json(outcome, &hashlock))
@@ -528,15 +577,16 @@ pub unsafe extern "C" fn swap_ffi_refund_eth(
         };
 
         match refund_eth(&eth_client, swap_id_bytes).await {
-            Ok(tx_hash) => {
-                to_c_string(&serde_json::json!({ "ok": true, "tx_hash": format!("{tx_hash}") }).to_string())
-            }
+            Ok(tx_hash) => to_c_string(
+                &serde_json::json!({ "ok": true, "tx_hash": format!("{tx_hash}") }).to_string(),
+            ),
             Err(e) => json_err(&e.to_string()),
         }
     })
 }
 
 /// Configuration for [`swap_ffi_messaging_init`].
+#[cfg(feature = "waku")]
 #[derive(Deserialize)]
 struct FfiMessagingConfig {
     /// Multiaddr of the messaging rendezvous node to dial.
@@ -555,6 +605,7 @@ struct FfiMessagingConfig {
 /// `config_json` must be a valid null-terminated JSON C string with
 /// shape `{"bootstrap_multiaddr": "...", "listen_port": 0}`.
 #[unsafe(no_mangle)]
+#[cfg(feature = "waku")]
 pub unsafe extern "C" fn swap_ffi_messaging_init(config_json: *const c_char) -> *mut c_char {
     let json_str = match unsafe { c_str_to_str(config_json) } {
         Some(s) => s,
@@ -593,10 +644,17 @@ pub unsafe extern "C" fn swap_ffi_messaging_init(config_json: *const c_char) -> 
     })
 }
 
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "waku"))]
+pub unsafe extern "C" fn swap_ffi_messaging_init(_config_json: *const c_char) -> *mut c_char {
+    messaging_disabled_json()
+}
+
 /// Shut down the embedded waku messaging client (drives stop+destroy).
 /// Required because `WakuNodeHandle` has no `Drop` impl. Safe to call
 /// even if init was never called.
 #[unsafe(no_mangle)]
+#[cfg(feature = "waku")]
 pub unsafe extern "C" fn swap_ffi_messaging_shutdown() -> *mut c_char {
     let client_arc = {
         let mut guard = messaging_slot().lock().unwrap();
@@ -620,10 +678,17 @@ pub unsafe extern "C" fn swap_ffi_messaging_shutdown() -> *mut c_char {
     })
 }
 
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "waku"))]
+pub unsafe extern "C" fn swap_ffi_messaging_shutdown() -> *mut c_char {
+    messaging_disabled_json()
+}
+
 /// Query the embedded messaging client's connection status.
 /// Returns JSON: `{"connected": bool, "peer_count": N}`.
 /// If messaging hasn't been initialized, returns `connected: false, peer_count: 0`.
 #[unsafe(no_mangle)]
+#[cfg(feature = "waku")]
 pub unsafe extern "C" fn swap_ffi_messaging_status() -> *mut c_char {
     let messaging = match messaging_slot().lock().unwrap().clone() {
         Some(m) => m,
@@ -637,6 +702,12 @@ pub unsafe extern "C" fn swap_ffi_messaging_status() -> *mut c_char {
     to_c_string(&result.to_string())
 }
 
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "waku"))]
+pub unsafe extern "C" fn swap_ffi_messaging_status() -> *mut c_char {
+    to_c_string(r#"{"connected":false,"peer_count":0,"disabled":true}"#)
+}
+
 /// Publish a standing swap offer via the embedded messaging client.
 ///
 /// In taker-locks-first, the maker publishes an offer without a hashlock.
@@ -646,9 +717,8 @@ pub unsafe extern "C" fn swap_ffi_messaging_status() -> *mut c_char {
 /// # Safety
 /// `config_json` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn swap_ffi_publish_offer(
-    config_json: *const c_char,
-) -> *mut c_char {
+#[cfg(feature = "waku")]
+pub unsafe extern "C" fn swap_ffi_publish_offer(config_json: *const c_char) -> *mut c_char {
     let json_str = match unsafe { c_str_to_str(config_json) } {
         Some(s) => s,
         None => return json_err("null or invalid config_json"),
@@ -699,10 +769,17 @@ pub unsafe extern "C" fn swap_ffi_publish_offer(
     })
 }
 
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "waku"))]
+pub unsafe extern "C" fn swap_ffi_publish_offer(_config_json: *const c_char) -> *mut c_char {
+    messaging_disabled_json()
+}
+
 /// Fetch available swap offers from the embedded messaging client.
 /// Returns JSON array of offers seen on the relay since the last call.
 /// Requires [`swap_ffi_messaging_init`] to have been called first.
 #[unsafe(no_mangle)]
+#[cfg(feature = "waku")]
 pub unsafe extern "C" fn swap_ffi_fetch_offers() -> *mut c_char {
     let messaging = match messaging_slot().lock().unwrap().clone() {
         Some(m) => m,
@@ -720,20 +797,31 @@ pub unsafe extern "C" fn swap_ffi_fetch_offers() -> *mut c_char {
         // Drain the relay mailbox. (Store query is a no-op stub — see
         // delivery-dogfooding.md #12 — so we only have what's been
         // delivered via gossipsub since this client started.)
-        let relay_msgs: Vec<SwapOffer> = messaging.poll_messages(OFFERS_TOPIC).await.unwrap_or_default();
+        let relay_msgs: Vec<SwapOffer> = messaging
+            .poll_messages(OFFERS_TOPIC)
+            .await
+            .unwrap_or_default();
         for offer in relay_msgs {
             let key = serde_json::to_string(&offer).unwrap_or_default();
             if !seen.insert(key) {
                 continue;
             }
             let mut val = serde_json::to_value(&offer).unwrap();
-            val.as_object_mut().unwrap().insert("timestamp_ms".to_string(), serde_json::json!(now_ms));
+            val.as_object_mut()
+                .unwrap()
+                .insert("timestamp_ms".to_string(), serde_json::json!(now_ms));
             offers.push(val);
         }
 
         let result = serde_json::json!({ "offers": offers });
         to_c_string(&result.to_string())
     })
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(feature = "waku"))]
+pub unsafe extern "C" fn swap_ffi_fetch_offers() -> *mut c_char {
+    to_c_string(r#"{"offers":[],"disabled":true,"error":"messaging disabled in this build"}"#)
 }
 
 /// Fetch ETH and LEZ wallet balances concurrently.
@@ -761,7 +849,10 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
     // Derive LEZ account ID.
     let lez_client_result = LezClient::new(&config);
-    let lez_account = lez_client_result.as_ref().ok().map(|c| account_id_to_base58(&c.account_id()));
+    let lez_account = lez_client_result
+        .as_ref()
+        .ok()
+        .map(|c| account_id_to_base58(&c.account_id()));
 
     runtime().block_on(async {
         // Fetch ETH balance.
@@ -769,14 +860,21 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
             let signer = eth_signer.map_err(|e| format!("invalid ETH private key: {e}"))?;
             let addr = signer.address();
             let eth_client = EthClient::new(&config).await.map_err(|e| e.to_string())?;
-            let balance = eth_client.provider().get_balance(addr).await.map_err(|e| e.to_string())?;
+            let balance = eth_client
+                .provider()
+                .get_balance(addr)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok::<String, String>(balance.to_string())
         };
 
         // Fetch LEZ balance.
         let lez_fut = async {
             let client = lez_client_result.as_ref().map_err(|e| e.to_string())?;
-            let balance = client.get_balance(&client.account_id()).await.map_err(|e| e.to_string())?;
+            let balance = client
+                .get_balance(&client.account_id())
+                .await
+                .map_err(|e| e.to_string())?;
             Ok::<String, String>(balance.to_string())
         };
 
@@ -845,10 +943,20 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
 
     runtime().block_on(async {
         let progress = forward_progress(cb, user_data);
+        #[cfg(feature = "waku")]
         // Reuse the FFI singleton messaging client if initialized,
         // so the auto-accept loop publishes through the already-connected node.
         let existing_messaging = messaging_slot().lock().unwrap().clone();
-        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress, existing_messaging).await;
+        #[cfg(not(feature = "waku"))]
+        let existing_messaging = None;
+        let result = run_maker_loop(
+            &base_config,
+            &auto_config,
+            &MAKER_LOOP_CANCEL,
+            progress,
+            existing_messaging,
+        )
+        .await;
         let json = serde_json::json!({
             "completed": result.total_completed,
             "failed": result.total_failed,
@@ -881,10 +989,7 @@ mod tests {
 
     #[test]
     fn dotenv_config_json_maps_env_keys_to_ui_config_keys() {
-        let path = std::env::temp_dir().join(format!(
-            "swap-ffi-env-{}.env",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("swap-ffi-env-{}.env", std::process::id()));
         fs::write(
             &path,
             "\
@@ -919,10 +1024,8 @@ WAKU_BOOTSTRAP_MULTIADDR=/ip4/127.0.0.1/tcp/60010/p2p/test
 
     #[test]
     fn dotenv_config_json_reports_missing_file() {
-        let path = std::env::temp_dir().join(format!(
-            "swap-ffi-missing-{}.env",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("swap-ffi-missing-{}.env", std::process::id()));
         let err = dotenv_config_json(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("failed to read env file"));
     }

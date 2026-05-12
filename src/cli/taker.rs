@@ -1,13 +1,20 @@
 use std::time::Duration;
 
 use clap::Args;
+#[cfg(feature = "waku")]
 use tracing::{debug, info};
 
-use crate::config::{MessagingConfig, SwapConfig};
+#[cfg(feature = "waku")]
+use crate::config::MessagingConfig;
+use crate::config::SwapConfig;
 use crate::error::{Result, SwapError};
-use crate::messaging::client::{decode_waku_payload, MessagingClient};
+#[cfg(feature = "waku")]
+use crate::messaging::client::{MessagingClient, decode_waku_payload};
+#[cfg(feature = "waku")]
 use crate::messaging::node::MessagingNodeConfig;
+#[cfg(feature = "waku")]
 use crate::messaging::topics::OFFERS_TOPIC;
+#[cfg(feature = "waku")]
 use crate::messaging::types::SwapOffer;
 use crate::swap::taker::run_taker;
 
@@ -25,9 +32,8 @@ pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Resu
 
     let override_preimage = match &args.preimage {
         Some(hex_str) => {
-            let bytes = hex::decode(hex_str).map_err(|e| {
-                SwapError::InvalidConfig(format!("invalid preimage hex: {e}"))
-            })?;
+            let bytes = hex::decode(hex_str)
+                .map_err(|e| SwapError::InvalidConfig(format!("invalid preimage hex: {e}")))?;
             let arr: [u8; 32] = bytes.try_into().map_err(|_| {
                 SwapError::InvalidConfig("preimage must be 32 bytes (64 hex chars)".into())
             })?;
@@ -36,6 +42,7 @@ pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Resu
         None => None,
     };
 
+    #[cfg(feature = "waku")]
     // Discover offer via messaging if available.
     if let Some(msg_cfg) = &config.messaging {
         discover_offer(msg_cfg, config, json).await?;
@@ -53,11 +60,8 @@ pub async fn cmd_taker(args: TakerArgs, config: &SwapConfig, json: bool) -> Resu
 
 /// Discover a matching swap offer via Logos Messaging.
 /// Returns once a valid offer is found (doesn't need to wait for escrow — taker locks first now).
-async fn discover_offer(
-    msg_cfg: &MessagingConfig,
-    config: &SwapConfig,
-    json: bool,
-) -> Result<()> {
+#[cfg(feature = "waku")]
+async fn discover_offer(msg_cfg: &MessagingConfig, config: &SwapConfig, json: bool) -> Result<()> {
     let messaging = MessagingClient::spawn(MessagingNodeConfig {
         listen_port: msg_cfg.listen_port,
         node_key_path: None,
@@ -107,9 +111,7 @@ async fn discover_offer(
         loop {
             let offers: Vec<SwapOffer> = messaging.poll_messages(OFFERS_TOPIC).await?;
             for offer in offers {
-                if offer.lez_amount == config.lez_amount
-                    && offer.eth_amount == config.eth_amount
-                {
+                if offer.lez_amount == config.lez_amount && offer.eth_amount == config.eth_amount {
                     info!(hashlock = %offer.hashlock, "found matching offer via relay");
                     break 'search offer;
                 }

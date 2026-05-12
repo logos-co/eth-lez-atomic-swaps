@@ -1,28 +1,38 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "waku")]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy::primitives::U256;
 use tokio::sync::mpsc;
 use tracing::info;
 
+#[cfg(feature = "waku")]
+use crate::messaging::{
+    client::MessagingClient, node::MessagingNodeConfig, topics::OFFERS_TOPIC, types::SwapOffer,
+};
+
+#[cfg(feature = "waku")]
+pub type MakerLoopMessaging = Arc<MessagingClient>;
+#[cfg(not(feature = "waku"))]
+pub type MakerLoopMessaging = ();
+
 use crate::{
-    config::{account_id_to_base58, SwapConfig},
+    config::SwapConfig,
     error::{Result, SwapError},
     eth::client::{EthClient, EthHTLC::SwapState},
     eth::watcher::{self, EthHtlcEvent},
     lez::client::LezClient,
     lez::watcher as lez_watcher,
     lez::watcher::LezHtlcEvent,
-    messaging::client::MessagingClient,
-    messaging::node::MessagingNodeConfig,
-    messaging::topics::OFFERS_TOPIC,
-    messaging::types::SwapOffer,
     swap::{
         progress::{self, ProgressSender, SwapProgress},
         refund::now_unix,
         types::SwapOutcome,
     },
 };
+
+#[cfg(feature = "waku")]
+use crate::config::account_id_to_base58;
 
 /// Wait until the cancel flag is set. Returns immediately if the flag is already set.
 /// If `cancel` is `None`, pends forever (no cancellation configured).
@@ -141,13 +151,8 @@ pub async fn run_maker(
     let watcher_lez_client = LezClient::new(config)?;
     let poll_interval = config.poll_interval;
     let lez_watcher_handle = tokio::spawn(async move {
-        let _ = lez_watcher::watch_escrow(
-            &watcher_lez_client,
-            hashlock,
-            poll_interval,
-            lez_tx,
-        )
-        .await;
+        let _ =
+            lez_watcher::watch_escrow(&watcher_lez_client, hashlock, poll_interval, lez_tx).await;
     });
 
     let preimage = loop {
@@ -239,12 +244,13 @@ pub async fn run_maker_loop(
     auto_config: &AutoAcceptConfig,
     cancel: &AtomicBool,
     progress: Option<ProgressSender>,
-    existing_messaging: Option<Arc<MessagingClient>>,
+    existing_messaging: Option<MakerLoopMessaging>,
 ) -> AutoAcceptResult {
     let mut completed: u32 = 0;
     let mut failed: u32 = 0;
     let mut iteration: u32 = 0;
 
+    #[cfg(feature = "waku")]
     // Reuse an existing messaging client if provided (e.g. the FFI
     // singleton), otherwise spawn a fresh one for the CLI path.
     let (messaging, owns_messaging) = if let Some(m) = existing_messaging {
@@ -269,6 +275,9 @@ pub async fn run_maker_loop(
     } else {
         (None, false)
     };
+
+    #[cfg(not(feature = "waku"))]
+    let _ = existing_messaging;
 
     progress::report(&progress, SwapProgress::AutoAcceptStarted);
 
@@ -328,6 +337,7 @@ pub async fn run_maker_loop(
             _ => {} // balance sufficient
         }
 
+        #[cfg(feature = "waku")]
         // Publish offer (if messaging configured).
         if let Some(messaging) = &messaging {
             let offer = SwapOffer {
@@ -353,10 +363,7 @@ pub async fn run_maker_loop(
             }
         }
 
-        progress::report(
-            &progress,
-            SwapProgress::AutoAcceptIteration { iteration },
-        );
+        progress::report(&progress, SwapProgress::AutoAcceptIteration { iteration });
 
         // Create ETH client for this iteration.
         let eth_client = match EthClient::new(&fresh_config).await {
@@ -423,6 +430,7 @@ pub async fn run_maker_loop(
         }
     }
 
+    #[cfg(feature = "waku")]
     // Explicit shutdown — WakuNodeHandle has no Drop. See delivery-dogfooding.md #3.
     // Only shutdown if we spawned the client ourselves (not the FFI singleton).
     if owns_messaging {

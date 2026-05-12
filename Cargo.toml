@@ -65,20 +65,28 @@ serde_json = "1"
 borsh = "1.5"
 
 # Messaging (Logos delivery — embedded waku node via libwaku FFI)
-waku-bindings = { git = "https://github.com/logos-messaging/logos-delivery-rust-bindings", rev = "95040402feae4ebc3038d66e1168390669bd6942" }
-multiaddr = "0.17"
-secp256k1 = { version = "0.26", features = ["rand"] }
+waku-bindings = { git = "https://github.com/logos-messaging/logos-delivery-rust-bindings", rev = "95040402feae4ebc3038d66e1168390669bd6942", optional = true }
+multiaddr = { version = "0.17", optional = true }
+secp256k1 = { version = "0.26", features = ["rand"], optional = true }
 # Pin rln to exactly 0.3.4 so cargo applies the [patch.crates-io] entry below
 # (which only matches version 0.3.4). Without this pin, cargo selects rln 0.3.5+
 # from crates.io and the patch is silently ignored. We don't use rln directly —
 # this dep exists solely to anchor the version for the patch.
-rln = "=0.3.4"
+rln = { version = "=0.3.4", optional = true }
 
 # Demo-only dependencies (behind `demo` feature flag)
 lez_htlc_methods = { path = "programs/lez-htlc/methods", optional = true }
 
 [features]
+default = ["waku"]
+waku = [
+    "dep:waku-bindings",
+    "dep:multiaddr",
+    "dep:secp256k1",
+    "dep:rln",
+]
 demo = [
+    "waku",
     "dep:lez_htlc_methods",
     "alloy/provider-anvil-node",
 ]
