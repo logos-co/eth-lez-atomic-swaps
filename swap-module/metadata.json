@@ -17,8 +17,7 @@
     },
     "external_libraries": [
       {
-        "name": "swap_ffi",
-        "vendor_path": "lib"
+        "name": "swap_ffi"
       }
     ],
     "cmake": {

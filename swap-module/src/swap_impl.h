@@ -22,7 +22,7 @@
 #include <unordered_map>
 
 extern "C" {
-    #include "lib/swap_ffi.h"
+    #include "swap_ffi.h"
 }
 
 class SwapImpl {

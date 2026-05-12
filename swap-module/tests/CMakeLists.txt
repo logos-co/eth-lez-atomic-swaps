@@ -9,6 +9,8 @@ logos_test(
     TEST_SOURCES
         main.cpp
         test_swap.cpp
+    EXTRA_INCLUDES
+        ../lib
     MOCK_C_SOURCES
         mocks/mock_swap_ffi.cpp
 )

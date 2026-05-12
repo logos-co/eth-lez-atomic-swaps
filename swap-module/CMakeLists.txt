@@ -22,3 +22,38 @@ logos_module(
         ${CMAKE_CURRENT_SOURCE_DIR}/generated_code
         ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
+
+set(SWAP_FFI_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
+
+if(WIN32)
+    find_library(SWAP_FFI_IMPORT_LIBRARY
+        NAMES swap_ffi libswap_ffi
+        PATHS "${SWAP_FFI_LIB_DIR}"
+        NO_DEFAULT_PATH
+    )
+    find_file(SWAP_FFI_RUNTIME_LIBRARY
+        NAMES swap_ffi.dll libswap_ffi.dll
+        PATHS "${SWAP_FFI_LIB_DIR}"
+        NO_DEFAULT_PATH
+    )
+
+    if(NOT SWAP_FFI_IMPORT_LIBRARY OR NOT SWAP_FFI_RUNTIME_LIBRARY)
+        message(FATAL_ERROR "swap_ffi is missing; ensure the Nix external library build staged both the import library and DLL into swap-module/lib")
+    endif()
+
+    target_link_libraries(swap_module_plugin PRIVATE "${SWAP_FFI_IMPORT_LIBRARY}")
+    install(FILES "${SWAP_FFI_RUNTIME_LIBRARY}" DESTINATION lib)
+else()
+    find_library(SWAP_FFI_LIBRARY
+        NAMES swap_ffi libswap_ffi
+        PATHS "${SWAP_FFI_LIB_DIR}"
+        NO_DEFAULT_PATH
+    )
+
+    if(NOT SWAP_FFI_LIBRARY)
+        message(FATAL_ERROR "swap_ffi is missing; ensure the Nix external library build staged it into swap-module/lib")
+    endif()
+
+    target_link_libraries(swap_module_plugin PRIVATE "${SWAP_FFI_LIBRARY}")
+    install(FILES "${SWAP_FFI_LIBRARY}" DESTINATION lib)
+endif()
