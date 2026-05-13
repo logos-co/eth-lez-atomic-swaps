@@ -5,7 +5,9 @@ include(LogosTest)
 
 logos_test(
     NAME swap_tests
-    MODULE_SOURCES ../src/swap_impl.cpp
+    MODULE_SOURCES
+        ../src/swap_impl.cpp
+        ../src/swap_delivery_adapter.cpp
     TEST_SOURCES
         main.cpp
         test_swap.cpp

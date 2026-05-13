@@ -75,6 +75,29 @@ LOGOS_TEST(fetch_balances_returns_ffi_json) {
     LOGOS_ASSERT_CONTAINS(impl.fetchBalances("{}"), R"("method":"fetchBalances")");
 }
 
+LOGOS_TEST(messaging_status_uses_delivery_backend_shape) {
+    SwapImpl impl;
+    const auto status = impl.messagingStatus();
+    LOGOS_ASSERT_CONTAINS(status, R"("method":"messagingStatus")");
+    LOGOS_ASSERT_CONTAINS(status, R"("backend":"delivery_module")");
+    LOGOS_ASSERT_CONTAINS(status, R"("connected":false)");
+}
+
+LOGOS_TEST(delivery_messaging_requires_runtime_before_init_or_publish) {
+    SwapImpl impl;
+    LOGOS_ASSERT_CONTAINS(impl.messagingInit("{}"), R"("ok":false)");
+    LOGOS_ASSERT_CONTAINS(impl.messagingInit("{}"), "delivery_module runtime");
+    LOGOS_ASSERT_CONTAINS(impl.publishOffer("{}"), R"("ok":false)");
+    LOGOS_ASSERT_CONTAINS(impl.publishOffer("{}"), "messaging not initialized");
+}
+
+LOGOS_TEST(fetch_offers_preserves_empty_offers_shape_without_runtime) {
+    SwapImpl impl;
+    const auto offers = impl.fetchOffers();
+    LOGOS_ASSERT_CONTAINS(offers, R"("offers":[])");
+    LOGOS_ASSERT_CONTAINS(offers, R"("backend":"delivery_module")");
+}
+
 LOGOS_TEST(run_maker_forwards_progress_events) {
     SwapImpl impl;
     std::string progressData;
