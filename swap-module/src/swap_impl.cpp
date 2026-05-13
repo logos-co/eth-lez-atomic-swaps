@@ -1,5 +1,7 @@
 #include "swap_impl.h"
 
+#include "swap_delivery_adapter.h"
+
 #include <chrono>
 #include <cstring>
 #include <cctype>
@@ -257,23 +259,23 @@ std::string SwapImpl::fetchBalances(const std::string& configJson) {
 }
 
 std::string SwapImpl::messagingInit(const std::string& configJson) {
-    return takeAndFree(swap_ffi_messaging_init(configJson.c_str()));
+    return swapDeliveryMessagingInit(configJson);
 }
 
 std::string SwapImpl::messagingShutdown() {
-    return takeAndFree(swap_ffi_messaging_shutdown());
+    return swapDeliveryMessagingShutdown();
 }
 
 std::string SwapImpl::messagingStatus() {
-    return takeAndFree(swap_ffi_messaging_status());
+    return swapDeliveryMessagingStatus();
 }
 
 std::string SwapImpl::publishOffer(const std::string& configJson) {
-    return takeAndFree(swap_ffi_publish_offer(configJson.c_str()));
+    return swapDeliveryPublishOffer(configJson);
 }
 
 std::string SwapImpl::fetchOffers() {
-    return takeAndFree(swap_ffi_fetch_offers());
+    return swapDeliveryFetchOffers();
 }
 
 std::string SwapImpl::refundLez(const std::string& configJson, const std::string& hashlockHex) {

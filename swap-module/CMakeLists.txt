@@ -16,6 +16,8 @@ logos_module(
     SOURCES
         src/swap_impl.h
         src/swap_impl.cpp
+        src/swap_delivery_adapter.h
+        src/swap_delivery_adapter.cpp
         generated_code/swap_qt_glue.h
         generated_code/swap_dispatch.cpp
     INCLUDE_DIRS
