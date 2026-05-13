@@ -1,444 +1,111 @@
-# logos-delivery dogfooding log
+# logos-delivery-module v0.1.1 dogfooding log
 
-We're integrating
-[`waku-bindings`](https://github.com/logos-messaging/logos-delivery-rust-bindings)
-into the LEZ ↔ ETH atomic-swaps PoC (this repo). This file tracks
-papercuts, missing features, surprising behaviors, and workarounds we
-hit so the `logos-delivery` / `waku-bindings` team can prioritize.
+This file tracks only the findings from integrating
+[`logos-delivery-module`](https://github.com/logos-co/logos-delivery-module/tree/v0.1.1)
+into this app during this session.
 
-**Pinned to:** `waku-bindings` rev
-[`9504040`](https://github.com/logos-messaging/logos-delivery-rust-bindings/tree/9504040)
-(master HEAD as of 2026-04-16) → wraps libwaku from
-[`logos-messaging-nim`](https://github.com/logos-messaging/logos-delivery)
-via `waku-sys`'s git submodule.
+## Integration scope
 
-## Format
+- **Module:** `logos-co/logos-delivery-module` v0.1.1
+- **Resolved revision:** `0c346c0c2ab2404c11a62cd6c385e806e8465434`
+- **Boundary:** `swap-module` owns Delivery-backed offer publish/fetch.
+- **UI dependency rule:** `swap-ui` continues to depend only on `swap`.
+- **M1 scope:** offer publish/fetch on `/atomic-swaps/1/offers/json` only.
+- **Deferred:** per-swap maker/taker coordination on `/atomic-swaps/1/swap-<hashlock>/json`.
 
-Each entry: **what we hit**, **where (file:line in bindings)**,
-**workaround**, **suggested fix**.
+## Docs checklist followed
 
-Anyone touching `src/messaging/` or `swap-ffi/src/lib.rs` is expected
-to append here when they hit something new. New issues at the bottom.
+- Added metadata dependency named exactly `delivery_module`.
+- Added flake input named exactly `delivery_module`.
+- Pinned the flake input to `github:logos-co/logos-delivery-module/v0.1.1`.
+- Kept the universal public header free of Qt/Logos runtime types.
+- Injected `LogosAPI*` from generated Qt glue during Nix `preConfigure`; no generated files were edited by hand.
+- Followed Delivery lifecycle: `createNode -> start -> subscribe -> send -> unsubscribe -> stop`.
+- Consumed `messageReceived` event payload from `data[2]` as base64.
 
----
+## Positive highlights
 
-## 1. No autosharding helper
+- The Delivery demo's `LogosModules(api)` pattern made dependency-module calls easy to discover and adapt.
+- `delivery_module_plugin.h` documents the event contract clearly enough to wire `messageReceived`, `messageError`, and `connectionStateChanged` without reading liblogosdelivery internals.
+- The module README clearly explains the Nix build outputs and synchronous method surface.
 
-**What:** `relay_subscribe` / `relay_publish_message` require an
-explicit `&PubsubTopic`. The C API (`libwaku.h`) only defines
-`waku_relay_publish(... pubSubTopic, ...)` — no autosharding overload.
-Apps coming from the nwaku REST `/relay/v1/auto/...` endpoints (which
-auto-route by content topic) have to compute pubsub topics themselves.
+## Issues and classifications
 
-**Where:** `waku-bindings/src/node/mod.rs:118-136`,
-`waku-bindings/src/node/relay.rs:43-71`,
-`logos-messaging-nim/library/libwaku.h`.
+### Upstream #18: multi-instance port configuration
 
-**Workaround:** Hardcode `cluster_id=0`, `shards=[0]`,
-`pubsub_topic="/waku/2/rs/0/0"` across all nodes (see
-`src/messaging/topics.rs`). Content topics (`/atomic-swaps/1/offers/json`)
-are kept as-is and routed application-side.
+**Classification:** upstream/module issue; locally mitigated, not fixed.
 
-**Suggested fix:** Either expose RFC-51 autosharding hash as a helper
-(`PubsubTopic::auto_for(content_topic, cluster_id)`), or add a
-`relay_publish_auto(content_topic, message)` convenience that derives
-the pubsub topic.
+The adapter accepts `delivery.portsShift` or top-level `portsShift` in `messagingInit` config so two local nodes can be tested without hardcoded port collisions. This is only a local workaround. It is not equivalent to consumer-neutral environment-variable port overrides and should not be treated as an upstream fix.
 
-## 2. Stale doc comment on `relay_publish_message`
+**Disposition:** track upstream; do not claim resolved from this repo.
 
-**What:** Docstring says "The pubsub_topic parameter is optional and
-if not specified it will be derived from the contentTopic", but the
-parameter is `&PubsubTopic` (not `Option<&PubsubTopic>`). Cost us 30
-minutes thinking we'd missed an overload.
+### Upstream #26: `messageReceived` timestamp shape
 
-**Where:** `waku-bindings/src/node/mod.rs:128-130`.
+**Classification:** upstream docs/API consistency issue; tracked, not re-filed from this repo yet.
 
-**Suggested fix:** Either update the doc, or implement what the doc
-claims (see #1).
+The documented/demo contract gives `messageReceived` a nanoseconds-since-epoch timestamp while other events expose local ISO-8601 timestamps. The adapter avoids depending on that inconsistent timestamp and stamps received offers locally with `timestamp_ms`.
 
-## 3. No `Drop` impl on `WakuNodeHandle`
+**Disposition:** mention if filing docs/API feedback; no local blocker for M1.
 
-**What:** Cleanup requires explicit `stop().await` then
-`waku_destroy().await`. Panics leak the underlying Nim runtime, libp2p
-host stays alive, TCP port stays bound — the next test run that tries
-to bind the same port fails.
+### Upstream #27: watch item
 
-**Where:** No `impl Drop` anywhere in `waku-bindings/src/node/`. See
-also `src/node/context.rs:38-40` (`reset_ptr` does nothing async).
+**Classification:** watch-only until reproduced in this repo.
 
-**Workaround:**
-- `MessagingClient::shutdown()` drives both async destructors
-  (`src/messaging/client.rs`).
-- Every CLI/demo/test path calls `shutdown().await` (or
-  `Arc::try_unwrap(...).shutdown().await`).
-- Use a free-port helper for ephemeral nodes (see #12) instead of fixed
-  ports, so leaks on panic don't cascade into the next run.
+No runtime evidence from this integration has reproduced #27 yet.
 
-**Suggested fix:** A `Drop` impl that does best-effort
-`stop()`+`waku_destroy()`. Even a sync best-effort cleanup that warns
-on failure is better than silent leak.
+**Disposition:** do not confirm or file from this integration unless M1 runtime verification reproduces it.
 
-## 4. Event callback runs on a Nim thread, not a tokio task
+### Downstream: old Waku bootstrap gate blocked Delivery defaults
 
-**What:** `set_event_callback` invokes the closure on a libwaku-spawned
-Nim thread. You can't `.await` or use most tokio primitives inside.
+**Classification:** downstream app issue; fixed locally.
 
-**Where:** `waku-bindings/src/macros.rs:5-28` (the FFI trampoline),
-`waku-bindings/src/node/mod.rs:76-81`.
+`swap-ui` previously required `waku_bootstrap_multiaddr` before calling `messagingInit`. Delivery can bootstrap from its own preset/config, so the UI now allows an empty legacy bootstrap field while still validating non-empty multiaddrs.
 
-**Workaround:** Use `tokio::sync::mpsc::UnboundedSender::send` (it's
-non-blocking and runtime-agnostic) inside the callback to hand off to
-async code (see `src/messaging/node.rs::register_callback`).
+**Disposition:** fixed in this repo.
 
-**Suggested fix:** Document this prominently. Optionally provide a
-helper that wraps the callback into a `Stream<Item = WakuEvent>` so
-users don't have to wire the channel themselves.
+### Repo reproducibility: ignored backend lockfile
 
-## 5. `set_event_callback` is only on `Initialized` state
+**Classification:** repo issue; fixed locally.
 
-**What:** Must register before `start().await`. Easy to mis-shape an
-API where callback registration happens after a "ready" handle is
-returned.
+`swap-module/flake.lock` was ignored, which made the Delivery dependency graph less reproducible. The ignore rule was removed and the lockfile now records the resolved `delivery_module` revision.
 
-**Where:** `src/node/mod.rs:81-87` (impl block on `Initialized` only).
+**Disposition:** fixed in this repo.
 
-**Workaround:** Our `spawn_node` enforces ordering: `waku_new` →
-register callback → `start` → return handle (`src/messaging/node.rs`).
+### Upstream packaging/cache: cold downstream build took about an hour
 
-**Suggested fix:** Either allow `set_event_callback` on `Running` too
-(if libwaku supports late registration), or add a constructor variant
-`waku_new_with_events(cfg, cb)` that fuses the two steps.
+**Classification:** upstream packaging / binary-cache issue; not acceptable as normal downstream app friction.
 
-## 6. `dns_discovery_url`, `storenode`, `log_level` are `Option<&'static str>`
+Adding `logos-delivery-module` to this app caused a cold local build of heavy transitive dependencies before the app could build, especially `zerokit-0.9.0-vendor-staging`, `zerokit-0.9.0`, `liblogosdelivery-dev`, and `logos-delivery_module-module`. The machine already had the Logos Cachix substituter configured, but these exact derivations still built locally for this platform/input graph.
 
-**What:** These config fields take `&'static str`, which is awkward
-for runtime values from env vars / TOML / FFI JSON. We don't use them
-yet but will need ENRTREE for production.
+A downstream app developer should not have to spend about an hour compiling Delivery's native dependency stack just to try a documented module integration. If cache misses are expected for supported systems, the docs should call that out explicitly; preferably, CI should publish substitutes for the module and its heavy transitive dependencies.
 
-**Where:** `waku-bindings/src/node/config.rs:37, 44, 58`.
+**Suggested fix:** publish/verify binary cache artifacts for supported systems for `zerokit`, `liblogosdelivery-dev`, `logos-delivery_module-module`, and the module headers/lib outputs; add a cold-consumer build check that confirms a downstream app can integrate Delivery mostly from cache.
 
-**Workaround:** `Box::leak(s.into_boxed_str())` (when we get there).
+**Disposition:** file upstream packaging/cache feedback; do not normalize as expected app-developer experience.
 
-**Suggested fix:** Change to `Option<String>` or
-`Option<Cow<'static, str>>`.
+## Verification status
 
-## 7. `store_query`'s `peer_addr` panics on invalid multiaddr
+- Static boundary proof: complete.
+- Adapter LSP diagnostics: passing.
+- Adapter no-Qt stub compile with `-Wall -Wextra -Werror`: passing.
+- `git diff --check`: passing.
+- Flake evaluation and dry-runs: passing.
+- Full package build: passing after the cold Delivery dependency graph completed.
+- Unit tests: passing.
+- Same-artifact runtime smoke: `QT_QPA_PLATFORM=offscreen nix run . -- --help` passes.
+- Cross-node Delivery receipt proof: still pending; needs two-node `messageReceived` evidence, not just a successful build or `send` result.
 
-**What:** Internal `peer_addr.parse::<Multiaddr>().expect(...)` —
-caller passes `&str`, gets a panic instead of a `Result`.
+## Evidence required before upstream/downstream filing
 
-**Where:** `waku-bindings/src/node/store.rs:161`.
-
-**Workaround:** N/A — we don't currently call `store_query` against a
-real peer (see #8) so this hasn't bitten us, but it's a landmine.
-
-**Suggested fix:** Take `&Multiaddr` typed parameter instead of `&str`,
-or return `Err` from `store_query`.
-
-## 8. No way to enable the Waku store protocol server-side
-
-**What:** `WakuNodeConfig` exposes `storenode: Option<&'static str>`
-which is the multiaddr of a store node to QUERY, but there's no
-`store: bool` / `store_message_db_url: String` equivalent of the nwaku
-CLI flags. Embedded nodes can only consume store, not serve it.
-
-**Where:** `waku-bindings/src/node/config.rs:36-38` — no `store`
-fields. Compare to nwaku CLI: `--store=true
---store-message-db-url=sqlite:///data/store.db`.
-
-**Impact for us:** The previous Docker setup had `nwaku1` with
-`--store=true`, so a taker that came online AFTER the maker published
-could query store and find the offer. With embedded nodes we lose
-that. `MessagingClient::store_query` is now a no-op stub returning
-empty (`src/messaging/client.rs`). For the demo we work around it by
-having the taker subscribe BEFORE the maker publishes; for the
-auto-accept maker loop we rely on periodic republishing; for the
-manual `swap-cli maker` flow there's a regression where takers who
-join after the publish can't find the offer.
-
-**Suggested fix:** Expose store-server enablement in `WakuNodeConfig`
-mirroring the nwaku CLI flags (`store`, `store_message_db_url`,
-`store_message_retention_policy`). Without this, "embedded node" is
-strictly less capable than "node-in-Docker".
-
-## 9. Not on crates.io at current version
-
-**What:** `Cargo.toml` declares `1.0.0`; latest crates.io publish is
-`waku-bindings 0.6.0` (Feb 2024). Downstream apps must depend via
-`git = "...", rev = "..."` and pin manually.
-
-**Suggested fix:** Cut a `1.0.0` (or `0.7.0`) crates.io release.
-
-## 10. Build needs `git + GNU make + C toolchain` (Nim auto-bootstrapped)
-
-**What:** `waku-sys/build.rs` runs `git submodule init/update` and
-`make libwaku STATIC=1` inside `vendor/`. First build is 5–10 minutes
-on Apple Silicon. Bootstraps Nim itself via `nimbus-build-system`,
-which is great — no manual Nim install required.
-
-**Where:** `waku-sys/build.rs`.
-
-**Suggested fix:** Document explicitly in the README which host tools
-are required. Consider publishing pre-built `libwaku.a` artifacts for
-common platforms to skip the Nim compile.
-
-## 11. macOS aarch64 needs specific linker flags
-
-**What:** Without `-framework CoreFoundation -framework Security
--framework CoreServices -lresolv`, link fails on Apple Silicon
-(libwaku pulls in Go-sourced crypto deps).
-
-**Where:** `logos-delivery-rust-bindings/.cargo/config.toml`.
-
-**Workaround:** Same flags copied into our workspace
-`.cargo/config.toml`. Without this, downstream consumers must
-rediscover the requirement empirically.
-
-**Suggested fix:** Either bake the flags into `waku-sys/build.rs` via
-`println!("cargo:rustc-link-arg=...")`, or document them prominently
-as a required downstream config.
-
-## 12. `tcp_port: 0` is rejected by libwaku despite docs saying "random"
-
-**What:** `WakuNodeConfig.tcp_port` doc says `Use 0 for random` (`src/node/config.rs:17`).
-Passing `Some(0)` actually fails at runtime:
-```
-[Chronicles] CREATE_NODE failed
-exception in createWaku when parsing configuration. exc: The supplied port
-must be an integer value in the range 1-65535. string that could not be
-parsed: 0. expected type: Port
-```
-
-**Where:** Surfaces from libwaku Nim config parsing
-(`logos-messaging-nim`); the bindings just forward the value via JSON.
-
-**Workaround:** `pick_free_port()` helper in
-`src/messaging/node.rs` — bind a transient `TcpListener` on
-`127.0.0.1:0`, read the OS-assigned port, drop the listener, hand
-that port to libwaku. Small race window but acceptable for
-tests/demo. Combined with #3, this prevents port leaks from
-poisoning subsequent runs.
-
-**Suggested fix:** Either accept `0` in libwaku and bind to an
-OS-assigned port internally (the natural OS-level meaning), or fix
-the doc to remove the "random" claim.
-
-## 13. `WakuNodeHandle` is `!Send` and `!Sync` — async fns return non-`Send` Futures
-
-**What:** `WakuNodeContext` holds a raw `*mut c_void`, so the auto-derived
-`Send`/`Sync` fail. Calling any `node.relay_publish_message(...).await`
-from inside `tokio::spawn` fails to compile because the returned Future
-captures `&WakuNodeHandle` across the await point.
-
-**Where:** `waku-bindings/src/node/context.rs:10-13` — raw pointer field.
-
-**Workaround:**
-- `unsafe impl Send + Sync for MessagingClient` (we know libwaku is
-  thread-safe — every operation goes through libwaku's own internal
-  locking).
-- That alone isn't enough: the inner `&WakuNodeHandle` captured by
-  awaited inner futures still pollutes auto-trait inference. So every
-  `MessagingClient` async fn wraps the inner await in
-  `tokio::task::block_in_place(|| Handle::current().block_on(...))`.
-  This keeps the !Send future local to the closure (sync from the
-  outer state machine's perspective), so the outer `async fn`'s
-  Future is `Send` and works inside `tokio::spawn`.
-- Documented at `src/messaging/client.rs::run_blocking`.
-
-**Suggested fix:** Add `unsafe impl Send for WakuNodeContext {}` and
-`unsafe impl Sync for WakuNodeContext {}` upstream — libwaku is
-designed for concurrent multi-thread use. Without this, downstream
-consumers can't use the bindings naturally with
-multi-thread tokio runtimes; we had to invent the `block_in_place`
-trampoline.
-
-## 14. `rln` transitive dep is a dep-graph wedge
-
-**What:** `waku-bindings` depends on `rln 0.3.4`, which strict-pins
-many of its deps (`ark-serialize "=0.4.1"`, `thiserror "=1.0.39"`,
-`color-eyre "=0.6.2"`, `wasmer "=2.3.0"`, ...) — these conflict with
-modern downstream trees. Specifically: our LEZ deps require
-`ark-serialize ^0.4.2` (via `logos-blockchain-groth16`), so the
-resolver fails immediately.
-
-The `rln` Rust crate is pulled in only for symbol availability —
-`waku-bindings/src/lib.rs` does `use rln;` with `#[allow(unused)]`
-because `libwaku`'s Nim code statically references `rln` C symbols
-(`new`, `flush`, `atomic_operation`, `generate_rln_proof`,
-`verify_with_roots`, `poseidon_hash`, …) at link time even when
-RLN isn't enabled at runtime.
-
-**Where:** `waku-bindings/Cargo.toml:34`, `waku-bindings/src/lib.rs:14-16`.
-
-**Workaround:** Local `[patch.crates-io]` to a vendored stub at
-`vendor/rln-patched/` that re-exports the FFI symbol surface (`new`,
-`set_tree`, `delete_leaf`, `set_leaf`, …, `poseidon_hash`) — every
-function returns `false`/`0` so the linker is happy but no real RLN
-work is done. Safe because we never enable `rln_relay` in
-`WakuNodeConfig`. See `vendor/rln-patched/src/lib.rs` for the symbol
-list.
-
-**Suggested fix:** Make `rln` a feature-gated dep
-(`features = ["rln"]`, default-off), or upgrade `waku-bindings` to
-the latest `rln 0.7.0+` (which uses non-strict `^0.5.0` ark-* pins
-and would coexist cleanly with modern dep trees).
-
-## 15. `multiaddr 0.17` → `multihash 0.17` → `core2 0.4.0` (yanked everywhere)
-
-**What:** `waku-bindings` exposes `pub use multiaddr::Multiaddr` from
-`multiaddr 0.17`, whose only-valid `multihash 0.17` requires
-`core2 ^0.4.0`. **Every published version of `core2` is yanked**, so
-fresh resolves on a new machine fail with
-`failed to select a version for the requirement core2 = "^0.4.0":
-version 0.4.0 is yanked`.
-
-**Where:** `waku-bindings/Cargo.toml:22`.
-
-**Workaround:** Vendored `core2 0.4.0` source under
-`vendor/core2-vendored/` and added a `[patch.crates-io]` entry so the
-yanked version is bypassed.
-
-**Suggested fix:** Bump `multiaddr` to `0.18.x` (uses a `multihash`
-that doesn't depend on `core2`). Will be a small breaking change to
-consumers' `Multiaddr` type imports but unlocks fresh builds.
-
-## 16. `[patch.crates-io]` surprises: highest-version-from-crates-io wins
-
-**What:** Two cargo-patch traps we hit while trying to patch `rln`:
-
-1. If your patched version is `0.3.4` (matching upstream) but
-   crates.io has `0.3.5`, cargo prefers `0.3.5` from crates.io
-   (because `^0.3.4` allows higher) and your patch is silently
-   ignored. The fix is either to bump your patched version above the
-   highest crates.io release (we used `0.3.999`) OR to anchor
-   resolution by adding the crate as a direct workspace dep with
-   `=0.3.4`.
-2. The patched crate's own deps (e.g. rln's `=` pinned `ark-ec`,
-   `thiserror`, etc.) must ALSO satisfy the workspace tree. If they
-   don't, cargo silently falls back to the un-patched crate from
-   crates.io and you see the original conflict in the error message
-   (which is misleading — looks like the patch isn't loaded at all).
-
-**Where:** N/A — cargo behavior, but worth a one-paragraph note in
-`waku-bindings`' README "if you need to patch out rln".
-
-**Suggested fix:** Document the `[patch.crates-io] rln = …` recipe
-upstream. Even better, eliminate the need for it (#14).
-
-## 17. swap-ffi separate-package context loses workspace-level `[patch]`
-
-**What:** Our `swap-ffi/` lives at `path = ".."` of the orchestrator
-crate. Without an explicit `[workspace]` section, `cargo build` from
-`swap-ffi/` re-resolves independently and ignores the root's
-`[patch.crates-io]` — so it re-hits the rln + core2 wedges.
-
-**Where:** Our `Cargo.toml` (root) and `swap-ffi/Cargo.toml`.
-
-**Workaround:** Added `[workspace] members = [".", "swap-ffi"]` so
-both crates share the patch table. Worth flagging because it's a
-cargo gotcha that downstream consumers will hit independently of
-waku-bindings — but waku-bindings docs could surface it.
-
-**Suggested fix:** N/A on the bindings side; just a note that
-multi-crate downstream consumers need a real workspace.
-
-## 18. Embedded node lifecycle is burdensome for FFI / UI consumers
-
-**What:** With the old Docker/REST approach, each messaging call was
-stateless — fire an HTTP request, get a response. With embedded nodes,
-UI consumers must manage an explicit lifecycle:
-
-1. Call `init` once (spawn node, dial peers, subscribe) before any
-   messaging call. Forgetting means all calls fail silently.
-2. Call `shutdown` on exit (no `Drop` impl — see #3). Forgetting leaks
-   the Nim runtime + bound TCP port.
-3. No way to query connectivity state after `connect()`. The
-   `ConnectionChange` and `RelayTopicHealthChange` events exist in the
-   callback but aren't documented or queryable — the UI can't show
-   "connected to N peers" or "mesh healthy" status without maintaining
-   its own counter (see #19).
-
-**Where:** Consequence of `waku-bindings`' current API surface — no
-single wrapper type manages the full lifecycle.
-
-**Workaround:**
-- FFI layer (`swap-ffi/src/lib.rs`) exposes `swap_ffi_messaging_init`
-  / `swap_ffi_messaging_shutdown` as explicit lifecycle calls. The Qt
-  UI calls init in `loadEnv()` and shutdown in the destructor.
-- A process-wide `Arc<MessagingClient>` singleton is shared across
-  subsystems (the auto-accept loop reuses the UI's singleton instead
-  of spawning a second node). The `!Send + !Sync` constraint (#13) is
-  worked around with `block_in_place` trampolines.
-- Peer count is tracked via `ConnectionChange` callback events and an
-  `AtomicUsize` counter, polled every 2s from a QTimer.
-
-**Suggested fix:** A higher-level "managed node" wrapper that handles
-init/shutdown lifecycle, is `Send + Sync`, exposes connectivity state,
-and supports sharing across threads would drastically simplify
-embedding. Or address #13 upstream so a single shared node works.
-
-## 19. Peer status APIs exist in libwaku but aren't wrapped by `waku-bindings`
-
-**What:** `libwaku.h` exposes `waku_relay_get_num_connected_peers`,
-`waku_relay_get_num_peers_in_mesh`, `waku_get_connected_peers`,
-`waku_ping_peer`, and `waku_get_my_peerid`. None of these have Rust
-wrappers in `waku-bindings`. We needed connectivity status for the UI
-(show "Connecting..." vs "N peers") and had to track it ourselves via
-`ConnectionChange` callback events and an `AtomicUsize` counter.
-
-**Where:** `waku-sys/vendor/library/libwaku.h` — functions are
-available at the C FFI level but not in `waku-bindings/src/node/`.
-
-**Workaround:** Track `ConnectionChange` events (peer_event =
-"Joined"/"Left") in the `set_event_callback` closure, maintain an
-`AtomicUsize` peer counter, expose it via FFI, poll from the UI
-every 2 seconds.
-
-**Suggested fix:** Wrap the existing `libwaku.h` peer status functions
-in `waku-bindings`. At minimum: `get_num_connected_peers(pubsub_topic)`
-and `get_num_peers_in_mesh(pubsub_topic)`. This would give consumers
-on-demand connectivity status without maintaining their own counters.
-
-## 20. `connect()` is fire-and-forget — returns Ok before connection is established
-
-**What:** `waku_connect` (the C FFI function) returns `RET_OK`
-immediately after dispatching the dial attempt. The Rust wrapper in
-`waku-bindings` treats this as success and returns `Ok(())`. But the
-actual libp2p connection forms asynchronously inside the Nim runtime —
-the peer_manager retries in the background.
-
-This means `MessagingClient::spawn()` returns a "ready" client that
-has **zero connected peers**. Any `publish` immediately after spawn
-fails silently:
-```
-PUBLISH failed — "Message not sent because no peers found."
-```
-
-There is no way to block until the connection is actually established.
-The only signal is a `ConnectionChange` event with
-`peer_event = "Joined"` arriving via the callback some time later
-(typically 1-5 seconds on localhost).
-
-**Where:** `waku-bindings/src/node/peers.rs:19-36` — the `waku_connect`
-wrapper. `waku-bindings/src/general/libwaku_response.rs:35-49` — the
-`handle_no_response` handler that treats `RET_OK` + no callback as
-success.
-
-**Impact for us:** UI shows "Connecting..." for several seconds after
-startup even on localhost. If the user triggers messaging actions
-before the connection forms, they silently fail. We had to add a
-connectivity status indicator and gate UI actions on `peer_count > 0`.
-
-**Workaround:** Track `ConnectionChange` events (see #19), show
-connection status in the UI, disable messaging actions until
-`peer_count > 0`. The auto-accept maker loop reuses the UI's
-already-connected singleton node to avoid a second connection delay.
-
-**Suggested fix:** Either make `waku_connect` block until the
-connection is established (or return an error on failure), or document
-it as fire-and-forget and provide a `waku_wait_for_peers(n, timeout)`
-helper. Alternatively, expose `waku_relay_get_num_peers_in_mesh` (#19)
-so callers can poll until the mesh forms.
-
----
-(Append new entries below as we hit them.)
+- Exact command run and result.
+- Redacted config used for `createNode`.
+- Whether `onInit` fired in the same Nix-built artifact.
+- Delivery `start` / `subscribe` result.
+- Cross-node receipt evidence via `messageReceived`, not just `send` success.
+- Cold-build timing and whether each heavy derivation came from cache or built locally.
+- For #18, whether local multi-instance verification needed `portsShift`.
+- For #26, the raw event timestamp shape if reproduced.
+
+## Redaction reminder
+
+Before filing upstream, downstream, or repo issues, redact private keys, node keys, account data, private multiaddrs, RPC URLs, and raw private payloads.
