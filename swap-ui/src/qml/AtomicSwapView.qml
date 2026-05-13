@@ -250,10 +250,15 @@ Item {
                 }
                 Item { Layout.fillWidth: true }
                 Text {
-                    visible: swapBackend.wakuBootstrapMultiaddr !== ""
+                    visible: true
                     text: {
-                        if (swapBackend.messagingConnected)
-                            return swapBackend.messagingPeerCount + " peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                        if (swapBackend.messagingConnected) {
+                            if (swapBackend.messagingPeerCount > 0)
+                                return swapBackend.messagingPeerCount + " peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                            if (swapBackend.messagingConnectionStatus !== "")
+                                return "Delivery " + swapBackend.messagingConnectionStatus.toLowerCase()
+                            return "Delivery connected"
+                        }
                         if (swapBackend.messagingLoading)
                             return "Connecting..."
                         if (swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
@@ -266,7 +271,7 @@ Item {
                     font.pixelSize: Theme.fontSmall
                 }
                 Text {
-                    visible: swapBackend.wakuBootstrapMultiaddr !== ""
+                    visible: true
                     text: swapBackend.messagingConnected ? " \u25CF " : " \u25CB "
                     color: swapBackend.messagingConnected ? Theme.success : Theme.warning
                     font.pixelSize: Theme.fontSmall

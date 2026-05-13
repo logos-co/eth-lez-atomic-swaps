@@ -104,6 +104,7 @@ private:
     LogosObject* m_eventObject = nullptr;
     QTimer m_messagingPollTimer;
     bool m_messagingInitInFlight = false;
+    int m_deliveryPortsShift = 0;
 };
 
 #endif // SWAP_UI_PLUGIN_H

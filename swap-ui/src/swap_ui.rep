@@ -63,6 +63,7 @@ class SwapUi
     // Messaging/offers
     PROP(bool messagingConnected READWRITE)
     PROP(int messagingPeerCount READWRITE)
+    PROP(QString messagingConnectionStatus READWRITE)
     PROP(QString offersJson READWRITE)
     PROP(QString offerResultJson READWRITE)
     PROP(bool balancesLoading READWRITE)

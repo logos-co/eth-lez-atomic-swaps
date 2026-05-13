@@ -91,6 +91,7 @@ Item {
 
         readonly property bool messagingConnected: root.backend ? root.backend.messagingConnected : false
         readonly property int messagingPeerCount: root.backend ? root.backend.messagingPeerCount : 0
+        readonly property string messagingConnectionStatus: root.backend ? root.backend.messagingConnectionStatus : ""
         readonly property string offersJson: root.backend ? root.backend.offersJson : ""
         readonly property string offerResultJson: root.backend ? root.backend.offerResultJson : ""
 

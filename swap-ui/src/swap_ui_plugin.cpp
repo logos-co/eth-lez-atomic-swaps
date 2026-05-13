@@ -12,6 +12,7 @@
 #include <QJsonValue>
 #include <QMetaObject>
 #include <QMetaType>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QVariant>
 #include <QDebug>
@@ -107,6 +108,7 @@ QString compactVariantJson(const QVariant& value)
 SwapUiPlugin::SwapUiPlugin(QObject* parent)
     : SwapUiSimpleSource(parent)
 {
+    m_deliveryPortsShift = 100 + static_cast<int>(QRandomGenerator::global()->bounded(4500));
     setStatus(QStringLiteral("Initializing"));
     setErrorMessage(QString{});
     setSwapRole(QString{});
@@ -157,6 +159,7 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
 
     setMessagingConnected(false);
     setMessagingPeerCount(0);
+    setMessagingConnectionStatus(QString{});
     setOffersJson(QString{});
     setOfferResultJson(QString{});
     setBalancesLoading(false);
@@ -328,6 +331,7 @@ QString SwapUiPlugin::messagingConfigJson() const
     QJsonObject obj;
     obj[QStringLiteral("bootstrap_multiaddr")] = wakuBootstrapMultiaddr();
     obj[QStringLiteral("listen_port")] = 0;
+    obj[QStringLiteral("portsShift")] = m_deliveryPortsShift;
     return compactJson(obj);
 }
 
@@ -604,6 +608,7 @@ void SwapUiPlugin::setConfigValue(const QString& key, const QString& value)
         setWakuBootstrapMultiaddr(value);
         setMessagingConnected(false);
         setMessagingPeerCount(0);
+        setMessagingConnectionStatus(QString{});
     } else {
         setErrorMessage(QStringLiteral("Unknown config key: %1").arg(key));
         setStatus(errorMessage());
@@ -976,6 +981,7 @@ void SwapUiPlugin::pollMessagingStatus()
         const auto obj = parseObject(result);
         setMessagingConnected(obj.value(QStringLiteral("connected")).toBool(false));
         setMessagingPeerCount(obj.value(QStringLiteral("peer_count")).toInt(0));
+        setMessagingConnectionStatus(obj.value(QStringLiteral("connection_status")).toString());
     });
 }
 
@@ -1179,22 +1185,36 @@ void SwapUiPlugin::startAutoAccept()
     }
 
     ensureMessagingReady([this]() {
-        setAutoAcceptRunning(true);
-        setMakerRunning(true);
-        setAutoAcceptJobId(QString{});
-        setMakerJobId(QString{});
-        setAutoAcceptCompleted(0);
-        setAutoAcceptFailed(0);
-        setAutoAcceptIteration(0);
-        setSwapHistory(QStringList{});
-        clearMakerProgress();
-        setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
-        addMakerProgressStep(QStringLiteral("WaitingForEthLock"));
-        setStatus(QStringLiteral("Live maker listener running"));
-        setBusyState();
+        setPublishingLoading(true);
+        setStatus(QStringLiteral("Publishing offer..."));
+        m_swap->publishOfferAsync(configJson(), [this](QString result) {
+            setPublishingLoading(false);
+            setOfferResultJson(result);
+            const auto error = jsonError(result);
+            if (!error.isEmpty()) {
+                setResultStatus(result,
+                                QStringLiteral("Offer published"),
+                                QStringLiteral("Offer publish failed"));
+                return;
+            }
 
-        m_swap->startMakerLoopJobAsync(configJson(), [this](QString result) {
-            handleJobStartResult(QStringLiteral("maker_loop"), result);
+            setAutoAcceptRunning(true);
+            setMakerRunning(true);
+            setAutoAcceptJobId(QString{});
+            setMakerJobId(QString{});
+            setAutoAcceptCompleted(0);
+            setAutoAcceptFailed(0);
+            setAutoAcceptIteration(0);
+            setSwapHistory(QStringList{});
+            clearMakerProgress();
+            setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
+            addMakerProgressStep(QStringLiteral("WaitingForEthLock"));
+            setStatus(QStringLiteral("Offer published; live maker listener running"));
+            setBusyState();
+
+            m_swap->startMakerLoopJobAsync(configJson(), [this](QString startResult) {
+                handleJobStartResult(QStringLiteral("maker_loop"), startResult);
+            });
         });
     });
 }

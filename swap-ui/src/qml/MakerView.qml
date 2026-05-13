@@ -172,7 +172,7 @@ ScrollView {
                         enabled: swapBackend.autoAcceptRunning
                                  ? !swapBackend.messagingLoading
                                  : (!swapBackend.makerRunning && !swapBackend.takerRunning && !swapBackend.messagingLoading
-                                    && swapBackend.wakuBootstrapMultiaddr !== "")
+                                   )
                         Layout.fillWidth: true
                         Layout.preferredHeight: 42
                         onClicked: {
