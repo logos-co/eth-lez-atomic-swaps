@@ -308,6 +308,7 @@ pub async fn run_maker_loop(
                         error: format!("LEZ client init failed: {e}"),
                     },
                 );
+                tokio::time::sleep(base_config.poll_interval).await;
                 continue;
             }
         };
@@ -332,6 +333,7 @@ pub async fn run_maker_loop(
                         error: format!("balance check failed: {e}"),
                     },
                 );
+                tokio::time::sleep(base_config.poll_interval).await;
                 continue;
             }
             _ => {} // balance sufficient
@@ -377,6 +379,7 @@ pub async fn run_maker_loop(
                         error: format!("ETH client init failed: {e}"),
                     },
                 );
+                tokio::time::sleep(base_config.poll_interval).await;
                 continue;
             }
         };
