@@ -31,7 +31,7 @@ char* swap_ffi_run_maker(const char*, const char*, ProgressCallback cb, void* us
 {
     if (cb) {
         cb(R"({"step":"WaitingForEthLock"})", user_data);
-        cb(R"({"step":"EthLockDetected","data":{"swap_id":"0xabc"}})", user_data);
+        cb(R"({"step":"EthLockDetected","data":{"swap_id":"0xabc","hashlock":"abababababababababababababababababababababababababababababababab"}})", user_data);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return copyJson(R"({"ok":true,"method":"runMaker"})");
@@ -45,31 +45,6 @@ char* swap_ffi_run_taker(const char*, const char*, ProgressCallback cb, void* us
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return copyJson(R"({"ok":true,"method":"runTaker"})");
-}
-
-char* swap_ffi_messaging_init(const char*)
-{
-    return copyJson(R"({"ok":true,"method":"messagingInit"})");
-}
-
-char* swap_ffi_messaging_shutdown()
-{
-    return copyJson(R"({"ok":true,"method":"messagingShutdown"})");
-}
-
-char* swap_ffi_messaging_status()
-{
-    return copyJson(R"({"ok":true,"method":"messagingStatus"})");
-}
-
-char* swap_ffi_publish_offer(const char*)
-{
-    return copyJson(R"({"ok":true,"method":"publishOffer"})");
-}
-
-char* swap_ffi_fetch_offers()
-{
-    return copyJson(R"({"ok":true,"method":"fetchOffers"})");
 }
 
 char* swap_ffi_refund_lez(const char*, const char*)

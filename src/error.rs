@@ -43,10 +43,6 @@ pub enum SwapError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
-    // --- Messaging ---
-    #[error("messaging error: {0}")]
-    Messaging(String),
-
     // --- Cancellation ---
     #[error("swap cancelled by user")]
     Cancelled,

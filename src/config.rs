@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use alloy::primitives::Address;
-use nssa_core::program::ProgramId;
 use nssa_core::account::AccountId;
+use nssa_core::program::ProgramId;
 
-use crate::error::{SwapError, Result};
+use crate::error::{Result, SwapError};
 
 /// How the LEZ client authenticates transactions.
 #[derive(Debug, Clone)]
@@ -47,23 +47,6 @@ pub struct SwapConfig {
 
     // --- Polling ---
     pub poll_interval: Duration,
-
-    // --- Messaging ---
-    /// Embedded waku node config. None = messaging disabled, out-of-band coordination.
-    pub messaging: Option<MessagingConfig>,
-}
-
-/// Embedded waku node configuration. Spawned per-process; dials the
-/// rendezvous node at `bootstrap_multiaddr` (typically written into
-/// `.env` by `make infra`).
-#[derive(Debug, Clone)]
-pub struct MessagingConfig {
-    /// Multiaddr of the rendezvous node to dial on startup
-    /// (e.g. `/ip4/127.0.0.1/tcp/60010/p2p/<peer-id>`).
-    pub bootstrap_multiaddr: String,
-    /// libp2p TCP listen port. `0` = OS-assigned (typical for CLI;
-    /// `make infra` uses a fixed port for stable rendezvous).
-    pub listen_port: u16,
 }
 
 impl SwapConfig {
@@ -88,7 +71,9 @@ pub fn eth_to_wei(s: &str) -> std::result::Result<u128, String> {
     let int_val: u128 = if int_part.is_empty() {
         0
     } else {
-        int_part.parse().map_err(|e| format!("invalid ETH amount: {e}"))?
+        int_part
+            .parse()
+            .map_err(|e| format!("invalid ETH amount: {e}"))?
     };
     // Pad or truncate fractional part to 18 digits
     let frac_padded = if frac_part.len() > 18 {
@@ -100,7 +85,9 @@ pub fn eth_to_wei(s: &str) -> std::result::Result<u128, String> {
         0
     } else {
         let padded = format!("{:0<18}", frac_padded);
-        padded.parse().map_err(|e| format!("invalid ETH amount fraction: {e}"))?
+        padded
+            .parse()
+            .map_err(|e| format!("invalid ETH amount fraction: {e}"))?
     };
     Ok(int_val * 1_000_000_000_000_000_000 + frac_val)
 }
@@ -126,9 +113,9 @@ pub fn account_id_to_base58(id: &AccountId) -> String {
 pub fn parse_base58_account_id(s: &str) -> Result<AccountId> {
     let bytes = base58::FromBase58::from_base58(s)
         .map_err(|e| SwapError::InvalidConfig(format!("invalid base58 account ID: {e:?}")))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| SwapError::InvalidConfig("base58 account ID must decode to 32 bytes".into()))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        SwapError::InvalidConfig("base58 account ID must decode to 32 bytes".into())
+    })?;
     Ok(AccountId::new(arr))
 }
 
@@ -137,7 +124,9 @@ pub fn parse_program_id(hex_str: &str) -> Result<ProgramId> {
     let bytes = hex::decode(hex_str)
         .map_err(|e| SwapError::InvalidConfig(format!("invalid program ID hex: {e}")))?;
     if bytes.len() != 32 {
-        return Err(SwapError::InvalidConfig("program ID must be 32 bytes".into()));
+        return Err(SwapError::InvalidConfig(
+            "program ID must be 32 bytes".into(),
+        ));
     }
     let mut id = [0u32; 8];
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {

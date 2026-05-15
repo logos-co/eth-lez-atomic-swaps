@@ -5,7 +5,5 @@ pub mod demo;
 pub mod error;
 pub mod eth;
 pub mod lez;
-#[cfg(feature = "waku")]
-pub mod messaging;
 pub mod scaffold;
 pub mod swap;

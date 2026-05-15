@@ -1,6 +1,4 @@
-# macOS aarch64 link flags required by libwaku (pulls in Go-sourced crypto deps).
-# Mirrors logos-delivery-rust-bindings/.cargo/config.toml. Without these, link
-# fails on Apple Silicon. See delivery-dogfooding.md entry #10.
+# macOS aarch64 link flags required by Rust/LEZ native dependencies.
 [target.'cfg(target_os = "macos")']
 rustflags = [
     "-C", "link-args=-framework CoreFoundation -framework Security -framework CoreServices -lresolv",
