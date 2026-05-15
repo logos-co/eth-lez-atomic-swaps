@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "llvm-vs-code-extensions.vscode-clangd",
+    "ms-vscode.cmake-tools",
+    "theqtcompany.qt-qml",
+    "juanblanco.solidity",
+    "jnoortheen.nix-ide",
+    "tamasfe.even-better-toml",
+    "redhat.vscode-yaml",
+    "davidanson.vscode-markdownlint",
+    "ms-vscode.makefile-tools"
+  ]
+}

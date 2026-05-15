@@ -1,0 +1,8 @@
+CompileFlags:
+  CompilationDatabase: build
+  Add:
+    - -std=c++17
+    - -I./swap-module/src
+    - -I./swap-module/generated_code
+    - -I./swap-module/lib
+    - -I./swap-ui/src

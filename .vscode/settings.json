@@ -3,5 +3,17 @@
     "Cargo.toml",
     "programs/lez-htlc/methods/Cargo.toml",
     "programs/lez-htlc/methods/guest/Cargo.toml"
-  ]
+  ],
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "files.associations": {
+    "Makefile": "makefile",
+    "GNUmakefile": "makefile",
+    "*.mk": "makefile",
+    "*.nix": "nix",
+    "*.sol": "solidity",
+    "*.toml": "toml",
+    "*.qml": "qml",
+    "*.rep": "cpp"
+  }
 }
