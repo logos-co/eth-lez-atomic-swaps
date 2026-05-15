@@ -1,7 +1,7 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
 use nssa_core::{
     account::{Account, AccountId, AccountWithMetadata},
-    program::{read_nssa_inputs, AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput},
+    program::{AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput, read_nssa_inputs},
 };
 use risc0_zkvm::sha::{Impl, Sha256};
 

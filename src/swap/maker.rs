@@ -1,20 +1,8 @@
-#[cfg(feature = "waku")]
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy::primitives::U256;
 use tokio::sync::mpsc;
 use tracing::info;
-
-#[cfg(feature = "waku")]
-use crate::messaging::{
-    client::MessagingClient, node::MessagingNodeConfig, topics::OFFERS_TOPIC, types::SwapOffer,
-};
-
-#[cfg(feature = "waku")]
-pub type MakerLoopMessaging = Arc<MessagingClient>;
-#[cfg(not(feature = "waku"))]
-pub type MakerLoopMessaging = ();
 
 use crate::{
     config::SwapConfig,
@@ -30,9 +18,6 @@ use crate::{
         types::SwapOutcome,
     },
 };
-
-#[cfg(feature = "waku")]
-use crate::config::account_id_to_base58;
 
 /// Wait until the cancel flag is set. Returns immediately if the flag is already set.
 /// If `cancel` is `None`, pends forever (no cancellation configured).
@@ -84,21 +69,21 @@ pub async fn run_maker(
                     ..
                 } = event
                 {
-                    let hashlock_matches = hashlock
-                        .map_or(true, |hl| event_hashlock.0 == hl);
+                    let hashlock_matches = hashlock.is_none_or(|hl| event_hashlock.0 == hl);
                     if hashlock_matches
                         && recipient == config.eth_recipient_address
                         && amount >= U256::from(config.eth_amount)
                     {
                         // Verify the HTLC is still OPEN on-chain (skip stale swaps).
-                        if let Ok(htlc) = eth_client.get_htlc(swap_id).await {
-                            if !matches!(htlc.state, SwapState::OPEN) {
-                                continue;
-                            }
+                        if let Ok(htlc) = eth_client.get_htlc(swap_id).await
+                            && !matches!(htlc.state, SwapState::OPEN)
+                        {
+                            continue;
                         }
                         info!(%swap_id, "maker: matched ETH Locked event");
                         progress::report(&progress, SwapProgress::EthLockDetected {
                             swap_id: format!("{swap_id}"),
+                            hashlock: hex::encode(event_hashlock.0),
                         });
                         break (swap_id, event_hashlock.0);
                     }
@@ -236,48 +221,17 @@ pub struct AutoAcceptResult {
 
 /// Run the maker in a loop, auto-accepting swaps until cancelled or out of funds.
 ///
-/// Each iteration gets fresh timelocks, checks balance, publishes an offer
-/// (if messaging is configured), and runs a single maker swap. On failure,
+/// Each iteration gets fresh timelocks, checks balance, and runs a single maker swap. On failure,
 /// the error is logged and the loop continues (R1 resilience).
 pub async fn run_maker_loop(
     base_config: &SwapConfig,
     auto_config: &AutoAcceptConfig,
     cancel: &AtomicBool,
     progress: Option<ProgressSender>,
-    existing_messaging: Option<MakerLoopMessaging>,
 ) -> AutoAcceptResult {
     let mut completed: u32 = 0;
     let mut failed: u32 = 0;
     let mut iteration: u32 = 0;
-
-    #[cfg(feature = "waku")]
-    // Reuse an existing messaging client if provided (e.g. the FFI
-    // singleton), otherwise spawn a fresh one for the CLI path.
-    let (messaging, owns_messaging) = if let Some(m) = existing_messaging {
-        (Some(m), false)
-    } else if let Some(msg_cfg) = &base_config.messaging {
-        match MessagingClient::spawn(MessagingNodeConfig {
-            listen_port: msg_cfg.listen_port,
-            node_key_path: None,
-            bootstrap_peers: vec![msg_cfg.bootstrap_multiaddr.clone()],
-        })
-        .await
-        {
-            Ok(m) => {
-                let _ = m.subscribe(&[OFFERS_TOPIC]).await;
-                (Some(Arc::new(m)), true)
-            }
-            Err(e) => {
-                info!(%e, "maker auto-accept: messaging spawn failed (continuing without)");
-                (None, false)
-            }
-        }
-    } else {
-        (None, false)
-    };
-
-    #[cfg(not(feature = "waku"))]
-    let _ = existing_messaging;
 
     progress::report(&progress, SwapProgress::AutoAcceptStarted);
 
@@ -337,32 +291,6 @@ pub async fn run_maker_loop(
                 continue;
             }
             _ => {} // balance sufficient
-        }
-
-        #[cfg(feature = "waku")]
-        // Publish offer (if messaging configured).
-        if let Some(messaging) = &messaging {
-            let offer = SwapOffer {
-                hashlock: String::new(),
-                lez_amount: fresh_config.lez_amount,
-                eth_amount: fresh_config.eth_amount,
-                maker_eth_address: format!("{}", fresh_config.eth_recipient_address),
-                maker_lez_account: account_id_to_base58(&lez_client.account_id()),
-                lez_timelock: fresh_config.lez_timelock,
-                eth_timelock: fresh_config.eth_timelock,
-                lez_htlc_program_id: hex::encode(
-                    fresh_config
-                        .lez_htlc_program_id
-                        .iter()
-                        .flat_map(|w| w.to_le_bytes())
-                        .collect::<Vec<u8>>(),
-                ),
-                eth_htlc_address: format!("{}", fresh_config.eth_htlc_address),
-            };
-            match messaging.publish(OFFERS_TOPIC, &offer).await {
-                Ok(_) => info!(iteration, "maker: offer published"),
-                Err(e) => info!(iteration, %e, "maker: failed to publish offer (continuing)"),
-            }
         }
 
         progress::report(&progress, SwapProgress::AutoAcceptIteration { iteration });
@@ -429,17 +357,6 @@ pub async fn run_maker_loop(
                     },
                 );
                 // R1: log error and continue to next iteration
-            }
-        }
-    }
-
-    #[cfg(feature = "waku")]
-    // Explicit shutdown — WakuNodeHandle has no Drop. See delivery-dogfooding.md #3.
-    // Only shutdown if we spawned the client ourselves (not the FFI singleton).
-    if owns_messaging {
-        if let Some(m) = messaging {
-            if let Ok(m) = Arc::try_unwrap(m) {
-                let _ = m.shutdown().await;
             }
         }
     }

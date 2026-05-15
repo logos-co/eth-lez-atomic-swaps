@@ -63,8 +63,7 @@ pub fn public_accounts(wc: &wallet::WalletCore) -> Result<Vec<WalletAccount>> {
         for entry in initial_accounts {
             if let wallet::config::InitialAccountData::Public(pub_data) = entry {
                 let account_id = pub_data.account_id;
-                let account_id_b58 =
-                    base58::ToBase58::to_base58(account_id.value().as_slice());
+                let account_id_b58 = base58::ToBase58::to_base58(account_id.value().as_slice());
                 result.push(WalletAccount {
                     account_id,
                     account_id_b58,

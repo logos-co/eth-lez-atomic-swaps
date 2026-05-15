@@ -6,25 +6,40 @@ use tokio::sync::mpsc;
 #[serde(tag = "step", content = "data")]
 pub enum SwapProgress {
     // Taker steps (taker locks first, claims LEZ)
-    PreimageGenerated { hashlock: String },
+    PreimageGenerated {
+        hashlock: String,
+    },
     LockingEth,
-    EthLocked { swap_id: String },
+    EthLocked {
+        swap_id: String,
+    },
     WaitingForLezLock,
     LezLockDetected,
     VerifyingLezEscrow,
     LezEscrowVerified,
     ClaimingLez,
-    LezClaimed { tx_hash: String },
+    LezClaimed {
+        tx_hash: String,
+    },
 
     // Maker steps (maker locks second, claims ETH)
     WaitingForEthLock,
-    EthLockDetected { swap_id: String },
+    EthLockDetected {
+        swap_id: String,
+        hashlock: String,
+    },
     LezLocking,
-    LezLocked { tx_hash: String },
+    LezLocked {
+        tx_hash: String,
+    },
     WaitingForPreimage,
-    PreimageRevealed { preimage: String },
+    PreimageRevealed {
+        preimage: String,
+    },
     ClaimingEth,
-    EthClaimed { tx_hash: String },
+    EthClaimed {
+        tx_hash: String,
+    },
 
     // Shared
     TimelockExpired,
@@ -33,11 +48,25 @@ pub enum SwapProgress {
 
     // Auto-accept loop events
     AutoAcceptStarted,
-    AutoAcceptIteration { iteration: u32 },
-    AutoAcceptSwapCompleted { iteration: u32, status: String },
-    AutoAcceptSwapFailed { iteration: u32, error: String },
-    AutoAcceptInsufficientFunds { lez_balance: String, lez_required: String },
-    AutoAcceptStopped { total_completed: u32, total_failed: u32 },
+    AutoAcceptIteration {
+        iteration: u32,
+    },
+    AutoAcceptSwapCompleted {
+        iteration: u32,
+        status: String,
+    },
+    AutoAcceptSwapFailed {
+        iteration: u32,
+        error: String,
+    },
+    AutoAcceptInsufficientFunds {
+        lez_balance: String,
+        lez_required: String,
+    },
+    AutoAcceptStopped {
+        total_completed: u32,
+        total_failed: u32,
+    },
     AutoAcceptCancelled,
 }
 

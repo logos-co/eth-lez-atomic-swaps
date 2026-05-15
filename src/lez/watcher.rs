@@ -53,16 +53,12 @@ pub async fn watch_escrow(
                 if last_state != Some(current) {
                     debug!(?current, "LEZ escrow state changed");
                     let event = match current {
-                        HTLCState::Locked => LezHtlcEvent::Locked {
-                            escrow_pda: pda,
-                        },
+                        HTLCState::Locked => LezHtlcEvent::Locked { escrow_pda: pda },
                         HTLCState::Claimed => LezHtlcEvent::Claimed {
                             escrow_pda: pda,
                             preimage: escrow.preimage.unwrap_or_default(),
                         },
-                        HTLCState::Refunded => LezHtlcEvent::Refunded {
-                            escrow_pda: pda,
-                        },
+                        HTLCState::Refunded => LezHtlcEvent::Refunded { escrow_pda: pda },
                     };
 
                     if tx.send(event).await.is_err() {

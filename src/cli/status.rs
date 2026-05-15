@@ -5,8 +5,8 @@ use crate::config::SwapConfig;
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthHTLC::SwapState;
 
-use super::{create_clients, output};
 use super::taker::parse_bytes32;
+use super::{create_clients, output};
 
 #[derive(Args)]
 pub struct StatusArgs {
@@ -43,7 +43,10 @@ pub async fn cmd_status(args: StatusArgs, config: &SwapConfig, json: bool) -> Re
                         })
                     );
                 } else {
-                    println!("LEZ Escrow: not found for hashlock {}", hex::encode(hashlock));
+                    println!(
+                        "LEZ Escrow: not found for hashlock {}",
+                        hex::encode(hashlock)
+                    );
                 }
             }
         }

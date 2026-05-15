@@ -2,10 +2,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use common::transaction::NSSATransaction;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use lez_htlc_program::HTLCState;
-use common::transaction::NSSATransaction;
-use nssa::{AccountId, ProgramDeploymentTransaction, program_deployment_transaction::Message as ProgramDeploymentMessage};
+use nssa::{
+    AccountId, ProgramDeploymentTransaction,
+    program_deployment_transaction::Message as ProgramDeploymentMessage,
+};
 use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use sha2::{Digest, Sha256};
@@ -64,7 +67,6 @@ impl TestEnv {
             eth_timelock: 0,
             eth_recipient_address: alloy::primitives::Address::ZERO,
             poll_interval: Duration::from_millis(500),
-            messaging: None,
         };
         LezClient::new(&config).unwrap()
     }
@@ -80,7 +82,8 @@ impl TestEnv {
 
 async fn setup() -> TestEnv {
     // Read scaffold wallet via WalletCore.
-    let wc = scaffold::wallet_core(&scaffold::wallet_home()).expect("scaffold wallet not found — run `make setup` first");
+    let wc = scaffold::wallet_core(&scaffold::wallet_home())
+        .expect("scaffold wallet not found — run `make setup` first");
     let accounts = scaffold::public_accounts(&wc).unwrap();
     let maker_id = accounts[0].account_id;
     let taker_id = accounts[1].account_id;
@@ -88,13 +91,20 @@ async fn setup() -> TestEnv {
     let wallet_home = scaffold::wallet_home();
 
     // Fund accounts.
-    scaffold::wallet_topup(Some(&accounts[0].account_id_b58)).await.unwrap();
-    scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await.unwrap();
+    scaffold::wallet_topup(Some(&accounts[0].account_id_b58))
+        .await
+        .unwrap();
+    scaffold::wallet_topup(Some(&accounts[1].account_id_b58))
+        .await
+        .unwrap();
 
     // Deploy LEZ HTLC program.
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
-    wc.sequencer_client.send_transaction(NSSATransaction::ProgramDeployment(tx)).await.unwrap();
+    wc.sequencer_client
+        .send_transaction(NSSATransaction::ProgramDeployment(tx))
+        .await
+        .unwrap();
 
     // Wait for deployment block.
     tokio::time::sleep(BLOCK_WAIT).await;
@@ -137,11 +147,7 @@ async fn wait_for_escrow_funded(client: &LezClient, hashlock: &[u8; 32], amount:
     }
 }
 
-async fn wait_for_escrow_state(
-    client: &LezClient,
-    hashlock: &[u8; 32],
-    expected: HTLCState,
-) {
+async fn wait_for_escrow_state(client: &LezClient, hashlock: &[u8; 32], expected: HTLCState) {
     let deadline = tokio::time::Instant::now() + CHAIN_TIMEOUT;
     let mut last = None;
     loop {
@@ -167,7 +173,10 @@ async fn test_transfer_and_read_balance() {
     let maker = env.maker_client();
 
     let before = maker.get_balance(&env.taker_id).await.unwrap();
-    maker.transfer(env.taker_id, TEST_LEZ_TRANSFER_AMOUNT).await.unwrap();
+    maker
+        .transfer(env.taker_id, TEST_LEZ_TRANSFER_AMOUNT)
+        .await
+        .unwrap();
     wait_for_balance(&maker, &env.taker_id, before + TEST_LEZ_TRANSFER_AMOUNT).await;
 }
 
@@ -179,10 +188,17 @@ async fn test_lock_creates_escrow() {
     let (_, hashlock) = make_preimage_and_hashlock(0x01);
 
     // timelock=0 → already expired; not testing timelock enforcement here.
-    maker.lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0).await.unwrap();
+    maker
+        .lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0)
+        .await
+        .unwrap();
     wait_for_escrow_funded(&maker, &hashlock, TEST_LEZ_HTLC_AMOUNT).await;
 
-    let escrow = maker.get_escrow(&hashlock).await.unwrap().expect("escrow should exist");
+    let escrow = maker
+        .get_escrow(&hashlock)
+        .await
+        .unwrap()
+        .expect("escrow should exist");
     assert_eq!(escrow.state, HTLCState::Locked);
     assert_eq!(escrow.amount, TEST_LEZ_HTLC_AMOUNT);
     assert_eq!(escrow.taker_id, env.taker_id);
@@ -196,7 +212,10 @@ async fn test_lock_then_claim() {
     let taker = env.taker_client();
     let (preimage, hashlock) = make_preimage_and_hashlock(0x02);
 
-    maker.lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0).await.unwrap();
+    maker
+        .lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0)
+        .await
+        .unwrap();
     wait_for_escrow_funded(&maker, &hashlock, TEST_LEZ_HTLC_AMOUNT).await;
 
     let taker_before = taker.get_balance(&env.taker_id).await.unwrap();
@@ -216,7 +235,10 @@ async fn test_lock_then_refund() {
 
     let maker_before = maker.get_balance(&env.maker_id).await.unwrap();
     // timelock=0 → already expired; not testing timelock enforcement here.
-    maker.lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0).await.unwrap();
+    maker
+        .lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0)
+        .await
+        .unwrap();
     wait_for_escrow_funded(&maker, &hashlock, TEST_LEZ_HTLC_AMOUNT).await;
 
     maker.refund(&hashlock).await.unwrap();
@@ -234,7 +256,10 @@ async fn test_claim_wrong_preimage_fails() {
     let taker = env.taker_client();
     let (_, hashlock) = make_preimage_and_hashlock(0x04);
 
-    maker.lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0).await.unwrap();
+    maker
+        .lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0)
+        .await
+        .unwrap();
     wait_for_escrow_funded(&maker, &hashlock, TEST_LEZ_HTLC_AMOUNT).await;
 
     let wrong_preimage = [0xFFu8; 32];
@@ -262,7 +287,10 @@ async fn test_watcher_detects_lock_and_claim() {
     });
 
     // Lock LEZ — watcher should emit Locked.
-    maker.lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0).await.unwrap();
+    maker
+        .lock(hashlock, env.taker_id, TEST_LEZ_HTLC_AMOUNT, 0)
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(CHAIN_TIMEOUT, rx.recv())
         .await
@@ -319,7 +347,12 @@ async fn test_refund_rejected_before_timelock_accepted_after() {
     let (_, hashlock_future) = make_preimage_and_hashlock(0x10);
     let future_timelock_secs = now_secs + 3600;
     maker
-        .lock(hashlock_future, env.taker_id, TEST_LEZ_HTLC_AMOUNT, future_timelock_secs)
+        .lock(
+            hashlock_future,
+            env.taker_id,
+            TEST_LEZ_HTLC_AMOUNT,
+            future_timelock_secs,
+        )
         .await
         .unwrap();
     wait_for_escrow_funded(&maker, &hashlock_future, TEST_LEZ_HTLC_AMOUNT).await;
@@ -349,7 +382,12 @@ async fn test_refund_rejected_before_timelock_accepted_after() {
     let maker_before = maker.get_balance(&env.maker_id).await.unwrap();
 
     maker
-        .lock(hashlock_past, env.taker_id, TEST_LEZ_HTLC_AMOUNT, past_timelock_secs)
+        .lock(
+            hashlock_past,
+            env.taker_id,
+            TEST_LEZ_HTLC_AMOUNT,
+            past_timelock_secs,
+        )
         .await
         .unwrap();
     wait_for_escrow_funded(&maker, &hashlock_past, TEST_LEZ_HTLC_AMOUNT).await;

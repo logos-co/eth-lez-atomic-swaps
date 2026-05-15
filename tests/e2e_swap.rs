@@ -9,11 +9,10 @@ use alloy::{
     signers::local::PrivateKeySigner,
     sol,
 };
-use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use common::transaction::NSSATransaction;
+use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use nssa::{
-    AccountId,
-    ProgramDeploymentTransaction,
+    AccountId, ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
 use sequencer_service_rpc::RpcClient as _;
@@ -90,20 +89,28 @@ impl TestEnv {
         let eth_htlc_address = *contract.address();
 
         // Scaffold LEZ setup via WalletCore.
-        let wc = scaffold::wallet_core(&scaffold::wallet_home()).expect("scaffold wallet not found — run `make setup` first");
+        let wc = scaffold::wallet_core(&scaffold::wallet_home())
+            .expect("scaffold wallet not found — run `make setup` first");
         let accounts = scaffold::public_accounts(&wc).unwrap();
         let maker_lez_id = accounts[0].account_id;
         let taker_lez_id = accounts[1].account_id;
         let sequencer_url = scaffold::sequencer_url_of(&wc);
         let wallet_home = scaffold::wallet_home();
 
-        scaffold::wallet_topup(Some(&accounts[0].account_id_b58)).await.unwrap();
-        scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await.unwrap();
+        scaffold::wallet_topup(Some(&accounts[0].account_id_b58))
+            .await
+            .unwrap();
+        scaffold::wallet_topup(Some(&accounts[1].account_id_b58))
+            .await
+            .unwrap();
 
         // Deploy LEZ HTLC program.
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
-        wc.sequencer_client.send_transaction(NSSATransaction::ProgramDeployment(tx)).await.unwrap();
+        wc.sequencer_client
+            .send_transaction(NSSATransaction::ProgramDeployment(tx))
+            .await
+            .unwrap();
         tokio::time::sleep(BLOCK_WAIT).await;
 
         Self {
@@ -143,7 +150,6 @@ impl TestEnv {
             eth_recipient_address: self.maker_eth_addr,
             lez_taker_account_id: self.taker_lez_id,
             poll_interval: Duration::from_millis(500),
-            messaging: None,
         }
     }
 
@@ -233,8 +239,16 @@ async fn test_atomic_swap_happy_path() {
     );
 
     // ETH: contract drained, taker lost >= eth_amount, maker only spent gas.
-    let contract_balance = env.deployer.get_balance(env.eth_htlc_address).await.unwrap();
-    assert_eq!(contract_balance, U256::ZERO, "HTLC contract should be empty");
+    let contract_balance = env
+        .deployer
+        .get_balance(env.eth_htlc_address)
+        .await
+        .unwrap();
+    assert_eq!(
+        contract_balance,
+        U256::ZERO,
+        "HTLC contract should be empty"
+    );
 
     let taker_eth_after = env.deployer.get_balance(env._taker_eth_addr).await.unwrap();
     assert!(
@@ -266,7 +280,9 @@ async fn test_maker_refunds_on_timeout() {
     let outcome = {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None).await.unwrap()
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None)
+            .await
+            .unwrap()
     };
 
     // Maker should return Refunded with no txs (never locked anything).
@@ -276,8 +292,16 @@ async fn test_maker_refunds_on_timeout() {
     );
 
     // ETH contract should be untouched (taker never locked).
-    let contract_balance = env.deployer.get_balance(env.eth_htlc_address).await.unwrap();
-    assert_eq!(contract_balance, U256::ZERO, "no ETH should have been locked");
+    let contract_balance = env
+        .deployer
+        .get_balance(env.eth_htlc_address)
+        .await
+        .unwrap();
+    assert_eq!(
+        contract_balance,
+        U256::ZERO,
+        "no ETH should have been locked"
+    );
 }
 
 // ── Edge case: taker times out when maker never locks LEZ ──
@@ -305,11 +329,11 @@ async fn test_taker_refunds_on_timeout() {
         tokio::time::sleep(Duration::from_secs(4)).await;
         // Fast-forward Anvil past the ETH timelock.
         let _: serde_json::Value = ff_provider
-            .raw_request("evm_increaseTime".into(), &[U256::from(300)])
+            .raw_request("evm_increaseTime".into(), [U256::from(300)])
             .await
             .unwrap();
         let _: serde_json::Value = ff_provider
-            .raw_request("evm_mine".into(), &())
+            .raw_request("evm_mine".into(), ())
             .await
             .unwrap();
     });
@@ -318,15 +342,31 @@ async fn test_taker_refunds_on_timeout() {
     let outcome = {
         let eth = EthClient::new(&taker_config).await.unwrap();
         let lez = LezClient::new(&taker_config).unwrap();
-        taker::run_taker(&taker_config, &eth, &lez, Some(preimage), None).await.unwrap()
+        taker::run_taker(&taker_config, &eth, &lez, Some(preimage), None)
+            .await
+            .unwrap()
     };
 
     assert!(
-        matches!(outcome, SwapOutcome::Refunded { eth_refund_tx: Some(_), .. }),
+        matches!(
+            outcome,
+            SwapOutcome::Refunded {
+                eth_refund_tx: Some(_),
+                ..
+            }
+        ),
         "taker should have refunded ETH, got: {outcome:?}"
     );
 
     // ETH contract should be drained (refund returned the ETH to taker).
-    let contract_balance = env.deployer.get_balance(env.eth_htlc_address).await.unwrap();
-    assert_eq!(contract_balance, U256::ZERO, "ETH should be refunded from contract");
+    let contract_balance = env
+        .deployer
+        .get_balance(env.eth_htlc_address)
+        .await
+        .unwrap();
+    assert_eq!(
+        contract_balance,
+        U256::ZERO,
+        "ETH should be refunded from contract"
+    );
 }

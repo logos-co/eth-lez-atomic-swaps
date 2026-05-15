@@ -50,7 +50,14 @@ async fn setup() -> (
         .unwrap()
         .erased();
 
-    (maker_provider, taker_provider, contract_addr, maker_addr, taker_addr, anvil)
+    (
+        maker_provider,
+        taker_provider,
+        contract_addr,
+        maker_addr,
+        taker_addr,
+        anvil,
+    )
 }
 
 fn make_preimage_and_hashlock() -> ([u8; 32], [u8; 32]) {
@@ -178,13 +185,10 @@ async fn test_lock_and_refund() {
 
     // Fast-forward time past the timelock.
     let _: serde_json::Value = maker
-        .raw_request("evm_increaseTime".into(), &[U256::from(300)])
+        .raw_request("evm_increaseTime".into(), [U256::from(300)])
         .await
         .unwrap();
-    let _: serde_json::Value = maker
-        .raw_request("evm_mine".into(), &())
-        .await
-        .unwrap();
+    let _: serde_json::Value = maker.raw_request("evm_mine".into(), ()).await.unwrap();
 
     let refund_receipt = contract
         .refund(swap_id)
@@ -235,6 +239,9 @@ async fn test_watcher_receives_locked_event() {
         .expect("stream ended")
         .expect("decode error");
 
-    assert_eq!(event.0.hashlock, alloy::primitives::FixedBytes::from(hashlock));
+    assert_eq!(
+        event.0.hashlock,
+        alloy::primitives::FixedBytes::from(hashlock)
+    );
     assert_eq!(event.0.recipient, taker_addr);
 }

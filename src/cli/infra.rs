@@ -5,8 +5,8 @@ use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
-use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use common::transaction::NSSATransaction;
+use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use nssa::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
@@ -16,9 +16,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::config::LezAuth;
 use crate::error::{Result, SwapError};
-use crate::messaging::client::MessagingClient;
-use crate::messaging::node::MessagingNodeConfig;
-use crate::messaging::topics::OFFERS_TOPIC;
 use crate::scaffold;
 
 sol! {
@@ -27,15 +24,11 @@ sol! {
     "contracts/out/EthHTLC.sol/EthHTLC.json"
 }
 
-/// Fixed listen port for the rendezvous waku node so the multiaddr written
-/// into .env stays valid across infra restarts (with a persisted node_key,
-/// the peer ID is also stable, so the full multiaddr never drifts).
-const WAKU_LISTEN_PORT: u16 = 60010;
 const BLOCK_WAIT: Duration = Duration::from_secs(4);
 
 // ── Color-coded log prefixes ───────────────────────────────────────
 
-const ANVIL_PREFIX: &str = "  \x1b[33m[anvil]\x1b[0m ";    // yellow
+const ANVIL_PREFIX: &str = "  \x1b[33m[anvil]\x1b[0m "; // yellow
 
 // ── Anvil stdout forwarder ─────────────────────────────────────────
 
@@ -59,28 +52,7 @@ pub async fn cmd_infra() -> Result<()> {
     println!("\x1b[1m=== Atomic Swap Infrastructure ===\x1b[0m");
     println!();
 
-    // 1. Spawn embedded waku rendezvous node. Maker/taker (in their own
-    //    processes) dial this node's multiaddr from .env, forming a 3-peer mesh.
-    eprint!("  [\x1b[35mwaku\x1b[0m]  Starting messaging rendezvous node...");
-    let scaffold_dir = std::path::PathBuf::from(".scaffold");
-    let node_key_path = scaffold_dir.join("messaging").join("infra").join("node_key");
-    let messaging = MessagingClient::spawn(MessagingNodeConfig {
-        listen_port: WAKU_LISTEN_PORT,
-        node_key_path: Some(node_key_path),
-        bootstrap_peers: vec![],
-    })
-    .await?;
-    messaging.subscribe(&[OFFERS_TOPIC]).await?;
-    let listen_addrs = messaging.listen_addresses().await?;
-    let bootstrap_multiaddr = listen_addrs
-        .iter()
-        .find(|m| m.to_string().contains("/ip4/127.0.0.1/"))
-        .or_else(|| listen_addrs.first())
-        .ok_or_else(|| SwapError::Messaging("rendezvous node has no listen addr".into()))?
-        .to_string();
-    eprintln!(" \x1b[35m{bootstrap_multiaddr}\x1b[0m");
-
-    // 2. Read scaffold wallet via WalletCore.
+    // 1. Read scaffold wallet via WalletCore.
     eprint!("  [\x1b[36mlez\x1b[0m]   Reading scaffold wallet...");
     let wc = scaffold::wallet_core(&scaffold::wallet_home())?;
     let accounts = scaffold::public_accounts(&wc)?;
@@ -92,17 +64,18 @@ pub async fn cmd_infra() -> Result<()> {
         &accounts[1].account_id_b58[..8]
     );
 
-    // 3. Fund accounts.
+    // 2. Fund accounts.
     eprint!("  [\x1b[36mlez\x1b[0m]   Funding accounts...");
     scaffold::wallet_topup(Some(&accounts[0].account_id_b58)).await?;
     scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await?;
     eprintln!(" \x1b[36mOK\x1b[0m");
 
-    // 4. Start Anvil.
+    // 3. Start Anvil.
     eprint!("  [\x1b[33manvil\x1b[0m] Starting Anvil...");
     let mut anvil = alloy::node_bindings::Anvil::new()
         .block_time(1)
-        .arg("--balance").arg("100")
+        .arg("--balance")
+        .arg("100")
         .keep_stdout()
         .try_spawn()
         .unwrap();
@@ -110,7 +83,7 @@ pub async fn cmd_infra() -> Result<()> {
     let anvil_stdout = anvil.child_mut().stdout.take();
     eprintln!(" \x1b[33m{}\x1b[0m", &anvil_ws);
 
-    // 5. Deploy EthHTLC contract.
+    // 4. Deploy EthHTLC contract.
     eprint!("  [\x1b[32mdeploy\x1b[0m] Deploying EthHTLC...");
     let maker_eth_signer: PrivateKeySigner = anvil.keys()[0].clone().into();
     let maker_eth_addr = maker_eth_signer.address();
@@ -121,13 +94,11 @@ pub async fn cmd_infra() -> Result<()> {
         .await
         .unwrap()
         .erased();
-    let contract = EthHTLC::deploy(&deployer, U256::from(60u64))
-        .await
-        .unwrap();
+    let contract = EthHTLC::deploy(&deployer, U256::from(60u64)).await.unwrap();
     let eth_htlc_address = *contract.address();
     eprintln!(" \x1b[32m{}\x1b[0m", eth_htlc_address);
 
-    // 6. Deploy LEZ HTLC program.
+    // 5. Deploy LEZ HTLC program.
     eprint!("  [\x1b[32mdeploy\x1b[0m] Deploying LEZ HTLC program...");
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
@@ -149,8 +120,8 @@ pub async fn cmd_infra() -> Result<()> {
         .flat_map(|w| w.to_le_bytes())
         .collect();
     let program_id_hex = hex::encode(&program_id_bytes);
-    let wallet_home_abs = std::fs::canonicalize(&wallet_home)
-        .unwrap_or_else(|_| wallet_home.clone());
+    let wallet_home_abs =
+        std::fs::canonicalize(&wallet_home).unwrap_or_else(|_| wallet_home.clone());
     let wallet_home_str = wallet_home_abs.display().to_string();
 
     write_env_file(
@@ -170,7 +141,6 @@ pub async fn cmd_infra() -> Result<()> {
             eth_recipient: &format!("{maker_eth_addr}"),
             lez_taker_account: &accounts[1].account_id_b58,
             nssa_wallet_home_dir: &wallet_home_str,
-            waku_bootstrap_multiaddr: &bootstrap_multiaddr,
         },
     )?;
     eprintln!("  [\x1b[1minfra\x1b[0m] Wrote .env (maker)");
@@ -192,7 +162,6 @@ pub async fn cmd_infra() -> Result<()> {
             eth_recipient: &format!("{maker_eth_addr}"),
             lez_taker_account: &accounts[1].account_id_b58,
             nssa_wallet_home_dir: &wallet_home_str,
-            waku_bootstrap_multiaddr: &bootstrap_multiaddr,
         },
     )?;
     eprintln!("  [\x1b[1minfra\x1b[0m] Wrote .env.taker (taker)");
@@ -203,17 +172,16 @@ pub async fn cmd_infra() -> Result<()> {
     println!("\x1b[1m│  Infrastructure Ready                            │\x1b[0m");
     println!("\x1b[1m├──────────────────────────────────────────────────┤\x1b[0m");
     println!("│  \x1b[33mAnvil (ETH)\x1b[0m:   {:<33}│", &anvil_ws);
-    println!("│  \x1b[32mETH HTLC\x1b[0m:      {}           │", eth_htlc_address);
-    println!("│  \x1b[36mLEZ Sequencer\x1b[0m: {:<33}│", &sequencer_url);
     println!(
-        "│  \x1b[35mWaku\x1b[0m:          {:<33}│",
-        format!("rendezvous on tcp:{WAKU_LISTEN_PORT}")
+        "│  \x1b[32mETH HTLC\x1b[0m:      {}           │",
+        eth_htlc_address
     );
+    println!("│  \x1b[36mLEZ Sequencer\x1b[0m: {:<33}│", &sequencer_url);
     println!("│  Maker .env:    {:<33}│", ".env");
     println!("│  Taker .env:    {:<33}│", ".env.taker");
     println!("\x1b[1m└──────────────────────────────────────────────────┘\x1b[0m");
     println!();
-    println!("  \x1b[2mLogs: \x1b[33m[anvil]\x1b[0m\x1b[2m  embedded waku node\x1b[0m");
+    println!("  \x1b[2mLogs: \x1b[33m[anvil]\x1b[0m");
     println!("  Press Ctrl-C to stop all services.");
     println!();
 
@@ -224,9 +192,6 @@ pub async fn cmd_infra() -> Result<()> {
 
     println!();
     eprintln!("  [\x1b[1minfra\x1b[0m] Shutting down...");
-
-    // Explicit shutdown — WakuNodeHandle has no Drop. See dogfooding #3.
-    let _ = messaging.shutdown().await;
 
     // Anvil drops here.
     drop(anvil);
@@ -246,7 +211,6 @@ struct EnvParams<'a> {
     eth_recipient: &'a str,
     lez_taker_account: &'a str,
     nssa_wallet_home_dir: &'a str,
-    waku_bootstrap_multiaddr: &'a str,
 }
 
 fn write_env_file(path: &str, p: &EnvParams) -> Result<()> {
@@ -291,10 +255,6 @@ LEZ_TAKER_ACCOUNT_ID={lez_taker}
 # Polling
 POLL_INTERVAL_MS=500
 
-# Logos Messaging (embedded waku node)
-WAKU_BOOTSTRAP_MULTIADDR={waku_bootstrap}
-WAKU_LISTEN_PORT=0
-
 # Wallet home (used by wallet::WalletCore::from_env)
 NSSA_WALLET_HOME_DIR={wallet_home}
 ",
@@ -308,7 +268,6 @@ NSSA_WALLET_HOME_DIR={wallet_home}
         eth_amount = p.eth_amount,
         eth_recipient = p.eth_recipient,
         lez_taker = p.lez_taker_account,
-        waku_bootstrap = p.waku_bootstrap_multiaddr,
         wallet_home = p.nssa_wallet_home_dir,
     );
 

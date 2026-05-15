@@ -38,11 +38,7 @@ pub async fn watch_events(
 
     // Replay recent Locked events so we don't miss locks that happened before
     // the watcher started. Query from (current - 256) to latest.
-    let current_block = client
-        .provider()
-        .get_block_number()
-        .await
-        .unwrap_or(0);
+    let current_block = client.provider().get_block_number().await.unwrap_or(0);
     let from_block = current_block.saturating_sub(256);
 
     let historical_locked = contract

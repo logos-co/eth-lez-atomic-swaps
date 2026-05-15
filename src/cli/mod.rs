@@ -13,7 +13,7 @@ use std::time::Duration;
 use alloy::primitives::Address;
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{LezAuth, MessagingConfig, SwapConfig, eth_to_wei, parse_base58_account_id, parse_program_id};
+use crate::config::{LezAuth, SwapConfig, eth_to_wei, parse_base58_account_id, parse_program_id};
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
@@ -68,7 +68,11 @@ pub struct ConfigArgs {
     lez_account_id: Option<String>,
 
     /// LEZ sequencer URL
-    #[arg(long, env = "LEZ_SEQUENCER_URL", default_value = "http://127.0.0.1:3040")]
+    #[arg(
+        long,
+        env = "LEZ_SEQUENCER_URL",
+        default_value = "http://127.0.0.1:3040"
+    )]
     lez_sequencer_url: String,
 
     /// LEZ HTLC program ID (32-byte hex)
@@ -102,15 +106,6 @@ pub struct ConfigArgs {
     /// Polling interval in milliseconds
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "2000")]
     poll_interval_ms: u64,
-
-    /// Multiaddr of the messaging rendezvous node (typically set by `make infra`
-    /// in .env). When unset, messaging is disabled and coordination is out-of-band.
-    #[arg(long, env = "WAKU_BOOTSTRAP_MULTIADDR")]
-    waku_bootstrap_multiaddr: Option<String>,
-
-    /// libp2p TCP listen port for the embedded waku node. 0 = OS-assigned.
-    #[arg(long, env = "WAKU_LISTEN_PORT", default_value = "0")]
-    waku_listen_port: u16,
 }
 
 impl ConfigArgs {
@@ -129,7 +124,11 @@ impl ConfigArgs {
         let lez_taker_account_id = parse_base58_account_id(&self.lez_taker_account)?;
 
         // Determine LEZ auth mode: wallet (scaffold) or raw key.
-        let lez_auth = match (self.lez_wallet_home, self.lez_account_id, self.lez_signing_key) {
+        let lez_auth = match (
+            self.lez_wallet_home,
+            self.lez_account_id,
+            self.lez_signing_key,
+        ) {
             (Some(home), Some(account_id_str), _) => {
                 let account_id = parse_base58_account_id(&account_id_str)?;
                 LezAuth::Wallet {
@@ -165,17 +164,12 @@ impl ConfigArgs {
             lez_auth,
             lez_htlc_program_id,
             lez_amount: self.lez_amount,
-            eth_amount: eth_to_wei(&self.eth_amount)
-                .map_err(|e| SwapError::InvalidConfig(e))?,
+            eth_amount: eth_to_wei(&self.eth_amount).map_err(SwapError::InvalidConfig)?,
             lez_timelock: now + self.lez_timelock_minutes * 60,
             eth_timelock: now + self.eth_timelock_minutes * 60,
             eth_recipient_address,
             lez_taker_account_id,
             poll_interval: Duration::from_millis(self.poll_interval_ms),
-            messaging: self.waku_bootstrap_multiaddr.map(|bootstrap_multiaddr| MessagingConfig {
-                bootstrap_multiaddr,
-                listen_port: self.waku_listen_port,
-            }),
         })
     }
 }
@@ -193,7 +187,7 @@ enum Commands {
     /// Run a full demo: start local chains, deploy contracts, run both sides
     #[cfg(feature = "demo")]
     Demo,
-    /// Start infrastructure (Anvil + LEZ sequencer + nwaku), write .env files, block until Ctrl-C
+    /// Start infrastructure (Anvil + LEZ sequencer), write .env files, block until Ctrl-C
     #[cfg(feature = "demo")]
     Infra,
 }

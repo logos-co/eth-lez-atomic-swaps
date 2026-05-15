@@ -25,7 +25,7 @@ enum LezBackend {
         private_key: PrivateKey,
     },
     Wallet {
-        wallet_core: wallet::WalletCore,
+        wallet_core: Box<wallet::WalletCore>,
         private_key: PrivateKey,
     },
 }
@@ -102,7 +102,7 @@ impl LezClient {
 
         Ok(Self {
             backend: LezBackend::Wallet {
-                wallet_core: wc,
+                wallet_core: Box::new(wc),
                 private_key,
             },
             account_id: *target_account_id,
@@ -125,7 +125,6 @@ impl LezClient {
         }
     }
 
-
     /// Derive the escrow PDA account ID from a hashlock.
     pub fn escrow_pda(&self, hashlock: &[u8; 32]) -> AccountId {
         AccountId::from((&self.program_id, &PdaSeed::new(*hashlock)))
@@ -142,7 +141,11 @@ impl LezClient {
             .map_err(|e| SwapError::LezSequencer(format!("get_account failed: {e}")))?;
 
         let data: Vec<u8> = resp.data.into();
-        eprintln!("[get_escrow] pda={} data_len={}", hex::encode(pda.value()), data.len());
+        eprintln!(
+            "[get_escrow] pda={} data_len={}",
+            hex::encode(pda.value()),
+            data.len()
+        );
         if data.len() < 125 {
             eprintln!("[get_escrow] data too short ({} < 125)", data.len());
             return Ok(None);
@@ -221,10 +224,7 @@ impl LezClient {
         };
 
         let lock_hash = self
-            .send_htlc_instruction(
-                vec![self.account_id, pda],
-                instruction,
-            )
+            .send_htlc_instruction(vec![self.account_id, pda], instruction)
             .await?;
         debug!(tx_hash = %lock_hash, "LEZ HTLC lock submitted");
 
@@ -272,10 +272,7 @@ impl LezClient {
         let pda = self.escrow_pda(hashlock);
 
         let tx_hash = self
-            .send_htlc_instruction(
-                vec![self.account_id, pda],
-                HTLCInstruction::Refund,
-            )
+            .send_htlc_instruction(vec![self.account_id, pda], HTLCInstruction::Refund)
             .await?;
 
         info!(tx_hash = %tx_hash, "LEZ HTLC refunded");

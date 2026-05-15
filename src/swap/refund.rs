@@ -32,10 +32,7 @@ pub async fn refund_lez(
 /// Refund ETH from the HTLC contract after the timelock has expired.
 ///
 /// The on-chain contract enforces the timelock, so we simply delegate.
-pub async fn refund_eth(
-    eth_client: &EthClient,
-    swap_id: FixedBytes<32>,
-) -> Result<FixedBytes<32>> {
+pub async fn refund_eth(eth_client: &EthClient, swap_id: FixedBytes<32>) -> Result<FixedBytes<32>> {
     eth_client.refund(swap_id).await
 }
 

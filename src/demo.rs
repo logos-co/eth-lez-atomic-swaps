@@ -5,8 +5,8 @@ use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
-use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use common::transaction::NSSATransaction;
+use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use nssa::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
@@ -86,7 +86,11 @@ impl DemoEnv {
             .await
             .map_err(|e| SwapError::EthRpc(format!("EthHTLC deploy failed: {e}")))?;
         let eth_htlc_address = *contract.address();
-        report(3, "Deploying EthHTLC contract", &format!("{eth_htlc_address}"));
+        report(
+            3,
+            "Deploying EthHTLC contract",
+            &format!("{eth_htlc_address}"),
+        );
 
         // 4. Extract accounts and sequencer URL from WalletCore.
         report(4, "Reading wallet accounts", "");
@@ -139,7 +143,6 @@ impl DemoEnv {
             eth_recipient_address: maker_eth_addr,
             lez_taker_account_id: accounts[1].account_id,
             poll_interval: Duration::from_millis(500),
-            messaging: None,
         };
 
         let taker_config = SwapConfig {
@@ -159,7 +162,6 @@ impl DemoEnv {
             eth_recipient_address: maker_eth_addr,
             lez_taker_account_id: accounts[1].account_id,
             poll_interval: Duration::from_millis(500),
-            messaging: None,
         };
 
         let taker_eth_private_key = hex::encode(anvil.keys()[1].to_bytes());
