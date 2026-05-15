@@ -282,6 +282,10 @@ Then launch Basecamp from the repo root so `.env`, `.env.taker`, and relative
 paths like `.scaffold/wallet` resolve during local testing. The swap UI appears
 as the `swap_ui` app and auto-loads its `swap` core dependency.
 
+For the two-instance maker/taker flow, prefer the `basecamp-run-*` targets
+below; they pass the correct role and env file into Basecamp so the UI is
+preloaded when it opens.
+
 For quick UI smoke testing outside Basecamp, `make swap-ui-run` still launches
 the dependency-bundling `logos-standalone-app` runner with the QML inspector on
 `:3768`; this is not the default manual test path.
@@ -311,6 +315,46 @@ lgpm install ../swap-module/result/*.lgx ./result/*.lgx
 ```
 
 Then launch Basecamp; the swap UI shows as a tab and auto-loads its `swap` core dependency.
+
+### Two-Basecamp dogfooding (cross-node Delivery testing)
+
+Cross-node Delivery features (M1 offer discovery, M2 per-swap coordination)
+need two Basecamp instances running side by side with fully isolated state.
+The repo ships Make targets and [`scripts/basecamp-instance.sh`](scripts/basecamp-instance.sh)
+to spin those up under `.basecamp/` (gitignored).
+
+```bash
+make swap-lgx-build           # ensure swap + UI LGX are current
+make basecamp-init-maker      # creates .basecamp/maker/, installs LGX
+make basecamp-init-taker      # creates .basecamp/taker/, installs LGX
+
+make infra                    # keep running: Anvil + LEZ + .env/.env.taker
+make basecamp-run-maker       # separate terminal; auto-loads .env as maker
+make basecamp-run-taker       # separate terminal; auto-loads .env.taker as taker
+
+# inspect resolved paths (data dir, runtime dir, LGX flake) for an instance:
+make basecamp-paths-maker
+make basecamp-paths-taker
+
+make basecamp-clean           # remove both .basecamp/ instances
+```
+
+Run `make infra` before launching either Basecamp instance. It deploys the
+local Ethereum HTLC, starts the LEZ stack, and writes the `.env` files consumed
+by `make basecamp-run-maker` and `make basecamp-run-taker`; the run targets
+fail fast if those files are missing.
+
+Each instance gets an isolated `--user-dir` (Basecamp's modules / plugins /
+module_data / logs root), HOME, XDG dirs, and `NSSA_WALLET_HOME_DIR` under
+`.basecamp/<name>/`. The runtime/socket dir is forced to `/tmp/lbc-<name>/`
+because the macOS Unix-socket path limit (`sun_path == 104`) cannot fit a
+deep repo-relative path. `swap-ui` already picks a per-process random
+Delivery `portsShift`, so libp2p / discovery ports do not collide between
+the two instances.
+
+After rebuilding any of `delivery_module`, `swap`, or `swap_ui`, re-run
+`make basecamp-init-{maker,taker}` to refresh the installed copies of the
+LGX packages inside each instance.
 
 ### Migration status
 
