@@ -199,6 +199,13 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     setStatus(QStringLiteral("Please choose a configuration."));
     subscribeToSwapEvents();
     m_messagingPollTimer.start();
+    const QString autoEnvFile = qEnvironmentVariable("SWAP_UI_AUTO_ENV_FILE");
+    const QString autoRole = qEnvironmentVariable("SWAP_UI_AUTO_ROLE");
+    if (!autoEnvFile.isEmpty()) {
+        QMetaObject::invokeMethod(this, [this, autoEnvFile, autoRole]() {
+            loadEnvFile(autoEnvFile, autoRole);
+        }, Qt::QueuedConnection);
+    }
     qDebug() << "SwapUiPlugin: initialized";
 }
 
@@ -643,7 +650,11 @@ void SwapUiPlugin::loadEnvFile(const QString& path, const QString& role)
 
     const QString resolvedPath = resolveLocalEnvPath(path);
 
-    setStatus(QStringLiteral("Loading %1...").arg(resolvedPath));
+    if (!role.isEmpty()) {
+        setStatus(QStringLiteral("Loading %1 env...").arg(role));
+    } else {
+        setStatus(QStringLiteral("Loading %1...").arg(resolvedPath));
+    }
     setErrorMessage(QString{});
     m_swap->loadEnvAsync(resolvedPath, [this, role](QString result) {
         const auto error = jsonError(result);

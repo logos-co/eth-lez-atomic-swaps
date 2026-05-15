@@ -1,6 +1,9 @@
 .PHONY: contracts demo infra \
        setup localnet-start localnet-stop test circuits \
-       swap-vendor-ffi swap-module-build swap-ui-build swap-lgx-build swap-ui-run
+       swap-vendor-ffi swap-module-build swap-ui-build swap-lgx-build swap-ui-run \
+       basecamp-init-maker basecamp-init-taker \
+       basecamp-run-maker basecamp-run-taker \
+       basecamp-clean basecamp-paths-maker basecamp-paths-taker
 
 UNAME := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -116,11 +119,60 @@ swap-ui-build:
 	cd swap-ui && nix build -L
 
 # Build LGX packages for installing the core module and UI app into Basecamp.
+# Builds both the `#lgx` (`darwin-arm64-dev` variant, used by the
+# logos-standalone-app dev shell) and `#lgx-portable` (`darwin-arm64` variant,
+# required by the bundled `bin-macos-app` Basecamp because it links a
+# `LGPM_PORTABLE_BUILD`-defined PackageManagerLib that only resolves the bare
+# host variant). The basecamp-init-* targets install `#lgx-portable`.
 swap-lgx-build:
 	cd swap-module && nix build .#lgx -L
+	cd swap-module && nix build .#lgx-portable -L
 	cd swap-ui && nix build .#lgx -L
+	cd swap-ui && nix build .#lgx-portable -L
 
 # Launch the UI in logos-standalone-app for smoke testing only.
 # Manual testing should use Basecamp with the LGX packages from swap-lgx-build.
 swap-ui-run:
 	cd swap-ui && nix run .
+
+# --- Two-Basecamp dogfooding (cross-node Delivery testing) ---
+#
+# Spin up two fully-isolated LogosBasecamp instances under .basecamp/ for
+# manual cross-node testing of M1 (offer discovery) and M2 (per-swap
+# coordination) on the Delivery channel. Each instance has its own
+# LOGOS_DATA_DIR / HOME / XDG / runtime / wallet, so they cannot share
+# state. swap-ui already picks a random per-process Delivery portsShift,
+# so libp2p / discovery ports do not collide.
+#
+# Workflow:
+#   1. make swap-lgx-build            # ensure swap+UI LGX are current
+#   2. make basecamp-init-maker       # creates .basecamp/maker/, installs LGX
+#   3. make basecamp-init-taker       # creates .basecamp/taker/, installs LGX
+#   4. make infra                     # in a separate terminal (Anvil + LEZ + .env)
+#   5. make basecamp-run-maker        # in a separate terminal; auto-loads .env
+#   6. make basecamp-run-taker        # in a separate terminal; auto-loads .env.taker
+#   7. drive the swap from the GUIs; logs land in .basecamp/<name>/basecamp.log
+#
+# Re-run basecamp-init-* after rebuilding LGX to refresh the installed copies.
+
+basecamp-paths-maker:
+	@scripts/basecamp-instance.sh paths maker
+
+basecamp-paths-taker:
+	@scripts/basecamp-instance.sh paths taker
+
+basecamp-init-maker:
+	scripts/basecamp-instance.sh init maker
+
+basecamp-init-taker:
+	scripts/basecamp-instance.sh init taker
+
+basecamp-run-maker:
+	scripts/basecamp-instance.sh run maker
+
+basecamp-run-taker:
+	scripts/basecamp-instance.sh run taker
+
+basecamp-clean:
+	scripts/basecamp-instance.sh clean maker
+	scripts/basecamp-instance.sh clean taker
