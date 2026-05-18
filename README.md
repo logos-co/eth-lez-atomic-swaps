@@ -4,11 +4,241 @@ Cross-chain atomic swap between LEZ and Ethereum using hash time-locked contract
 
 This repo includes:
 
+- a Basecamp UI app for the default manual maker/taker flow
 - a headless local demo
 - a CLI for maker, taker, status, and refund flows
-- an optional [`logos-basecamp`](https://github.com/logos-co/logos-basecamp) UI app, built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder)
 
-## How the swap works
+## Default: Manual Basecamp Run
+
+For local manual testing, use two isolated Basecamp instances: one maker and one taker.
+
+```bash
+make setup
+make swap-lgx-build
+make basecamp-init-maker
+make basecamp-init-taker
+```
+
+Then start the local chain infrastructure and keep it running:
+
+```bash
+make infra
+```
+
+In two more terminals, launch the Basecamp instances:
+
+```bash
+make basecamp-run-maker
+make basecamp-run-taker
+```
+
+What each phase does:
+
+| Command | Why it is needed |
+|---|---|
+| `make setup` | Downloads `logos-blockchain-circuits`, runs `logos-scaffold setup`, and prepares `.scaffold/` wallet/localnet state. |
+| `make swap-lgx-build` | Builds installable LGX packages for the `swap` core module and `swap_ui` app. |
+| `make basecamp-init-maker` / `make basecamp-init-taker` | Creates isolated Basecamp instances under `.basecamp/` and installs the LGX packages into each one. |
+| `make infra` | Starts Anvil and the LEZ localnet, deploys the ETH HTLC contract, and writes `.env` / `.env.taker`. Keep this running. |
+| `make basecamp-run-maker` / `make basecamp-run-taker` | Launches the two Basecamp windows with the correct role and env file. |
+
+Re-run `make swap-lgx-build` and both `make basecamp-init-*` targets after changing the module, UI, or Delivery package inputs so each Basecamp instance gets the updated LGX packages.
+
+Use `Ctrl-C` in the `make infra` terminal to stop the local stack. Remove local Basecamp instance state with:
+
+```bash
+make basecamp-clean
+```
+
+## Prerequisites
+
+Supported platforms:
+
+- Apple Silicon macOS (`arm64`)
+- Linux `x86_64`
+- Linux `aarch64`
+
+Intel macOS is not supported because upstream does not publish a `logos-blockchain-circuits` bundle for `macos-x86_64`.
+
+Required for the default Basecamp UI flow:
+
+- Rust via [rustup](https://rustup.rs/); this repo pins Rust `1.93.0` in [`rust-toolchain.toml`](rust-toolchain.toml)
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `anvil`)
+- GNU `make`
+- a C/C++ toolchain
+- [`logos-scaffold`](https://github.com/logos-co/logos-scaffold) on your `PATH`
+- the RISC Zero toolchain installed with `rzup install rust`
+- [Nix](https://nixos.org/) with flakes enabled
+
+macOS Apple Silicon:
+
+```bash
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+curl -L https://risczero.com/install | bash
+rzup install rust
+sh <(curl -L https://nixos.org/nix/install)
+mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+```
+
+Linux:
+
+```bash
+# Ubuntu / Debian
+sudo apt install build-essential make
+
+# Fedora
+sudo dnf install gcc gcc-c++ make
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+curl -L https://risczero.com/install | bash
+rzup install rust
+sh <(curl -L https://nixos.org/nix/install --daemon)
+mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
+```
+
+Install `logos-scaffold` from a local clone:
+
+```bash
+git clone https://github.com/logos-co/logos-scaffold.git
+cd logos-scaffold
+cargo install --path .
+```
+
+The workspace [`.cargo/config.toml`](.cargo/config.toml) contains the macOS `aarch64` linker flags used by the Rust/LEZ build.
+
+## Clone And Setup
+
+Clone with submodules:
+
+```bash
+git clone --recurse-submodules https://github.com/logos-co/eth-lez-atomic-swaps.git
+cd eth-lez-atomic-swaps
+```
+
+If you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+Run setup once from the repo root:
+
+```bash
+make setup
+```
+
+`make setup` must finish successfully before `make infra` or most other flows. It downloads circuits into `.scaffold/circuits`, runs `logos-scaffold setup`, and creates the local LEZ checkout and wallet under `.scaffold/`.
+
+You do not need `logos-scaffold init`. This repo already ships a checked-in [`scaffold.toml`](scaffold.toml) with the expected relative paths.
+
+To inspect generated LEZ wallet accounts:
+
+```bash
+logos-scaffold wallet list --long
+```
+
+## Basecamp UI Notes
+
+The UI is a [logos-basecamp](https://github.com/logos-co/logos-basecamp) app, built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder). It is split into two Logos modules:
+
+- **`swap-module/`**: `type: "core"` universal C++ module wrapping `swap-ffi`. The pure-C++ `SwapImpl` methods are exposed as a typed `Swap` client class for other modules / UIs.
+- **`swap-ui/`**: `type: "ui_qml"` Basecamp app with a process-isolated C++ backend (Qt Remote Objects, `.rep` interface) and a QML view. It calls into `swap` via the generated `Swap` client.
+
+Both flakes are standalone and build inside their own subdirectories. Their `flake.lock` files are intentionally kept local/ignored so PR diffs stay focused on source changes.
+
+The two-instance flow uses [`scripts/basecamp-instance.sh`](scripts/basecamp-instance.sh) to create isolated `--user-dir`, HOME, XDG dirs, runtime dirs, and wallets under `.basecamp/maker/` and `.basecamp/taker/`. The runtime/socket dir is forced to `/tmp/lbc-<name>/` to avoid the macOS Unix-socket path limit.
+
+Inspect resolved paths for each instance with:
+
+```bash
+make basecamp-paths-maker
+make basecamp-paths-taker
+```
+
+## Build Verification
+
+These targets verify standalone Nix flake builds. They do not install anything into Basecamp and are not the normal manual app run path.
+
+```bash
+make swap-module-build
+make swap-ui-build
+```
+
+`make swap-module-build` builds the `swap-module/` flake and compiles `swap-ffi` from tracked Rust source. `make swap-ui-build` builds the `swap-ui/` flake, which depends on `swap-module` via `path:../swap-module`.
+
+`swap-module/lib/libswap_ffi.{dylib,so}` is a local platform artifact and is ignored by default. Do not force-add it for Nix builds; `swap-module/flake.nix` builds `swap-ffi` from source.
+
+For quick standalone UI smoke testing outside Basecamp:
+
+```bash
+make swap-ui-run
+```
+
+This launches the dependency-bundling `logos-standalone-app` runner with the QML inspector on `:3768`. It is not the default manual Basecamp path.
+
+## Headless Demo And CLI Usage
+
+For a quick automated end-to-end swap without the UI:
+
+```bash
+make demo
+```
+
+`make demo` starts local infrastructure as needed, deploys the Ethereum HTLC to Anvil, runs both maker and taker, and completes a full swap headlessly.
+
+For manual CLI use, start the infrastructure and leave it running:
+
+```bash
+make infra
+```
+
+Then open two more terminals in the repo root:
+
+```bash
+cargo run --bin swap-cli -- --env-file .env maker
+cargo run --bin swap-cli -- --env-file .env.taker taker
+```
+
+Common CLI commands:
+
+```bash
+cargo run --bin swap-cli -- --env-file .env maker
+cargo run --bin swap-cli -- --env-file .env.taker taker
+cargo run --bin swap-cli -- --env-file .env status --swap-id <hex>
+cargo run --bin swap-cli -- --env-file .env status --hashlock <hex>
+cargo run --bin swap-cli -- --env-file .env refund eth --swap-id <hex>
+cargo run --bin swap-cli -- --env-file .env refund lez --hashlock <hex>
+```
+
+If you are not using the local stack from `make infra`, start from [`.env.example`](.env.example) and provide your own RPC endpoints, keys, contract address, and LEZ account details.
+
+## Tests
+
+Full test flow:
+
+```bash
+make test
+```
+
+Single integration test flow:
+
+```bash
+make localnet-start
+NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test --test <file> <name> -- --nocapture
+make localnet-stop
+```
+
+Lint and format:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+## How The Swap Works
 
 ```text
 Taker                                          Maker
@@ -33,333 +263,7 @@ If one side stops responding, the timelocks allow refunds.
 
 ![logos-app plugin](docs/logos-app-plugin.gif)
 
-## First-time quickstart
-
-If you are new to this repo, follow this exact order:
-
-1. Clone the repo with submodules.
-2. Install the required toolchains.
-3. Run `make setup`.
-4. Run `make demo` for the fastest successful end-to-end swap.
-5. Run `make infra` if you want to drive maker and taker yourself.
-
-`make setup` must finish successfully before `make infra` or most other flows.
-
-### Supported platforms
-
-- Apple Silicon macOS (`arm64`)
-- Linux `x86_64`
-- Linux `aarch64`
-
-Intel macOS is not supported because upstream does not publish a `logos-blockchain-circuits` bundle for `macos-x86_64`.
-
-### Required for the CLI and local demo
-
-- Rust 1.85+ via [rustup](https://rustup.rs/)
-- [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `anvil`)
-- GNU `make`
-- a C/C++ toolchain
-- [`logos-scaffold`](https://github.com/logos-co/logos-scaffold) on your `PATH`
-- the RISC Zero toolchain installed with `rzup install rust`
-
-Notes:
-
-- The first full build can take 5-10 minutes because it compiles the LEZ guest artifacts.
-- Docker or Podman is not required for the normal local flow.
-
-### Optional for the Basecamp UI
-
-- [Nix](https://nixos.org/) with flakes enabled
-
-The UI is built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder), which provides Qt 6, the C++ SDK, and all build tooling through Nix. No host CMake or Qt install is needed.
-
-### 1. Clone
-
-```bash
-git clone --recurse-submodules https://github.com/logos-co/eth-lez-atomic-swaps.git
-cd eth-lez-atomic-swaps
-```
-
-If you already cloned without submodules:
-
-```bash
-git submodule update --init --recursive
-```
-
-### 2. Install prerequisites
-
-<details><summary><b>macOS (Apple Silicon)</b></summary>
-
-```bash
-xcode-select --install
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-curl -L https://foundry.paradigm.xyz | bash && foundryup
-curl -L https://risczero.com/install | bash
-rzup install rust
-```
-
-Install `logos-scaffold` from a local clone:
-
-```bash
-git clone https://github.com/logos-co/logos-scaffold.git
-cd logos-scaffold
-cargo install --path .
-```
-
-If you want the optional UI as well, install Nix with flakes:
-
-```bash
-sh <(curl -L https://nixos.org/nix/install)
-mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
-```
-
-The workspace [`.cargo/config.toml`](.cargo/config.toml) contains the macOS `aarch64` linker flags used by the Rust/LEZ build.
-
-</details>
-
-<details><summary><b>Linux</b></summary>
-
-For Ubuntu or Debian:
-
-```bash
-sudo apt install build-essential make
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-curl -L https://foundry.paradigm.xyz | bash && foundryup
-curl -L https://risczero.com/install | bash
-rzup install rust
-```
-
-For Fedora:
-
-```bash
-sudo dnf install gcc gcc-c++ make
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-curl -L https://foundry.paradigm.xyz | bash && foundryup
-curl -L https://risczero.com/install | bash
-rzup install rust
-```
-
-Install `logos-scaffold` from a local clone:
-
-```bash
-git clone https://github.com/logos-co/logos-scaffold.git
-cd logos-scaffold
-cargo install --path .
-```
-
-If you want the optional UI as well, install Nix with flakes:
-
-```bash
-sh <(curl -L https://nixos.org/nix/install --daemon)
-mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
-```
-
-</details>
-
-### 3. Run one-time setup
-
-From the repo root:
-
-```bash
-make setup
-```
-
-What this does:
-
-- downloads `logos-blockchain-circuits` into `.scaffold/circuits`
-- runs `logos-scaffold setup`
-- creates the local LEZ checkout and wallet under `.scaffold/`
-
-You do not need `logos-scaffold init`. This repo already ships a checked-in [`scaffold.toml`](scaffold.toml) with the expected relative paths.
-
-If you want to inspect the generated LEZ wallet accounts:
-
-```bash
-logos-scaffold wallet list --long
-```
-
-### 4. Fastest smoke test: run the built-in demo
-
-```bash
-make demo
-```
-
-This is the quickest way to verify your machine is set up correctly. It:
-
-- starts the local LEZ network if needed
-- deploys the Ethereum HTLC to Anvil
-- runs both maker and taker
-- completes a full swap without the UI
-
-### 5. Interactive local stack
-
-If you want to run each side yourself, start the infrastructure first and leave it running:
-
-```bash
-make infra
-```
-
-`make infra` starts:
-
-- Anvil
-- the LEZ localnet
-- contract deployment
-- `.env` and `.env.taker` generation
-
-Use `Ctrl-C` in that terminal to stop everything cleanly.
-
-Then open two more terminals in the repo root.
-
-Maker:
-
-```bash
-cargo run --bin swap-cli -- --env-file .env maker
-```
-
-Taker:
-
-```bash
-cargo run --bin swap-cli -- --env-file .env.taker taker
-```
-
-After `cargo build --release`, you can replace `cargo run --bin swap-cli --` with `./target/release/swap-cli`.
-
-## CLI reference
-
-Common commands:
-
-```bash
-cargo run --bin swap-cli -- --env-file .env maker
-cargo run --bin swap-cli -- --env-file .env.taker taker
-cargo run --bin swap-cli -- --env-file .env status --swap-id <hex>
-cargo run --bin swap-cli -- --env-file .env status --hashlock <hex>
-cargo run --bin swap-cli -- --env-file .env refund eth --swap-id <hex>
-cargo run --bin swap-cli -- --env-file .env refund lez --hashlock <hex>
-```
-
-If you are not using the local stack from `make infra`, start from [`.env.example`](.env.example) and provide your own RPC endpoints, keys, contract address, and LEZ account details.
-
-## Basecamp UI (optional)
-
-The UI is a [logos-basecamp](https://github.com/logos-co/logos-basecamp) app, built via [`logos-module-builder`](https://github.com/logos-co/logos-module-builder). It is split into two Logos modules:
-
-- **`swap-module/`** — `type: "core"` universal C++ module wrapping `swap-ffi`. Built with `mkLogosModule` + `logos-cpp-generator`. The 13 public methods on `SwapImpl` (the pure-C++ impl class) are auto-exposed as a typed `Swap` client class for other modules / UIs to call.
-- **`swap-ui/`** — `type: "ui_qml"` Basecamp app with a process-isolated C++ backend (Qt Remote Objects, `.rep` interface) and a QML view. Calls into `swap` via the generated `Swap` client.
-
-Both flakes are standalone — each builds inside its own subdirectory. Their
-`flake.lock` files are intentionally kept local/ignored in this repo so the PR
-diff stays focused on source changes; regenerate them locally with `nix build`
-when needed.
-
-### First-time UI build
-
-```bash
-make swap-module-build                                 # nix build the core swap module and source-built swap-ffi
-make swap-ui-build                                     # nix build the UI (depends on swap-module via path:)
-```
-
-`swap-module/lib/libswap_ffi.{dylib,so}` is a local platform artifact and is
-ignored by default. Do not force-add it for Nix builds; `swap-module/flake.nix`
-builds `swap-ffi` from tracked Rust source and passes the resulting `$out/lib`
-and `$out/include` to `mkLogosModule` as `externalLibInputs.swap_ffi`.
-
-### Run in Basecamp
-
-```bash
-cd swap-module && nix build .#lgx
-cd ../swap-ui && nix build .#lgx
-lgpm install ../swap-module/result/*.lgx ./result/*.lgx
-```
-
-If `lgpm` is not on your `PATH`, install the CLI first:
-
-```bash
-nix profile add github:logos-co/logos-package-manager#cli
-```
-
-Then launch Basecamp from the repo root so `.env`, `.env.taker`, and relative
-paths like `.scaffold/wallet` resolve during local testing. The swap UI appears
-as the `swap_ui` app and auto-loads its `swap` core dependency.
-
-For the two-instance maker/taker flow, prefer the `basecamp-run-*` targets
-below; they pass the correct role and env file into Basecamp so the UI is
-preloaded when it opens.
-
-For quick UI smoke testing outside Basecamp, `make swap-ui-run` still launches
-the dependency-bundling `logos-standalone-app` runner with the QML inspector on
-`:3768`; this is not the default manual test path.
-
-### Smoke-test the UI
-
-`mkLogosQmlModule` auto-detects [`swap-ui/tests/smoke.mjs`](swap-ui/tests/smoke.mjs), but the pinned `logos-standalone-app` `mkPluginTest` runner does not bundle module dependencies yet. Use the dependency-bundling `apps.default` runner instead:
-
-```bash
-cd swap-ui
-nix build .#test-framework -o result-mcp
-nix run . -- --help >/dev/null
-system=$(nix eval --raw --impure --expr builtins.currentSystem)
-runner=$(nix eval --raw ".#apps.${system}.default.program")
-LOGOS_QT_MCP=$(realpath result-mcp) QT_QPA_PLATFORM=offscreen \
-  node tests/smoke.mjs --ci "$runner" --verbose
-```
-
-In sandboxed agent environments, run the smoke command unsandboxed so Logos can create its local IPC sockets.
-
-Equivalent explicit Basecamp packaging commands:
-
-```bash
-cd swap-module && nix build .#lgx
-cd ../swap-ui   && nix build .#lgx
-lgpm install ../swap-module/result/*.lgx ./result/*.lgx
-```
-
-Then launch Basecamp; the swap UI shows as a tab and auto-loads its `swap` core dependency.
-
-### Two-Basecamp dogfooding (cross-node Delivery testing)
-
-Cross-node Delivery features (M1 offer discovery, M2 per-swap coordination)
-need two Basecamp instances running side by side with fully isolated state.
-The repo ships Make targets and [`scripts/basecamp-instance.sh`](scripts/basecamp-instance.sh)
-to spin those up under `.basecamp/` (gitignored).
-
-```bash
-make swap-lgx-build           # ensure swap + UI LGX are current
-make basecamp-init-maker      # creates .basecamp/maker/, installs LGX
-make basecamp-init-taker      # creates .basecamp/taker/, installs LGX
-
-make infra                    # keep running: Anvil + LEZ + .env/.env.taker
-make basecamp-run-maker       # separate terminal; auto-loads .env as maker
-make basecamp-run-taker       # separate terminal; auto-loads .env.taker as taker
-
-# inspect resolved paths (data dir, runtime dir, LGX flake) for an instance:
-make basecamp-paths-maker
-make basecamp-paths-taker
-
-make basecamp-clean           # remove both .basecamp/ instances
-```
-
-Run `make infra` before launching either Basecamp instance. It deploys the
-local Ethereum HTLC, starts the LEZ stack, and writes the `.env` files consumed
-by `make basecamp-run-maker` and `make basecamp-run-taker`; the run targets
-fail fast if those files are missing.
-
-Each instance gets an isolated `--user-dir` (Basecamp's modules / plugins /
-module_data / logs root), HOME, XDG dirs, and `NSSA_WALLET_HOME_DIR` under
-`.basecamp/<name>/`. The runtime/socket dir is forced to `/tmp/lbc-<name>/`
-because the macOS Unix-socket path limit (`sun_path == 104`) cannot fit a
-deep repo-relative path. `swap-ui` already picks a per-process random
-Delivery `portsShift`, so libp2p / discovery ports do not collide between
-the two instances.
-
-After rebuilding any of `delivery_module`, `swap`, or `swap_ui`, re-run
-`make basecamp-init-{maker,taker}` to refresh the installed copies of the
-LGX packages inside each instance.
-
-### Migration status
-
-This UI is an early scaffold. The rich legacy UI from previous iterations of this repo (config panel, maker/taker/refund views, progress steppers) needs to be ported tab-by-tab into [`swap-ui/src/qml/`](swap-ui/src/qml/) as the [`swap_ui.rep`](swap-ui/src/swap_ui.rep) interface grows to cover the property/slot surface they need. Long-running flows in [`swap-module/src/swap_impl.h`](swap-module/src/swap_impl.h) (`runMaker`, `runTaker`, `runMakerLoop`) currently block their dispatcher thread; they should become non-blocking before this is more than a demo.
-
-## Project layout
+## Project Layout
 
 | Path | Purpose |
 |---|---|
@@ -367,14 +271,14 @@ This UI is an early scaffold. The rich legacy UI from previous iterations of thi
 | `contracts/` | Solidity HTLC contract built with Foundry |
 | `programs/lez-htlc/` | LEZ HTLC program built with RISC Zero |
 | `src/` | Orchestration, chain clients, maker/taker/refund CLI flows |
-| `swap-ffi/` | Rust C-FFI cdylib (`libswap_ffi.{dylib,so}`) — consumed by `swap-module` |
-| `swap-module/` | Universal C++ core module (Logos `type: "core"`) wrapping `swap-ffi`. Built via `logos-module-builder`. |
-| `swap-ui/` | Basecamp UI app (Logos `type: "ui_qml"`) calling `swap` over Qt Remote Objects. |
+| `swap-ffi/` | Rust C-FFI cdylib (`libswap_ffi.{dylib,so}`), consumed by `swap-module` |
+| `swap-module/` | Universal C++ core module (Logos `type: "core"`) wrapping `swap-ffi` |
+| `swap-ui/` | Basecamp UI app (Logos `type: "ui_qml"`) calling `swap` over Qt Remote Objects |
 | `tests/` | Integration tests for the Rust orchestrator |
 
-The headless CLI flow (`swap-cli`, `make demo`, `make infra`, …) is independent of the UI and works without Nix.
+The headless CLI flow (`swap-cli`, `make demo`, `make infra`) is independent of the UI and works without Nix.
 
-## Common make targets
+## Common Make Targets
 
 | Command | What it does |
 |---|---|
@@ -386,8 +290,14 @@ The headless CLI flow (`swap-cli`, `make demo`, `make infra`, …) is independen
 | `make localnet-start` | Start the LEZ localnet |
 | `make localnet-stop` | Stop the LEZ localnet |
 | `make swap-vendor-ffi` | Build `swap-ffi` and copy `libswap_ffi.{dylib,so}` into `swap-module/lib/` for ad hoc non-Nix testing |
-| `make swap-module-build` | Build `swap-module/` via Nix (requires Nix flakes) |
-| `make swap-ui-build` | Build `swap-ui/` via Nix |
+| `make swap-module-build` | Verify the `swap-module/` Nix flake build |
+| `make swap-ui-build` | Verify the `swap-ui/` Nix flake build |
+| `make swap-lgx-build` | Build installable LGX packages for Basecamp manual testing |
+| `make basecamp-init-maker` | Create/update the isolated maker Basecamp instance and install LGX packages |
+| `make basecamp-init-taker` | Create/update the isolated taker Basecamp instance and install LGX packages |
+| `make basecamp-run-maker` | Launch the maker Basecamp instance |
+| `make basecamp-run-taker` | Launch the taker Basecamp instance |
+| `make basecamp-clean` | Remove local maker/taker Basecamp instance state |
 | `make swap-ui-run` | Launch `swap-ui` in `logos-standalone-app` for smoke testing only |
 
 ## Architecture
@@ -396,9 +306,9 @@ The headless CLI flow (`swap-cli`, `make demo`, `make infra`, …) is independen
 +--------------------------------------------------------+
 | logos-basecamp                                         |
 |  +--------------------------------------------------+  |
-|  | swap-ui (ui_qml)         │  swap (core)          |  |
-|  |  QML view  ---QRO--->    │  C++ universal impl   |  |
-|  |  (Basecamp process)      │  (logos_host process) |  |
+|  | swap-ui (ui_qml)         |  swap (core)          |  |
+|  |  QML view  ---QRO--->    |  C++ universal impl   |  |
+|  |  (Basecamp process)      |  (logos_host process) |  |
 |  +-------------------------------------+------------+  |
 |                                        |               |
 |                                        | links         |
@@ -421,7 +331,7 @@ The headless CLI flow (`swap-cli`, `make demo`, `make infra`, …) is independen
 +--------------------------------------------------------+
 ```
 
-## Design notes
+## Design Notes
 
 - SHA-256 is used for the hashlock so both chains share the same primitive.
 - The taker locks first, so the ETH timelock is longer and the LEZ timelock is shorter.
@@ -441,7 +351,7 @@ For more detail on the messaging side, see [delivery-dogfooding.md](delivery-dog
 - Git pull blocked by untracked `scaffold.toml`
   Older clones sometimes had that file gitignored. Move it aside, pull again, then compare your old copy with the checked-in [`scaffold.toml`](scaffold.toml).
 
-## Maintainer notes
+## Maintainer Notes
 
 - Bump `CIRCUITS_VERSION` in the [`Makefile`](Makefile) when the `lssa` revision in [`Cargo.toml`](Cargo.toml) needs a newer published `logos-blockchain-circuits` release.
 - Bump `[repos.lez].pin` in [`scaffold.toml`](scaffold.toml) when intentionally moving to a different LEZ revision.
