@@ -101,7 +101,9 @@ FFI functions entirely. The remaining `messagingInit`/`publishOffer`/
 
 Runtime Basecamp logs print full remote method arguments for calls such as `fetchBalances` and `publishOffer`. During local testing that included `.env` values such as private keys, account identifiers, RPC URLs, and public offer payloads. This is useful for debugging but makes raw log snippets unsafe to paste into upstream issues or docs without redaction.
 
-**Suggested fix:** provide a redaction mode or argument filtering for Basecamp/module proxy logs, especially for known config keys like `eth_private_key`, `lez_signing_key`, wallet paths, RPC URLs, and raw payloads.
+The issue also affects seemingly harmless startup polish. Auto-populating wallet balances after `loadEnvFile` could not safely reuse the normal `fetchBalances(configJson)` UI path, because the generated module proxy would log the full secret-bearing config as a method argument. The local mitigation is a path-based `fetchBalancesFromEnv(path)` module method: only the env-file path crosses the Basecamp IPC/logging boundary, while the core module loads the secret config internally and immediately calls the Rust FFI balance fetch.
+
+**Suggested fix:** provide a redaction mode or argument filtering for Basecamp/module proxy logs, especially for known config keys like `eth_private_key`, `lez_signing_key`, wallet paths, RPC URLs, and raw payloads. The docs should also warn app authors that generated module methods are not an appropriate boundary for secret-bearing convenience arguments unless logging redaction is enabled.
 
 **Disposition:** do not file yet; redact logs manually before any upstream/downstream issue filing.
 
