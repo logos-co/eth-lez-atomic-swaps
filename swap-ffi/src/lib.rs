@@ -271,13 +271,18 @@ fn outcome_to_json(outcome: &SwapOutcome, hashlock: &[u8; 32]) -> String {
 fn forward_progress(
     cb: ProgressCallback,
     user_data: *mut c_void,
-) -> Option<swap_orchestrator::swap::progress::ProgressSender> {
-    let cb = cb?;
+) -> (
+    Option<swap_orchestrator::swap::progress::ProgressSender>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    let Some(cb) = cb else {
+        return (None, None);
+    };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SwapProgress>();
 
     // user_data is thread-safe (opaque pointer managed by the C++ caller).
     let ud = user_data as usize;
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
             if let Ok(json) = serde_json::to_string(&progress) {
                 if let Ok(c_str) = CString::new(json) {
@@ -287,7 +292,13 @@ fn forward_progress(
         }
     });
 
-    Some(tx)
+    (Some(tx), Some(handle))
+}
+
+async fn drain_progress_forwarder(handle: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = handle {
+        let _ = handle.await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,8 +357,6 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
     };
 
     runtime().block_on(async {
-        let progress = forward_progress(cb, user_data);
-
         let eth_client = match EthClient::new(&config).await {
             Ok(c) => c,
             Err(e) => return json_err(&e.to_string()),
@@ -357,7 +366,8 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
             Err(e) => return json_err(&e.to_string()),
         };
 
-        match run_maker(
+        let (progress, progress_forwarder) = forward_progress(cb, user_data);
+        let result = match run_maker(
             &config,
             &eth_client,
             &lez_client,
@@ -375,7 +385,9 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
                 to_c_string(&outcome_to_json(outcome, &hashlock))
             }
             Err(e) => json_err(&e.to_string()),
-        }
+        };
+        drain_progress_forwarder(progress_forwarder).await;
+        result
     })
 }
 
@@ -410,8 +422,6 @@ pub unsafe extern "C" fn swap_ffi_run_taker(
     };
 
     runtime().block_on(async {
-        let progress = forward_progress(cb, user_data);
-
         let eth_client = match EthClient::new(&config).await {
             Ok(c) => c,
             Err(e) => return json_err(&e.to_string()),
@@ -421,7 +431,8 @@ pub unsafe extern "C" fn swap_ffi_run_taker(
             Err(e) => return json_err(&e.to_string()),
         };
 
-        match run_taker(
+        let (progress, progress_forwarder) = forward_progress(cb, user_data);
+        let result = match run_taker(
             &config,
             &eth_client,
             &lez_client,
@@ -438,7 +449,9 @@ pub unsafe extern "C" fn swap_ffi_run_taker(
                 to_c_string(&outcome_to_json(outcome, &hashlock))
             }
             Err(e) => json_err(&e.to_string()),
-        }
+        };
+        drain_progress_forwarder(progress_forwarder).await;
+        result
     })
 }
 
@@ -652,12 +665,13 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
     };
 
     runtime().block_on(async {
-        let progress = forward_progress(cb, user_data);
+        let (progress, progress_forwarder) = forward_progress(cb, user_data);
         let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress).await;
         let json = serde_json::json!({
             "completed": result.total_completed,
             "failed": result.total_failed,
         });
+        drain_progress_forwarder(progress_forwarder).await;
         to_c_string(&json.to_string())
     })
 }
