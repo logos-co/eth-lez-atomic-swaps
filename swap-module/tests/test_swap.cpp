@@ -11,6 +11,17 @@
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
 
+extern "C" {
+void mock_swap_ffi_reset();
+void mock_swap_ffi_set_load_env_error(bool enabled);
+int mock_swap_ffi_load_env_calls();
+int mock_swap_ffi_fetch_balances_calls();
+int mock_swap_ffi_free_string_calls();
+const char* mock_swap_ffi_last_load_env_path();
+const char* mock_swap_ffi_last_fetch_balances_config();
+const char* mock_swap_ffi_call_sequence();
+}
+
 namespace {
 
 bool waitForContains(SwapImpl& impl, const std::string& jobId, const std::string& needle)
@@ -75,6 +86,35 @@ LOGOS_TEST(stop_maker_loop_is_safe_when_idle) {
 LOGOS_TEST(fetch_balances_returns_ffi_json) {
     SwapImpl impl;
     LOGOS_ASSERT_CONTAINS(impl.fetchBalances("{}"), R"("method":"fetchBalances")");
+}
+
+LOGOS_TEST(fetch_balances_from_env_loads_config_internally) {
+    mock_swap_ffi_reset();
+    SwapImpl impl;
+
+    const auto result = impl.fetchBalancesFromEnv("/tmp/swap.env");
+
+    LOGOS_ASSERT_CONTAINS(result, R"("method":"fetchBalances")");
+    LOGOS_ASSERT_EQ(mock_swap_ffi_load_env_calls(), 1);
+    LOGOS_ASSERT_EQ(mock_swap_ffi_fetch_balances_calls(), 1);
+    LOGOS_ASSERT_EQ(std::string(mock_swap_ffi_call_sequence()), std::string("loadEnv>fetchBalances"));
+    LOGOS_ASSERT_EQ(std::string(mock_swap_ffi_last_load_env_path()), std::string("/tmp/swap.env"));
+    LOGOS_ASSERT_CONTAINS(std::string(mock_swap_ffi_last_fetch_balances_config()), R"("eth_rpc_url":"ws://127.0.0.1:8545")");
+    LOGOS_ASSERT_EQ(mock_swap_ffi_free_string_calls(), 2);
+}
+
+LOGOS_TEST(fetch_balances_from_env_returns_load_env_error_without_fetching) {
+    mock_swap_ffi_reset();
+    mock_swap_ffi_set_load_env_error(true);
+    SwapImpl impl;
+
+    const auto result = impl.fetchBalancesFromEnv("/tmp/bad.env");
+
+    LOGOS_ASSERT_CONTAINS(result, R"("error":"forced load env failure")");
+    LOGOS_ASSERT_EQ(mock_swap_ffi_load_env_calls(), 1);
+    LOGOS_ASSERT_EQ(mock_swap_ffi_fetch_balances_calls(), 0);
+    LOGOS_ASSERT_EQ(std::string(mock_swap_ffi_call_sequence()), std::string("loadEnv"));
+    LOGOS_ASSERT_EQ(mock_swap_ffi_free_string_calls(), 1);
 }
 
 LOGOS_TEST(messaging_status_uses_delivery_backend_shape) {
