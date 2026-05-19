@@ -188,6 +188,7 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setMessagingConnected(false);
     setMessagingPeerCount(0);
     setMessagingConnectionStatus(QString{});
+    setMessagingRetrying(false);
     setOffersJson(QString{});
     setOfferResultJson(QString{});
     setBalancesLoading(false);
@@ -247,6 +248,9 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
             loadEnvFile(autoEnvFile, autoRole);
         }, Qt::QueuedConnection);
     }
+    QMetaObject::invokeMethod(this, [this]() {
+        startBackgroundServices();
+    }, Qt::QueuedConnection);
     qDebug() << "SwapUiPlugin: initialized";
 }
 
@@ -724,7 +728,7 @@ void SwapUiPlugin::loadEnvFile(const QString& path, const QString& role)
         setStatus(QStringLiteral("Loading %1...").arg(resolvedPath));
     }
     setErrorMessage(QString{});
-    m_swap->loadEnvAsync(resolvedPath, [this, role](QString result) {
+    m_swap->loadEnvAsync(resolvedPath, [this, role, resolvedPath](QString result) {
         const auto error = jsonError(result);
         if (!error.isEmpty()) {
             setErrorMessage(error);
@@ -735,8 +739,27 @@ void SwapUiPlugin::loadEnvFile(const QString& path, const QString& role)
         if (!role.isEmpty()) {
             setRole(role);
         }
-        validateConfig();
+        const bool configValid = validateConfig();
+        m_loadedEnvPath = resolvedPath;
         setStatus(QStringLiteral("Config loaded from env"));
+        if (configValid) {
+            fetchBalancesFromLoadedEnv();
+        }
+    });
+}
+
+void SwapUiPlugin::fetchBalancesFromLoadedEnv()
+{
+    if (!m_swap || m_loadedEnvPath.isEmpty() || balancesLoading()) {
+        return;
+    }
+
+    setErrorMessage(QString{});
+    setBalancesLoading(true);
+    setStatus(QStringLiteral("Fetching balances..."));
+    m_swap->fetchBalancesFromEnvAsync(m_loadedEnvPath, [this](QString result) {
+        setBalancesLoading(false);
+        applyBalancesResult(result);
     });
 }
 
@@ -810,7 +833,7 @@ void SwapUiPlugin::handleMakerFinished(const QString& resultJson)
     setResultStatus(resultJson,
                     QStringLiteral("Maker swap finished"),
                     QStringLiteral("Maker swap failed"));
-    fetchBalances();
+    fetchBalancesFromLoadedEnv();
 }
 
 void SwapUiPlugin::handleTakerFinished(const QString& resultJson)
@@ -829,7 +852,7 @@ void SwapUiPlugin::handleTakerFinished(const QString& resultJson)
     setResultStatus(resultJson,
                     QStringLiteral("Taker swap finished"),
                     QStringLiteral("Taker swap failed"));
-    fetchBalances();
+    fetchBalancesFromLoadedEnv();
 }
 
 void SwapUiPlugin::handleAutoAcceptFinished(const QString& resultJson)
@@ -853,7 +876,7 @@ void SwapUiPlugin::handleAutoAcceptFinished(const QString& resultJson)
     setResultStatus(resultJson,
                     QStringLiteral("Auto-accept stopped"),
                     QStringLiteral("Auto-accept failed"));
-    fetchBalances();
+    fetchBalancesFromLoadedEnv();
 }
 
 void SwapUiPlugin::handleJobStartResult(const QString& role, const QString& resultJson)
@@ -1003,7 +1026,7 @@ void SwapUiPlugin::refundLez(const QString& hashlockHex)
         setResultStatus(result,
                         QStringLiteral("LEZ refund finished"),
                         QStringLiteral("LEZ refund failed"));
-        fetchBalances();
+        fetchBalancesFromLoadedEnv();
     });
 }
 
@@ -1032,44 +1055,76 @@ void SwapUiPlugin::refundEth(const QString& swapIdHex)
         setResultStatus(result,
                         QStringLiteral("ETH refund finished"),
                         QStringLiteral("ETH refund failed"));
-        fetchBalances();
+        fetchBalancesFromLoadedEnv();
     });
 }
 
-void SwapUiPlugin::ensureMessagingReady(std::function<void()> continuation)
+void SwapUiPlugin::startBackgroundServices()
+{
+    if (!m_swap) {
+        return;
+    }
+    m_autoMessagingEnabled = true;
+    ensureMessagingReady({}, true);
+}
+
+void SwapUiPlugin::ensureMessagingReady(std::function<void()> continuation, bool automatic)
 {
     if (!m_swap) {
         setStatus(QStringLiteral("Swap client not ready"));
         return;
     }
     if (messagingConnected()) {
+        setMessagingRetrying(false);
         if (continuation) {
             continuation();
         }
         return;
     }
     if (m_messagingInitInFlight) {
+        if (continuation) {
+            m_pendingMessagingContinuations.push_back(std::move(continuation));
+        }
         setStatus(QStringLiteral("Messaging is connecting..."));
         return;
     }
 
+    if (continuation) {
+        m_pendingMessagingContinuations.push_back(std::move(continuation));
+    }
+
     m_messagingInitInFlight = true;
     setMessagingLoading(true);
-    setStatus(QStringLiteral("Connecting to messaging..."));
-    m_swap->messagingInitAsync(messagingConfigJson(), [this, continuation](QString result) {
+    setMessagingRetrying(automatic || m_autoMessagingEnabled);
+    setStatus(automatic
+        ? QStringLiteral("Starting Delivery messaging...")
+        : QStringLiteral("Connecting to messaging..."));
+    m_swap->messagingInitAsync(messagingConfigJson(), [this](QString result) {
         m_messagingInitInFlight = false;
         setMessagingLoading(false);
         const auto error = jsonError(result);
         if (!error.isEmpty()) {
             setErrorMessage(error);
-            setStatus(QStringLiteral("Messaging connect failed: %1").arg(error));
+            if (m_autoMessagingEnabled) {
+                setMessagingRetrying(true);
+                setStatus(QStringLiteral("Delivery unavailable; retrying automatically: %1").arg(error));
+            } else {
+                setMessagingRetrying(false);
+                setStatus(QStringLiteral("Messaging connect failed: %1").arg(error));
+            }
+            m_pendingMessagingContinuations.clear();
             return;
         }
         setErrorMessage(QString{});
+        setMessagingRetrying(false);
         setStatus(QStringLiteral("Messaging connected"));
         pollMessagingStatus();
-        if (continuation) {
-            continuation();
+        auto continuations = std::move(m_pendingMessagingContinuations);
+        m_pendingMessagingContinuations.clear();
+        for (auto& pending : continuations) {
+            if (pending) {
+                pending();
+            }
         }
     });
 }
@@ -1086,12 +1141,21 @@ void SwapUiPlugin::pollMessagingStatus()
     }
     m_swap->messagingStatusAsync([this](QString result) {
         if (isErrorResult(result)) {
+            if (m_autoMessagingEnabled && !m_messagingInitInFlight) {
+                ensureMessagingReady({}, true);
+            }
             return;
         }
         const auto obj = parseObject(result);
-        setMessagingConnected(obj.value(QStringLiteral("connected")).toBool(false));
+        const bool connected = obj.value(QStringLiteral("connected")).toBool(false);
+        setMessagingConnected(connected);
         setMessagingPeerCount(obj.value(QStringLiteral("peer_count")).toInt(0));
         setMessagingConnectionStatus(obj.value(QStringLiteral("connection_status")).toString());
+        if (connected) {
+            setMessagingRetrying(false);
+        } else if (m_autoMessagingEnabled && !m_messagingInitInFlight) {
+            ensureMessagingReady({}, true);
+        }
     });
 }
 

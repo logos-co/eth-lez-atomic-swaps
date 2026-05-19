@@ -7,6 +7,8 @@
 #include <QTimer>
 #include <QVariantList>
 #include <functional>
+#include <utility>
+#include <vector>
 
 #include "swap_ui_interface.h"
 #include "LogosViewPluginBase.h"
@@ -72,13 +74,15 @@ private:
     void setResultStatus(const QString& resultJson,
                          const QString& successStatus,
                          const QString& failureStatus);
+    void fetchBalancesFromLoadedEnv();
     void applyBalancesResult(const QString& resultJson);
     void handleMakerFinished(const QString& resultJson);
     void handleTakerFinished(const QString& resultJson);
     void handleAutoAcceptFinished(const QString& resultJson);
     void handleJobStartResult(const QString& role, const QString& resultJson);
+    void startBackgroundServices();
     void pollMessagingStatus();
-    void ensureMessagingReady(std::function<void()> continuation = {});
+    void ensureMessagingReady(std::function<void()> continuation = {}, bool automatic = false);
     bool subscribeToSwapEvents();
     void onSwapEventArgs(const QString& eventName, const QVariantList& args);
     void onSwapEvent(const QString& eventName, const QString& payloadJson);
@@ -114,7 +118,10 @@ private:
     QTimer m_messagingPollTimer;
     QTimer m_coordinationPollTimer;
     bool m_messagingInitInFlight = false;
+    bool m_autoMessagingEnabled = false;
+    std::vector<std::function<void()>> m_pendingMessagingContinuations;
     int m_deliveryPortsShift = 0;
+    QString m_loadedEnvPath;
     QString m_coordinationRole;
     bool m_coordinationTakerPublished = false;
     bool m_swapEventsSubscribed = false;
