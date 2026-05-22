@@ -1,12 +1,15 @@
 [scaffold]
-version = "0.1.1"
+version = "0.2.0"
 cache_root = ".scaffold/lez-cache"
 
 [repos.lez]
-url = "https://github.com/logos-blockchain/logos-execution-zone.git"
-source = "https://github.com/logos-blockchain/logos-execution-zone.git"
+source = "git@github.com:logos-blockchain/logos-execution-zone.git"
 path = ".scaffold/lez-cache/repos/lez/9fa541f3d1cfa2d4415b7c3cf4cd8954a83b78c7"
 pin = "9fa541f3d1cfa2d4415b7c3cf4cd8954a83b78c7"
+
+[repos.spel]
+source = "https://github.com/logos-co/spel.git"
+pin = "3d639076ec0946a6a6db799dd5a4648007f362ee"
 
 [wallet]
 home_dir = ".scaffold/wallet"
@@ -22,3 +25,23 @@ path = "idl"
 [localnet]
 port = 3040
 risc0_dev_mode = true
+
+# Declarative module manifest (scaffold 0.2.0 [modules.*] schema). The project's
+# manual two-Basecamp flow (scripts/basecamp-instance.sh + make basecamp-* targets)
+# does NOT currently consume these — it uses logos-co/logos-basecamp#bin-macos-app
+# and a custom extract_lgx_variant helper that bypasses lgpm, because of the
+# LGPM_PORTABLE_BUILD variant mismatch documented in delivery-dogfooding.md and
+# docs/scaffold-upstream-tracker.md (entries TR-03 / TR-04). These entries are
+# declarative so `lgs basecamp doctor` can detect drift and so a future
+# migration to `lgs basecamp install` / `launch` has the manifest pre-seeded.
+[modules.swap]
+flake = "path:./swap-module#lgx"
+role = "project"
+
+[modules.swap_ui]
+flake = "path:./swap-ui#lgx"
+role = "project"
+
+[modules.delivery_module]
+flake = "github:logos-co/logos-delivery-module/v0.1.1#lgx"
+role = "dependency"
