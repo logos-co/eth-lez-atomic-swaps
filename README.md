@@ -339,6 +339,11 @@ The headless CLI flow (`swap-cli`, `make demo`, `make infra`) is independent of 
 +--------------------------------------------------------+
 ```
 
+## Documentation
+
+- [FURPS+](FURPS.md) — Functional and non-functional requirements (v0.1, v0.2)
+- [ADR](ADR.md) — Architecture Decision Records (v0.1, v0.2)
+
 ## Design Notes
 
 - SHA-256 is used for the hashlock so both chains share the same primitive.

@@ -1,4 +1,6 @@
-# FURPS+ (v0.2)
+# Atomic Swaps — FURPS+
+
+## FURPS+ (v0.2)
 
 Phase 2: Taker-Locks-First, Balance Visibility, Maker Automation, Scaffold Integration, Chat-Based Negotiation
 
@@ -42,27 +44,76 @@ Phase 2: Taker-Locks-First, Balance Visibility, Maker Automation, Scaffold Integ
 2. Cross-chain linkability via shared hashlock (unchanged — v0.1)
 3. Amounts visible on ETH side (unchanged — v0.1)
 
-## ADR (v0.2)
+### Dependencies (v0.2)
 
-### Decisions
-
-1. **Locking order**: Taker locks first (ETH, longer timelock), maker locks second (LEZ, shorter timelock). If maker locked first, a malicious taker could repeatedly initiate swaps without completing them, timelocking all of the maker's funds until expiry
-2. **Preimage ownership**: Taker generates and holds the preimage; maker only receives the hashlock
-3. **Account ID format**: Base58 for display and storage, matching wallet CLI convention
-4. **Scaffold integration**: Use logos-scaffold as the one-stop shop for Logos app development
-
-## Dependencies (v0.2)
-
-### LEZ
+#### LEZ
 
 - Validity Windows not available — continue with off-chain timelock enforcement
 
-### Logos Scaffold
+#### Logos Scaffold
 
 - Wallet state management and sequencer management via scaffold
 
-### Chat Module
+#### Chat Module
 
 - Integrate Delivery Logos Module (messaging) instead of using the REST API
 - Offer broadcast and discovery via Delivery Logos Module (messaging)
 - Chat module enables bootstrapping a conversation based on information maker broadcasts
+
+---
+
+## FURPS+ (v0.1)
+
+[v0.1 milestone](https://github.com/logos-co/ecosystem/milestone/7)
+
+Phase 1: HTLC PoC — Maker sells λ (LEZ) for ETH (Ethereum)
+
+- **Maker**: the party that creates and publishes the swap offer
+- **Taker**: the party that accepts and initiates the swap
+
+### Functionality
+
+1. Maker sells λ for ETH (Ethereum)
+2. Original owners can reclaim funds after timeout if swap did not complete
+3. Native tokens only (ETH on Ethereum, λ on LEZ)
+
+### Usability
+
+1. Daemon monitors both chains for swap events and preimage hash reveals
+2. Clear error messages on failure, timeout, or invalid state transitions
+3. Default timeouts for demo purposes (5-10 min)
+4. User may need to run specific CLI commands to progress swap; Or a daemon will be available (TBC)
+
+### Reliability
+
+1. Refund path for incomplete swaps is available for both parties
+
+### Performance
+
+### Supportability
+
+1. New CLI
+
+### + (Privacy, Anonymity, Censorship-Resistance)
+
+1. On-chain traces of atomic swaps on Ethereum chain
+2. Cross-chain linkability via shared hash lock: the two sides of a swap are correlatable on-chain regardless of account privacy on LEZ. Private LEZ accounts hide participant identity but not the swap linkage itself
+3. Amounts visible on ETH side
+
+### Dependencies (v0.1)
+
+#### LEE / LEZ Wallet Module
+
+- Validity Windows (LEE block context) LEZ programs need a way to enforce timeouts. Validity windows (`valid_from` / `valid_until`) let the swap contract distinguish "before deadline" from "after deadline" without leaking timing metadata
+- Watching events/equivalent
+
+#### Ethereum Wallet Module
+
+- Deploying smart contract
+- Getting events
+
+#### Chat Module
+
+For v0.2:
+
+- We will aim to have some negotiation - ideally chat module enable bootstrapping a conversation based on information maker broadcasts.
