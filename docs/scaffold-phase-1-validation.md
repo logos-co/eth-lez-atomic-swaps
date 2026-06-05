@@ -6,7 +6,7 @@ Validation notes for issue #27 Phase 1: safe scaffold-first adoption without rem
 
 - OS: `Darwin Danishs-MacBook-Pro.local 25.4.0 Darwin Kernel Version 25.4.0: Thu Mar 19 19:30:44 PDT 2026; root:xnu-12377.101.15~1/RELEASE_ARM64_T6000 arm64`
 - Branch: `phase-1-scaffold-first`
-- Atomic-swaps validation commit: `099f4c4fdcbda4eceafbad00f3683b846185a332`
+- Atomic-swaps validation commit: `23bc69b`
 - `lgs --version`: `logos-scaffold 0.1.1`
 - Local scaffold source SHA: `2fd29f54fc8621430ce06428d2636fcf0ac353fc`
 - Note: the CLI exposes the 0.2-era `lgs run`, `lgs basecamp`, and `lgs report` surfaces despite the version string reporting `0.1.1`.
