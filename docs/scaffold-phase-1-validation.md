@@ -7,6 +7,7 @@ Validation notes for issue #27 Phase 1: safe scaffold-first adoption without rem
 - OS: `Darwin Danishs-MacBook-Pro.local 25.4.0 Darwin Kernel Version 25.4.0: Thu Mar 19 19:30:44 PDT 2026; root:xnu-12377.101.15~1/RELEASE_ARM64_T6000 arm64`
 - Branch: `phase-1-scaffold-first-clean`
 - Atomic-swaps validation commit: `23bc69b`
+- Tracker refresh verified at commit: `ce89f95`
 - `lgs --version`: `logos-scaffold 0.1.1`
 - Local scaffold source SHA: `2fd29f54fc8621430ce06428d2636fcf0ac353fc`
 - Note: the CLI exposes the 0.2-era `lgs run`, `lgs basecamp`, and `lgs report` surfaces despite the version string reporting `0.1.1`.
@@ -32,9 +33,12 @@ Validation notes for issue #27 Phase 1: safe scaffold-first adoption without rem
 | `lgs localnet status --json` after profile runs | Stopped: `tracked_pid = null`, `listener_present = false`, `ready = false`. |
 | `pgrep -fl 'anvil|sequencer_service|logos|basecamp'` after profile runs | No matching process output; no orphaned localnet, Anvil, Logos, or Basecamp process observed. |
 
+The same command set was rerun after refreshing the scaffold tracker docs against current upstream issue states. Results stayed equivalent: Rust check passed; Makefile dry-runs preserved primary and fallback paths; `lgs doctor --json` stayed at `15` pass / `7` warn / `0` fail; `lgs basecamp doctor --json` stayed at `3` pass / `1` warn / `0` fail; both `lgs run` profiles completed; `lgs basecamp build-portable`, `lgs report`, and `lgs localnet reset --dry-run` completed; final localnet status was stopped with no matching Anvil/Logos/Basecamp process output.
+
 ## Notes
 
 - The first profile smoke attempt hit a generated SPel cache origin mismatch: the cache displayed an SSH origin while `scaffold.toml` expects `https://github.com/logos-co/spel.git`. The raw local cache remote was normalized to HTTPS before rerunning profile validation.
 - `lgs run` still does not own Anvil lifecycle. The demo profile uses `demo --no-localnet` so scaffold owns the LEZ run pipeline and the app owns Anvil plus Ethereum HTLC deployment.
 - `make infra`, manual Basecamp startup, portable LGX build/install flow, Anvil startup, and Ethereum deployment remain in the Makefile/app path.
+- The profile commands were rerun in the clean local branch checkout. A brand-new clone/worktree run was not repeated in this verification pass.
 - PR 315 / issue 316 docs packet follow-up: if that packet describes the local quickstart, it should make the scaffold-first wrapper path primary (`make demo`, `make test`, or direct `lgs run --profile ...` after prerequisites) while keeping the Makefile fallback and explicitly saying scaffold does not own Anvil yet.
