@@ -132,6 +132,7 @@ conventions look like (check open issues first).
 │  ✓ Tracker + plan docs landed on master                       │
 │  ✓ TR-01 filed (#170, also subsumes TR-02)                    │
 │  ✓ PR #169 in flight (narrow SPel public-pin fix)             │
+│  ✓ [run.profiles.{test,demo}] partial adopted for Phase 1      │
 ╰───────────────────────────────────────────────────────────────╯
                               │
                               ▼
@@ -149,8 +150,7 @@ conventions look like (check open issues first).
 │  NEXT 2-4 WEEKS                                               │
 │  ──────────────                                               │
 │  5. File P1 umbrellas U-A, U-B, U-C, U-D        (4 handoffs)  │
-│  6. Add [run.profiles.{test,demo}] partial      (1 handoff)   │
-│  7. File P2 backlog as time permits             (1-4 handoffs)│
+│  6. File P2 backlog as time permits             (1-4 handoffs)│
 ╰───────────────────────────────────────────────────────────────╯
                               │
                               ▼
