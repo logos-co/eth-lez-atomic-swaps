@@ -174,7 +174,7 @@ Any of these going dark in a public-reachability sense silently breaks a fresh `
 
 ### Align `bin-macos-app` and `lgpm` on the same `LGPM_PORTABLE_BUILD` mode — P0
 
-**Status.** ✅ Filed cross-repo on 2026-05-22: primary [`logos-co/logos-package-manager#14`](https://github.com/logos-co/logos-package-manager/issues/14) (the variant-suffix logic + Options A/B/C + sub-ask for loud-error-on-manifest-mismatch), companion [`logos-co/logos-basecamp#197`](https://github.com/logos-co/logos-basecamp/issues/197) (basecamp-side escape hatch). Cross-links established both ways.
+**Status.** ✅ Tracked cross-repo since 2026-05-22: primary [`logos-co/logos-package-manager#14`](https://github.com/logos-co/logos-package-manager/issues/14) remains open (the variant-suffix logic + Options A/B/C + sub-ask for loud-error-on-manifest-mismatch), companion [`logos-co/logos-basecamp#197`](https://github.com/logos-co/logos-basecamp/issues/197) is closed (basecamp-side escape hatch). Cross-links established both ways.
 
 **TL;DR.** `bin-macos-app` (the released AppImage-style Basecamp) accepts only `#lgx-portable`. The host-installed `lgpm` CLI accepts only `#lgx`. So `lgs basecamp install` is unusable on the distributed stack — we have to bypass `lgpm` with a hand-rolled shell extractor.
 
@@ -366,7 +366,7 @@ Together with TR-03 (lgpm variant alignment), TR-08 is what would let `lgs basec
 
 ### `lgs run --watch` debounce + glob filters — P2
 
-**Status.** ✅ Filed 2026-05-22 as [logos-co/scaffold#175](https://github.com/logos-co/scaffold/issues/175) (standalone P2).
+**Status.** ✅ Closed in [logos-co/scaffold#175](https://github.com/logos-co/scaffold/issues/175) (standalone P2; filed 2026-05-22).
 
 **TL;DR.** Today `--watch` re-runs the full pipeline on any filesystem change with a 500ms debounce. A `[run.watch]` glob filter would let users scope re-deploys to just inputs that change a guest binary hash.
 
@@ -408,7 +408,7 @@ Composes with TR-14 (granular per-module build). Together they let `swap-lgx-bui
 
 ### Document `[modules.*]` is hand-editable without `lgs basecamp modules` — P2
 
-**Status.** ✅ Filed 2026-05-22 as doc PR [logos-co/scaffold#177](https://github.com/logos-co/scaffold/pull/177).
+**Status.** ✅ Merged as doc PR [logos-co/scaffold#177](https://github.com/logos-co/scaffold/pull/177) (filed 2026-05-22).
 
 **TL;DR.** The skill docs say "manual edits are preserved across re-runs" but don't explicitly state you can hand-author `[modules.*]` entries with no `lgs basecamp` invocation at all. This project did exactly that for drift detection; worth blessing as a supported pattern.
 
@@ -450,7 +450,7 @@ Bundle with TR-04 / TR-05 / TR-08 / TR-16 — all are touching `lgs basecamp lau
 
 ### Document `--user-dir` vs scaffold's XDG isolation — P2
 
-**Status.** ✅ Filed 2026-05-22 as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178).
+**Status.** ✅ Merged as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178) (filed 2026-05-22).
 
 **TL;DR.** Pure docs ask. `bin-macos-app` grew a first-class `--user-dir` flag that removed the old `LOGOS_DATA_DIR + Dev` suffix dance. Scaffold uses XDG-based isolation instead. Worth a short note explaining the relationship.
 
@@ -615,7 +615,7 @@ Pre-localnet vs pre-deploy distinction matters: `forge build` needs to happen be
 
 ### `lgs basecamp develop <module>` for verb-set symmetry — P2
 
-**Status.** ✅ Filed 2026-05-22 as [logos-co/scaffold#176](https://github.com/logos-co/scaffold/issues/176) (standalone P2). LMB-01 cross-link to be added once that upstream ask is filed.
+**Status.** ✅ Closed in [logos-co/scaffold#176](https://github.com/logos-co/scaffold/issues/176) (standalone P2; filed 2026-05-22).
 
 **TL;DR.** Scaffold has (or will have) `lgs basecamp build`, `run`, `install`, `launch` — missing `develop`. Should be a thin wrapper around `nix develop` of the module's flake. Composes with LMB-01 upstream (logos-module-builder providing a default dev shell for universal modules wrapping Rust cdylibs).
 
@@ -659,12 +659,12 @@ Compose order:
 - **2026-05-20** — Restructured for readability: added mental model + glossary + per-entry TL;DR/Why/Fix/Details template + TOC. Reframed TR-08 as cross-platform (not macOS-special). Retired TR-18 — Nix dev shell is the right layer for the swap-vendor-ffi problem, not scaffold. Added TR-19 (`stop_on_exit` + `pre_localnet` hook stages) to unblock Bucket 3 deletion (`make test`, `make demo`).
 - **2026-05-20** — Added TR-20 (`lgs basecamp develop <module>` for verb-set symmetry), composes with the upstream LMB-01 ask against `logos-module-builder`.
 - **2026-05-22** — TR-01 filed as [logos-co/scaffold#170](https://github.com/logos-co/scaffold/issues/170); its acceptance criteria also subsume TR-02. Companion PR [logos-co/scaffold#169](https://github.com/logos-co/scaffold/pull/169) (narrow SPel public-pin fix, commit-only pin per fryorcraken's review) is near landing. TR-03 is now the only unfiled P0.
-- **2026-05-22** — TR-03 filed cross-repo: primary [logos-co/logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14) (Options A/B/C + manifest-mismatch loud-error sub-ask), companion [logos-co/logos-basecamp#197](https://github.com/logos-co/logos-basecamp/issues/197) (basecamp-side escape hatch). All P0 entries now filed.
+- **2026-05-22** — TR-03 filed cross-repo: primary [logos-co/logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14) (Options A/B/C + manifest-mismatch loud-error sub-ask), companion [logos-co/logos-basecamp#197](https://github.com/logos-co/logos-basecamp/issues/197) (basecamp-side escape hatch; now closed). All P0 entries now filed.
 - **2026-05-22** — U-A umbrella filed as [logos-co/scaffold#171](https://github.com/logos-co/scaffold/issues/171) (`[basecamp.profiles.<name>]` schema) bundling TR-04 (ask 2), TR-05 (ask 1), TR-08 (ask 4), TR-12 (ask 5), TR-16 (ask 6), TR-17 (ask 3). Overlap with [#163](https://github.com/logos-co/scaffold/issues/163) flagged for reviewer call.
 - **2026-05-22** — U-B umbrella filed as [logos-co/scaffold#172](https://github.com/logos-co/scaffold/issues/172) (`lgs run` pipeline extensions) bundling TR-06 (ask 2, coprocess hooks) and TR-19 (asks 1 + 3, `pre_localnet` + `stop_on_exit`). Two coprocess design shapes surfaced for maintainer pick.
 - **2026-05-22** — U-C (standalone) filed as [logos-co/scaffold#173](https://github.com/logos-co/scaffold/issues/173) (`[circuits]` schema + auto-fetch). Just TR-07; no umbrella needed.
 - **2026-05-22** — U-D umbrella filed as [logos-co/scaffold#174](https://github.com/logos-co/scaffold/issues/174) (`lgs basecamp` verb granularity) bundling TR-14 (ask 1, `lgs basecamp build`), TR-10 (ask 2, `--variant` filter), TR-15 (ask 3, `lgs basecamp run <module>`). All four P1 umbrellas now filed.
-- **2026-05-22** — TR-09 filed standalone as [logos-co/scaffold#175](https://github.com/logos-co/scaffold/issues/175) (`lgs run --watch` globs + debounce CLI flag).
-- **2026-05-22** — TR-20 filed standalone as [logos-co/scaffold#176](https://github.com/logos-co/scaffold/issues/176) (`lgs basecamp develop <module>`). LMB-01 cross-link pending separate upstream filing.
-- **2026-05-22** — TR-11 filed as doc PR [logos-co/scaffold#177](https://github.com/logos-co/scaffold/pull/177) blessing hand-authored `[modules.*]` tables for drift-detection / declarative-only adoption.
-- **2026-05-22** — TR-13 filed as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178) noting that `bin-macos-app --user-dir` is orthogonal to scaffold's per-profile XDG isolation. **All 19 tracker entries now either filed (18) or retired (TR-18).** 7 GitHub issues + 2 doc PRs filed across logos-co/scaffold + logos-co/logos-package-manager + logos-co/logos-basecamp.
+- **2026-05-22** — TR-09 filed standalone as [logos-co/scaffold#175](https://github.com/logos-co/scaffold/issues/175) (`lgs run --watch` globs + debounce CLI flag; now closed).
+- **2026-05-22** — TR-20 filed standalone as [logos-co/scaffold#176](https://github.com/logos-co/scaffold/issues/176) (`lgs basecamp develop <module>`; now closed).
+- **2026-05-22** — TR-11 filed as doc PR [logos-co/scaffold#177](https://github.com/logos-co/scaffold/pull/177) blessing hand-authored `[modules.*]` tables for drift-detection / declarative-only adoption; now merged.
+- **2026-05-22** — TR-13 filed as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178) noting that `bin-macos-app --user-dir` is orthogonal to scaffold's per-profile XDG isolation; now merged. **All 19 tracker entries are now tracked upstream, closed/merged, or retired (TR-18).** 7 GitHub issues + 2 doc PRs filed across logos-co/scaffold + logos-co/logos-package-manager + logos-co/logos-basecamp.

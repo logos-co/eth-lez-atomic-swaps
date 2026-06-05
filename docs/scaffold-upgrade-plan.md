@@ -9,7 +9,7 @@ For mental model + per-entry rationale, see
 
 ## Current state
 
-**All 19 tracker entries are now either filed (18) or retired (TR-18).** Upstream queue is empty; the remaining work is project-internal cleanup as upstream lands.
+**All 19 tracker entries are now either tracked upstream, closed/merged, or retired (TR-18).** Upstream filing queue is empty; the remaining work is project-internal cleanup as upstream lands.
 
 ### Upstream filings (all 2026-05-22 unless noted)
 
@@ -47,7 +47,7 @@ prompt sketch.
 |---|---|---|
 | **TR-01** Cut `v0.2.0` tag | ✅ Filed as [#170](https://github.com/logos-co/scaffold/issues/170) | Scoped broader than original — adds bi-weekly cadence + acceptance criteria covering SPEL/LEZ matching releases, `lez-template` rename decision, and CI guardrails |
 | **TR-02** Sweep default SHAs for public reachability | ✅ Subsumed by [#170](https://github.com/logos-co/scaffold/issues/170) | #170's acceptance criteria explicitly include "CI verifies scaffold's hardcoded default pins are public-reachable" — no separate issue needed |
-| **TR-03** Align `bin-macos-app` and `lgpm` `LGPM_PORTABLE_BUILD` | ✅ Filed cross-repo on 2026-05-22 | Primary [logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14), companion [logos-basecamp#197](https://github.com/logos-co/logos-basecamp/issues/197). Options A/B/C surfaced, manifest-mismatch loud-error sub-ask included. Awaiting maintainer pick on direction. |
+| **TR-03** Align `bin-macos-app` and `lgpm` `LGPM_PORTABLE_BUILD` | ✅ Tracked cross-repo since 2026-05-22 | Primary [logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14) remains open; companion [logos-basecamp#197](https://github.com/logos-co/logos-basecamp/issues/197) is closed. Options A/B/C surfaced, manifest-mismatch loud-error sub-ask included. Awaiting maintainer pick on package-manager direction. |
 
 Companion PR: [logos-co/scaffold#169](https://github.com/logos-co/scaffold/pull/169) — narrow SPel public-pin fix (commit-only pin), near landing.
 
@@ -97,10 +97,10 @@ conventions look like (check open issues first).
 
 | Item | Type | Notes |
 |---|---|---|
-| **TR-09** ✅ [#175](https://github.com/logos-co/scaffold/issues/175) | Issue | `lgs run --watch` debounce + globs — filed 2026-05-22 |
-| **TR-11** ✅ [#177](https://github.com/logos-co/scaffold/pull/177) | Doc PR | Hand-authored `[modules.*]` tables blessed — filed 2026-05-22 |
-| **TR-13** ✅ [#178](https://github.com/logos-co/scaffold/pull/178) | Doc PR | `--user-dir` vs XDG isolation cross-ref — filed 2026-05-22 |
-| **TR-20** ✅ [#176](https://github.com/logos-co/scaffold/issues/176) | Issue | `lgs basecamp develop <module>` — filed 2026-05-22. LMB-01 cross-link pending. |
+| **TR-09** ✅ [#175](https://github.com/logos-co/scaffold/issues/175) | Issue | `lgs run --watch` debounce + globs — closed |
+| **TR-11** ✅ [#177](https://github.com/logos-co/scaffold/pull/177) | Doc PR | Hand-authored `[modules.*]` tables blessed — merged |
+| **TR-13** ✅ [#178](https://github.com/logos-co/scaffold/pull/178) | Doc PR | `--user-dir` vs XDG isolation cross-ref — merged |
+| **TR-20** ✅ [#176](https://github.com/logos-co/scaffold/issues/176) | Issue | `lgs basecamp develop <module>` — closed |
 
 ## Project-internal cleanup queue (separate from upstream)
 
