@@ -186,7 +186,7 @@ enum Commands {
     Status(status::StatusArgs),
     /// Run a full demo: start local chains, deploy contracts, run both sides
     #[cfg(feature = "demo")]
-    Demo,
+    Demo(demo::DemoArgs),
     /// Start infrastructure (Anvil + LEZ sequencer), write .env files, block until Ctrl-C
     #[cfg(feature = "demo")]
     Infra,
@@ -204,8 +204,11 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "demo")]
     {
         let args: Vec<String> = std::env::args().collect();
-        if args.iter().any(|a| a == "demo") {
-            return demo::cmd_demo().await;
+        if let Some(pos) = args.iter().position(|a| a == "demo") {
+            let demo_args = demo::DemoArgs {
+                no_localnet: args.iter().skip(pos + 1).any(|a| a == "--no-localnet"),
+            };
+            return demo::cmd_demo(demo_args).await;
         }
         if args.iter().any(|a| a == "infra") {
             return infra::cmd_infra().await;
@@ -239,7 +242,7 @@ pub async fn run() -> Result<()> {
         Commands::Refund(args) => refund::cmd_refund(args, &config, cli.json).await,
         Commands::Status(args) => status::cmd_status(args, &config, cli.json).await,
         #[cfg(feature = "demo")]
-        Commands::Demo => unreachable!("handled above"),
+        Commands::Demo(_) => unreachable!("handled above"),
         #[cfg(feature = "demo")]
         Commands::Infra => unreachable!("handled above"),
     }

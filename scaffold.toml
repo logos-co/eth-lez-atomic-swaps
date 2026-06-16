@@ -26,6 +26,12 @@ path = "idl"
 port = 3040
 risc0_dev_mode = true
 
+[run.profiles.demo]
+post_deploy = ["cargo run --features demo -- demo --no-localnet"]
+
+[run.profiles.test]
+post_deploy = ["cargo test"]
+
 # Declarative module manifest (scaffold 0.2.0 [modules.*] schema). The project's
 # manual two-Basecamp flow (scripts/basecamp-instance.sh + make basecamp-* targets)
 # does NOT currently consume these — it uses logos-co/logos-basecamp#bin-macos-app

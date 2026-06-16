@@ -1,5 +1,5 @@
-.PHONY: contracts demo infra \
-       setup localnet-start localnet-stop test circuits \
+.PHONY: contracts demo demo-makefile infra \
+       setup localnet-start localnet-stop test test-makefile circuits \
        swap-module-build swap-ui-build swap-lgx-build swap-ui-run \
        basecamp-init-maker basecamp-init-taker \
        basecamp-run-maker basecamp-run-taker \
@@ -76,12 +76,18 @@ localnet-start:
 localnet-stop:
 	logos-scaffold localnet stop
 
-test: circuits contracts localnet-start
+test: circuits contracts
+	lgs run --profile test
+
+test-makefile: circuits contracts localnet-start
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test; logos-scaffold localnet stop
 
 # --- Demo / Infra (headless CLI flow) ---
 
 demo: circuits contracts
+	lgs run --profile demo
+
+demo-makefile: circuits contracts
 	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
 
 infra: circuits contracts localnet-start

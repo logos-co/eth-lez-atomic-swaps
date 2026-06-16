@@ -9,7 +9,7 @@ For mental model + per-entry rationale, see
 
 ## Current state
 
-**All 19 tracker entries are now either filed (18) or retired (TR-18).** Upstream queue is empty; the remaining work is project-internal cleanup as upstream lands.
+**All 19 tracker entries are now either tracked upstream, closed/merged, or retired (TR-18).** Upstream filing queue is empty; the remaining work is project-internal cleanup as upstream lands.
 
 ### Upstream filings (all 2026-05-22 unless noted)
 
@@ -32,7 +32,8 @@ For mental model + per-entry rationale, see
 | Already done | In-flight | Pending decision |
 |---|---|---|
 | `scaffold.toml` upgraded to 0.2.0 schema + `[modules.*]` block added (swap, swap_ui, delivery_module) | [PR #26](https://github.com/logos-co/eth-lez-atomic-swaps/pull/26) — swap-vendor-ffi → Nix dev shell *(landed without approval — review needed)* | All Bucket 1 Makefile deletions |
-| `docs/scaffold-upstream-tracker.md` — 19 entries (incl. TR-20), mental model, glossary, TOC | T-019e45fb — LMB-01 investigation (logos-module-builder upstream) | `[run.profiles.{test,demo}]` partial adoption |
+| `docs/scaffold-upstream-tracker.md` — 19 entries (incl. TR-20), mental model, glossary, TOC | T-019e45fb — LMB-01 investigation (logos-module-builder upstream) | All Bucket 2 / 3 long-term deletions (wait on upstream) |
+| `[run.profiles.{test,demo}]` partial adoption implemented in [PR #29](https://github.com/logos-co/eth-lez-atomic-swaps/pull/29) for Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27); validation recorded in the PR and issue body |  |  |
 | All 9 upstream filings done (see table above) | [logos-co/scaffold#169](https://github.com/logos-co/scaffold/pull/169) — narrow SPel public-pin fix (near landing) | All Bucket 2 / 3 long-term deletions (wait on upstream) |
 
 ## Upstream filing queue (scaffold)
@@ -46,7 +47,7 @@ prompt sketch.
 |---|---|---|
 | **TR-01** Cut `v0.2.0` tag | ✅ Filed as [#170](https://github.com/logos-co/scaffold/issues/170) | Scoped broader than original — adds bi-weekly cadence + acceptance criteria covering SPEL/LEZ matching releases, `lez-template` rename decision, and CI guardrails |
 | **TR-02** Sweep default SHAs for public reachability | ✅ Subsumed by [#170](https://github.com/logos-co/scaffold/issues/170) | #170's acceptance criteria explicitly include "CI verifies scaffold's hardcoded default pins are public-reachable" — no separate issue needed |
-| **TR-03** Align `bin-macos-app` and `lgpm` `LGPM_PORTABLE_BUILD` | ✅ Filed cross-repo on 2026-05-22 | Primary [logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14), companion [logos-basecamp#197](https://github.com/logos-co/logos-basecamp/issues/197). Options A/B/C surfaced, manifest-mismatch loud-error sub-ask included. Awaiting maintainer pick on direction. |
+| **TR-03** Align `bin-macos-app` and `lgpm` `LGPM_PORTABLE_BUILD` | ✅ Tracked cross-repo since 2026-05-22 | Primary [logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14) remains open; companion [logos-basecamp#197](https://github.com/logos-co/logos-basecamp/issues/197) is closed. Options A/B/C surfaced, manifest-mismatch loud-error sub-ask included. Awaiting maintainer pick on package-manager direction. |
 
 Companion PR: [logos-co/scaffold#169](https://github.com/logos-co/scaffold/pull/169) — narrow SPel public-pin fix (commit-only pin), near landing.
 
@@ -96,10 +97,10 @@ conventions look like (check open issues first).
 
 | Item | Type | Notes |
 |---|---|---|
-| **TR-09** ✅ [#175](https://github.com/logos-co/scaffold/issues/175) | Issue | `lgs run --watch` debounce + globs — filed 2026-05-22 |
-| **TR-11** ✅ [#177](https://github.com/logos-co/scaffold/pull/177) | Doc PR | Hand-authored `[modules.*]` tables blessed — filed 2026-05-22 |
-| **TR-13** ✅ [#178](https://github.com/logos-co/scaffold/pull/178) | Doc PR | `--user-dir` vs XDG isolation cross-ref — filed 2026-05-22 |
-| **TR-20** ✅ [#176](https://github.com/logos-co/scaffold/issues/176) | Issue | `lgs basecamp develop <module>` — filed 2026-05-22. LMB-01 cross-link pending. |
+| **TR-09** ✅ [#175](https://github.com/logos-co/scaffold/issues/175) | Issue | `lgs run --watch` debounce + globs — closed |
+| **TR-11** ✅ [#177](https://github.com/logos-co/scaffold/pull/177) | Doc PR | Hand-authored `[modules.*]` tables blessed — merged |
+| **TR-13** ✅ [#178](https://github.com/logos-co/scaffold/pull/178) | Doc PR | `--user-dir` vs XDG isolation cross-ref — merged |
+| **TR-20** ✅ [#176](https://github.com/logos-co/scaffold/issues/176) | Issue | `lgs basecamp develop <module>` — closed |
 
 ## Project-internal cleanup queue (separate from upstream)
 
@@ -108,7 +109,7 @@ conventions look like (check open issues first).
 | Item | Effort | Handoff prompt sketch |
 |---|---|---|
 | **Bucket 1 deletions:** localnet-{start,stop}, swap-module-build, swap-ui-build, swap-ui-run, basecamp-paths-* | ~30 min | "Delete Bucket 1 Makefile targets per Bucket 1 analysis in docs/scaffold-upstream-tracker.md + this plan doc. Update README to point at `lgs localnet`/`nix build`/`nix run` invocations. Verify `make` with no args still lists remaining targets. Don't push without approval." |
-| **Add `[run.profiles.{test,demo}]` partial** | ~20 min | "Add `[run.profiles.test]` and `[run.profiles.demo]` to scaffold.toml with `post_deploy = ['cargo test']` / `post_deploy = ['cargo run --features demo -- demo']`. Test `lgs run --profile test` from clean state (with `make circuits contracts` pre-run as prerequisite). Update Makefile's `test:` and `demo:` targets to chain `make circuits contracts && lgs run --profile X` instead of inlining cargo. Don't push without approval." |
+| **Add `[run.profiles.{test,demo}]` partial** | Done | Completed in Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27). `demo` uses `cargo run --features demo -- demo --no-localnet` so scaffold owns the LEZ run pipeline while Anvil/Ethereum deployment remain app-owned. |
 | **PR #26 review/merge** | ~10 min | Already landed; review the diff. Force-update if needed. |
 
 ### Blocked on upstream (wait for tracker entries to land)
@@ -131,6 +132,7 @@ conventions look like (check open issues first).
 │  ✓ Tracker + plan docs landed on master                       │
 │  ✓ TR-01 filed (#170, also subsumes TR-02)                    │
 │  ✓ PR #169 in flight (narrow SPel public-pin fix)             │
+│  ✓ [run.profiles.{test,demo}] partial adopted for Phase 1      │
 ╰───────────────────────────────────────────────────────────────╯
                               │
                               ▼
@@ -148,8 +150,7 @@ conventions look like (check open issues first).
 │  NEXT 2-4 WEEKS                                               │
 │  ──────────────                                               │
 │  5. File P1 umbrellas U-A, U-B, U-C, U-D        (4 handoffs)  │
-│  6. Add [run.profiles.{test,demo}] partial      (1 handoff)   │
-│  7. File P2 backlog as time permits             (1-4 handoffs)│
+│  6. File P2 backlog as time permits             (1-4 handoffs)│
 ╰───────────────────────────────────────────────────────────────╯
                               │
                               ▼

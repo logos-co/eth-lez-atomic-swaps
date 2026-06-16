@@ -8,7 +8,31 @@ This repo includes:
 - a headless local demo
 - a CLI for maker, taker, status, and refund flows
 
-## Default: Manual Basecamp Run
+## Default: Scaffold-First Local Checks
+
+Run setup once from the repo root:
+
+```bash
+make setup
+```
+
+For the current scaffold-first headless paths, use the Makefile wrappers:
+
+```bash
+make demo
+make test
+```
+
+Those targets keep the project-owned prerequisites (`logos-blockchain-circuits` and Foundry contracts), then call `lgs run --profile demo` or `lgs run --profile test`. In these profiles, scaffold owns the LEZ-side build/localnet/deploy pipeline it supports today. The demo hook still starts Anvil and deploys the Ethereum HTLC inside the app; scaffold does not own Anvil lifecycle yet.
+
+If you need to bypass the scaffold run profiles, the v0.1 Makefile fallback remains available:
+
+```bash
+make demo-makefile
+make test-makefile
+```
+
+## Manual Basecamp Run
 
 For local manual testing, use two isolated Basecamp instances: one maker and one taker.
 
@@ -44,6 +68,8 @@ What each phase does:
 
 Re-run `make swap-lgx-build` and both `make basecamp-init-*` targets after changing the module, UI, or Delivery package inputs so each Basecamp instance gets the updated LGX packages.
 
+The manual Basecamp flow remains Makefile-owned because the project is still dogfooding the distributed/portable Basecamp stack. The `[modules.*]` block in [`scaffold.toml`](scaffold.toml) is used for scaffold diagnostics and portable builds, but `make infra`, Anvil startup, Ethereum deployment, and the two Basecamp launch flow are still app-owned.
+
 Use `Ctrl-C` in the `make infra` terminal to stop the local stack. Remove local Basecamp instance state with:
 
 ```bash
@@ -66,7 +92,7 @@ Required for the default Basecamp UI flow:
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `anvil`)
 - GNU `make`
 - a C/C++ toolchain
-- [`logos-scaffold`](https://github.com/logos-co/logos-scaffold) on your `PATH`
+- [`logos-scaffold`](https://github.com/logos-co/logos-scaffold) on your `PATH` from master commit `d50caf4f86f2a913f9dc9985fb2a80f06a3e30d8`
 - the RISC Zero toolchain installed with `rzup install rust`
 - [Nix](https://nixos.org/) with flakes enabled
 
@@ -99,12 +125,13 @@ sh <(curl -L https://nixos.org/nix/install --daemon)
 mkdir -p ~/.config/nix && echo "experimental-features = nix-command flakes" >> ~/.config/nix/nix.conf
 ```
 
-Install `logos-scaffold` from a local clone:
+Install `logos-scaffold` and `lgs` from the supported upstream master commit:
 
 ```bash
 git clone https://github.com/logos-co/logos-scaffold.git
 cd logos-scaffold
-cargo install --path .
+git checkout d50caf4f86f2a913f9dc9985fb2a80f06a3e30d8
+cargo install --path . --locked --bins
 ```
 
 The workspace [`.cargo/config.toml`](.cargo/config.toml) contains the macOS `aarch64` linker flags used by the Rust/LEZ build.
@@ -195,7 +222,7 @@ For a quick automated end-to-end swap without the UI:
 make demo
 ```
 
-`make demo` starts local infrastructure as needed, deploys the Ethereum HTLC to Anvil, runs both maker and taker, and completes a full swap headlessly.
+`make demo` runs `lgs run --profile demo`, then the profile hook starts app-owned Anvil/Ethereum deployment and completes a full swap headlessly. To run the previous Makefile-first command directly, use `make demo-makefile`.
 
 For manual CLI use, start the infrastructure and leave it running:
 
@@ -230,6 +257,8 @@ Full test flow:
 ```bash
 make test
 ```
+
+`make test` runs `lgs run --profile test`, which deploys the LEZ program before running the existing cargo tests. To run the previous Makefile-first command directly, use `make test-makefile`.
 
 Single integration test flow:
 

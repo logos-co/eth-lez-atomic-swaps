@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use clap::Args;
 use sha2::{Digest, Sha256};
 
 use crate::demo::DemoEnv;
@@ -11,19 +12,30 @@ use crate::swap::maker::run_maker;
 use crate::swap::taker::run_taker;
 use crate::swap::types::SwapOutcome;
 
-pub async fn cmd_demo() -> Result<()> {
+#[derive(Args, Clone, Debug, Default)]
+pub struct DemoArgs {
+    /// Reuse an already-running scaffold localnet instead of starting/stopping it.
+    #[arg(long)]
+    pub no_localnet: bool,
+}
+
+pub async fn cmd_demo(args: DemoArgs) -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     println!();
     println!("=== Atomic Swap Demo (LEZ + Ethereum) ===");
     println!();
 
-    eprint!("  Starting scaffold localnet...");
-    scaffold::localnet_start().await?;
-    eprintln!(" \x1b[32m\u{2713}\x1b[0m");
+    if !args.no_localnet {
+        eprint!("  Starting scaffold localnet...");
+        scaffold::localnet_start().await?;
+        eprintln!(" \x1b[32m\u{2713}\x1b[0m");
+    }
 
     let result = run_demo().await;
-    scaffold::localnet_stop().await;
+    if !args.no_localnet {
+        scaffold::localnet_stop().await;
+    }
     result
 }
 
