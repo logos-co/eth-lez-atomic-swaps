@@ -1,6 +1,6 @@
 .PHONY: contracts demo demo-makefile infra \
        setup localnet-start localnet-stop test test-makefile circuits \
-       swap-vendor-ffi swap-module-build swap-ui-build swap-lgx-build swap-ui-run \
+       swap-module-build swap-ui-build swap-lgx-build swap-ui-run \
        basecamp-init-maker basecamp-init-taker \
        basecamp-run-maker basecamp-run-taker \
        basecamp-clean basecamp-paths-maker basecamp-paths-taker
@@ -100,20 +100,13 @@ infra: circuits contracts localnet-start
 #
 # Both flakes are standalone. Each builds inside its own subdirectory.
 
-# Build the swap-ffi cdylib into swap-module/lib/ for ad hoc non-Nix testing.
+# Ad hoc non-Nix dev iteration (IDEs, clangd, standalone CMake) is handled by
+# the `swap-module` dev shell: `cd swap-module && nix develop` pre-builds
+# swap-ffi via the flake and stages libswap_ffi.{dylib,so} into
+# swap-module/lib/ + sets DYLD_LIBRARY_PATH / LD_LIBRARY_PATH /
+# CMAKE_LIBRARY_PATH / CMAKE_EXPORT_COMPILE_COMMANDS for clangd.
 # Nix builds compile swap-ffi from tracked Rust source via swap-module/flake.nix,
 # so platform libraries in swap-module/lib/ stay ignored and untracked.
-swap-vendor-ffi: circuits
-	cargo build --release -p swap-ffi
-ifeq ($(UNAME),Darwin)
-	@cp target/release/libswap_ffi.dylib swap-module/lib/libswap_ffi.dylib
-	@echo "swap-module/lib/libswap_ffi.dylib refreshed"
-	@echo "Reminder: keep platform FFI binaries out of git; Nix builds compile swap-ffi from source."
-else
-	@cp target/release/libswap_ffi.so swap-module/lib/libswap_ffi.so
-	@echo "swap-module/lib/libswap_ffi.so refreshed"
-	@echo "Reminder: keep platform FFI binaries out of git; Nix builds compile swap-ffi from source."
-endif
 
 # Build the swap core module via Nix. The flake builds and stages swap-ffi from
 # tracked Rust source; no checked-in libswap_ffi.dylib/.so is required.

@@ -198,6 +198,14 @@ make swap-ui-build
 
 `swap-module/lib/libswap_ffi.{dylib,so}` is a local platform artifact and is ignored by default. Do not force-add it for Nix builds; `swap-module/flake.nix` builds `swap-ffi` from source.
 
+For ad hoc non-Nix iteration on `swap-module/` (standalone CMake, clangd, IDEs):
+
+```bash
+cd swap-module && nix develop
+```
+
+The dev shell pre-builds `swap-ffi` via the flake, symlinks `libswap_ffi.{dylib,so}` into `swap-module/lib/` (so `CMakeLists.txt`'s `find_library(swap_ffi …)` resolves it), and exports `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` / `CMAKE_LIBRARY_PATH` / `CMAKE_INCLUDE_PATH` plus `CMAKE_EXPORT_COMPILE_COMMANDS=ON` so clangd picks up `compile_commands.json` after a `cmake` configure.
+
 For quick standalone UI smoke testing outside Basecamp:
 
 ```bash
@@ -318,7 +326,7 @@ The headless CLI flow (`swap-cli`, `make demo`, `make infra`) is independent of 
 | `make contracts` | Run `forge build` inside `contracts/` |
 | `make localnet-start` | Start the LEZ localnet |
 | `make localnet-stop` | Stop the LEZ localnet |
-| `make swap-vendor-ffi` | Build `swap-ffi` and copy `libswap_ffi.{dylib,so}` into `swap-module/lib/` for ad hoc non-Nix testing |
+| `cd swap-module && nix develop` | Enter the swap-module dev shell: pre-builds `swap-ffi`, stages `libswap_ffi.{dylib,so}` into `swap-module/lib/`, and exports `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` / `CMAKE_LIBRARY_PATH` / `CMAKE_EXPORT_COMPILE_COMMANDS` for ad hoc non-Nix CMake / clangd / IDE work |
 | `make swap-module-build` | Verify the `swap-module/` Nix flake build |
 | `make swap-ui-build` | Verify the `swap-ui/` Nix flake build |
 | `make swap-lgx-build` | Build installable LGX packages for Basecamp manual testing |
@@ -359,6 +367,11 @@ The headless CLI flow (`swap-cli`, `make demo`, `make infra`) is independent of 
 |                          +--------+ +----------+       |
 +--------------------------------------------------------+
 ```
+
+## Documentation
+
+- [FURPS+](FURPS.md) — Functional and non-functional requirements (v0.1, v0.2)
+- [ADR](ADR.md) — Architecture Decision Records (v0.1, v0.2)
 
 ## Design Notes
 

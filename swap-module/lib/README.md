@@ -8,14 +8,19 @@ Local artifacts from the Rust `swap-ffi` crate.
 | `libswap_ffi.dylib` (macOS) | Built from tracked Rust source by `swap-module/flake.nix` and staged here inside the Nix build sandbox. | no |
 | `libswap_ffi.so` (Linux) | same | no |
 
-For ad hoc non-Nix local testing, you can still populate the binaries from the repo root:
+For ad hoc non-Nix local testing (standalone CMake, clangd, IDEs), enter the
+swap-module dev shell from this directory's parent:
 
 ```bash
-make swap-vendor-ffi
+cd swap-module && nix develop
 ```
 
-This runs `cargo build --release -p swap-ffi` and copies the resulting library
-into this directory. The copied library is platform-specific and should stay out
-of git. Nix builds do not use a checked-in dylib/so; `swap-module/flake.nix`
-builds `swap-ffi` from the tracked Rust source and exposes `$out/lib` and
-`$out/include` to `mkLogosModule` as `externalLibInputs.swap_ffi`.
+The dev shell pre-builds `swap-ffi` via the flake and symlinks
+`libswap_ffi.{dylib,so}` into this directory so `CMakeLists.txt`'s
+`find_library(swap_ffi PATHS lib NO_DEFAULT_PATH)` resolves it. It also exports
+`DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` / `CMAKE_LIBRARY_PATH` /
+`CMAKE_INCLUDE_PATH` plus `CMAKE_EXPORT_COMPILE_COMMANDS=ON` for clangd. The
+staged file is platform-specific and stays out of git. Nix module builds do not
+use a checked-in dylib/so; `swap-module/flake.nix` builds `swap-ffi` from the
+tracked Rust source and exposes `$out/lib` and `$out/include` to
+`mkLogosModule` as `externalLibInputs.swap_ffi`.

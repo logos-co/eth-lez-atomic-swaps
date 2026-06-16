@@ -92,28 +92,28 @@
       swapFfiInput = {
         packages = swapFfiPackages;
       };
-    in
-    logos-module-builder.lib.mkLogosModule {
-      src = ./.;
-      configFile = ./metadata.json;
-      flakeInputs = inputs;
-      externalLibInputs = {
-        swap_ffi = {
-          input = swapFfiInput;
-          packages.default = "default";
+
+      base = logos-module-builder.lib.mkLogosModule {
+        src = ./.;
+        configFile = ./metadata.json;
+        flakeInputs = inputs;
+        externalLibInputs = {
+          swap_ffi = {
+            input = swapFfiInput;
+            packages.default = "default";
+          };
         };
-      };
-      preConfigure = ''
-        logos-cpp-generator --from-header src/swap_impl.h \
-          --backend qt \
-          --impl-class SwapImpl \
-          --impl-header swap_impl.h \
-          --metadata metadata.json \
-          --output-dir ./generated_code
-        substituteInPlace ./generated_code/swap_qt_glue.h \
-          --replace '#include "swap_impl.h"' '#include "swap_impl.h"
+        preConfigure = ''
+          logos-cpp-generator --from-header src/swap_impl.h \
+            --backend qt \
+            --impl-class SwapImpl \
+            --impl-header swap_impl.h \
+            --metadata metadata.json \
+            --output-dir ./generated_code
+          substituteInPlace ./generated_code/swap_qt_glue.h \
+            --replace '#include "swap_impl.h"' '#include "swap_impl.h"
 #include "swap_delivery_adapter.h"' \
-          --replace 'private:
+            --replace 'private:
     SwapImpl m_impl;' 'protected:
     void onInit(LogosAPI* api) override {
         swapDeliverySetRuntimeLogosAPI(static_cast<void*>(api));
@@ -121,8 +121,50 @@
 
 private:
     SwapImpl m_impl;'
-        grep -q 'swap_delivery_adapter.h' ./generated_code/swap_qt_glue.h
-        grep -q 'swapDeliverySetRuntimeLogosAPI' ./generated_code/swap_qt_glue.h
-      '';
-    };
+          grep -q 'swap_delivery_adapter.h' ./generated_code/swap_qt_glue.h
+          grep -q 'swapDeliverySetRuntimeLogosAPI' ./generated_code/swap_qt_glue.h
+        '';
+      };
+
+      # Override the default dev shell so non-Nix dev iteration (ad-hoc CMake,
+      # clangd, IDEs) can resolve the swap-ffi cdylib without a separate
+      # `cargo build` + manual copy step. This replaces the retired
+      # `make swap-vendor-ffi` Makefile target.
+      devShellsWithSwapFfi = lib.genAttrs systems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          swapFfi = swapFfiPackages.${system}.default;
+          dylibName = if pkgs.stdenv.hostPlatform.isDarwin
+            then "libswap_ffi.dylib"
+            else "libswap_ffi.so";
+          libPathVar = if pkgs.stdenv.hostPlatform.isDarwin
+            then "DYLD_LIBRARY_PATH"
+            else "LD_LIBRARY_PATH";
+          baseShell = base.devShells.${system}.default;
+        in
+        (base.devShells.${system} or {}) // {
+          default = baseShell.overrideAttrs (old: {
+            buildInputs = (old.buildInputs or []) ++ [ swapFfi ];
+            shellHook = (old.shellHook or "") + ''
+              # Stage the pre-built swap-ffi cdylib so the CMakeLists.txt
+              # find_library(swap_ffi PATHS lib NO_DEFAULT_PATH) call resolves
+              # it the same way it did under `make swap-vendor-ffi`. Only runs
+              # when the shell is entered from the swap-module dir.
+              if [ -f "$PWD/src/swap_impl.h" ] && [ -f "$PWD/metadata.json" ]; then
+                mkdir -p "$PWD/lib"
+                ln -sfn "${swapFfi}/lib/${dylibName}" "$PWD/lib/${dylibName}"
+                export SWAP_FFI_LIB_DIR="$PWD/lib"
+                echo "swap-ffi: staged ${swapFfi}/lib/${dylibName} -> $PWD/lib/${dylibName}"
+              else
+                echo "swap-ffi: skipped staging (run \`nix develop\` from the swap-module/ dir to auto-stage lib/${dylibName})"
+              fi
+              export ${libPathVar}="${swapFfi}/lib''${${libPathVar}:+:''$${libPathVar}}"
+              export CMAKE_LIBRARY_PATH="${swapFfi}/lib''${CMAKE_LIBRARY_PATH:+:''$CMAKE_LIBRARY_PATH}"
+              export CMAKE_INCLUDE_PATH="${swapFfi}/include''${CMAKE_INCLUDE_PATH:+:''$CMAKE_INCLUDE_PATH}"
+              export CMAKE_EXPORT_COMPILE_COMMANDS=ON
+            '';
+          });
+        });
+    in
+    base // { devShells = devShellsWithSwapFfi; };
 }
