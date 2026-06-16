@@ -33,7 +33,7 @@ For mental model + per-entry rationale, see
 |---|---|---|
 | `scaffold.toml` upgraded to 0.2.0 schema + `[modules.*]` block added (swap, swap_ui, delivery_module) | [PR #26](https://github.com/logos-co/eth-lez-atomic-swaps/pull/26) — swap-vendor-ffi → Nix dev shell *(landed without approval — review needed)* | All Bucket 1 Makefile deletions |
 | `docs/scaffold-upstream-tracker.md` — 19 entries (incl. TR-20), mental model, glossary, TOC | T-019e45fb — LMB-01 investigation (logos-module-builder upstream) | All Bucket 2 / 3 long-term deletions (wait on upstream) |
-| `[run.profiles.{test,demo}]` partial adoption done in Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27); validation recorded in [`docs/scaffold-phase-1-validation.md`](./scaffold-phase-1-validation.md) |  |  |
+| `[run.profiles.{test,demo}]` partial adoption implemented in [PR #29](https://github.com/logos-co/eth-lez-atomic-swaps/pull/29) for Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27); validation recorded in the PR and issue body |  |  |
 | All 9 upstream filings done (see table above) | [logos-co/scaffold#169](https://github.com/logos-co/scaffold/pull/169) — narrow SPel public-pin fix (near landing) | All Bucket 2 / 3 long-term deletions (wait on upstream) |
 
 ## Upstream filing queue (scaffold)
