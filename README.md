@@ -397,3 +397,9 @@ For more detail on the messaging side, see [delivery-dogfooding.md](delivery-dog
 
 - Bump `CIRCUITS_VERSION` in the [`Makefile`](Makefile) when the `lssa` revision in [`Cargo.toml`](Cargo.toml) needs a newer published `logos-blockchain-circuits` release.
 - Bump `[repos.lez].pin` in [`scaffold.toml`](scaffold.toml) when intentionally moving to a different LEZ revision.
+
+## Disclaimer
+
+This repository contains a POC implementation forming part of an experimental development environment and is not intended for production use.
+
+See the [Logos Core repository](https://github.com/logos-co/logos-liblogos) for additional information about the experimental development environment.
