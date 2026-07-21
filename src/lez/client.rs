@@ -1,14 +1,13 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction};
-use nssa::{
+use lee::{
     AccountId, PrivateKey, PublicKey, PublicTransaction,
-    program::Program,
     public_transaction::{Message, WitnessSet},
 };
-use nssa_core::{
+use lee_core::{
     account::Nonce,
     program::{PdaSeed, ProgramId},
 };
-use sequencer_service_protocol::NSSATransaction;
+use sequencer_service_protocol::LeeTransaction;
 use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use tracing::{debug, info};
 use url::Url;
@@ -153,7 +152,7 @@ impl LezClient {
 
     /// Derive the escrow PDA account ID from a hashlock.
     pub fn escrow_pda(&self, hashlock: &[u8; 32]) -> AccountId {
-        AccountId::from((&self.program_id, &PdaSeed::new(*hashlock)))
+        AccountId::for_public_pda(&self.program_id, &PdaSeed::new(*hashlock))
     }
 
     /// Read the escrow PDA state. Returns `None` if the account doesn't exist
@@ -206,12 +205,14 @@ impl LezClient {
 
     /// Transfer LEZ to a recipient using the authenticated transfer program.
     pub async fn transfer(&self, recipient: AccountId, amount: u128) -> Result<String> {
-        let program_id = Program::authenticated_transfer_program().id();
+        let program_id = programs::authenticated_transfer().id();
         let account_ids = vec![self.account_id, recipient];
 
         let nonces = self.get_nonces(&[self.account_id]).await?;
 
-        let message = Message::try_new(program_id, account_ids, nonces, amount)
+        // v0.2.0: the transfer instruction is a typed enum, not a bare u128.
+        let instruction = authenticated_transfer_core::Instruction::Transfer { amount };
+        let message = Message::try_new(program_id, account_ids, nonces, instruction)
             .map_err(|e| SwapError::LezTransaction(format!("failed to build message: {e}")))?;
 
         let witness_set = WitnessSet::for_message(&message, &[self.private_key()]);
@@ -219,7 +220,7 @@ impl LezClient {
 
         let tx_hash = self
             .sequencer()
-            .send_transaction(NSSATransaction::Public(tx))
+            .send_transaction(LeeTransaction::Public(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("transfer failed: {e}")))?;
 
@@ -254,8 +255,9 @@ impl LezClient {
             .await?;
         debug!(tx_hash = %lock_hash, "LEZ HTLC lock submitted");
 
-        // Wait for the lock to be committed before funding.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        // Wait for the lock to be committed before funding. Public-testnet
+        // blocks can be a minute or more apart, so allow several blocks.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             if self.get_escrow(&hashlock).await?.is_some() {
                 break;
@@ -275,8 +277,9 @@ impl LezClient {
         // "Guest panicked: Sender has insufficient balance"). Without this
         // check a rejected transfer looks like success and both peers wait
         // forever on a zero-balance escrow. Poll the PDA balance until it
-        // reaches the locked amount, or fail loudly.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        // reaches the locked amount, or fail loudly. Generous deadline for
+        // public-testnet block cadence (~1 min/block).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             let balance = self.get_balance(&pda).await.unwrap_or(0);
             if balance >= amount {
@@ -349,7 +352,7 @@ impl LezClient {
 
         let tx_hash = self
             .sequencer()
-            .send_transaction(NSSATransaction::Public(tx))
+            .send_transaction(LeeTransaction::Public(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("send_transaction failed: {e}")))?;
 
@@ -383,16 +386,16 @@ mod tests {
         let hashlock = [0xABu8; 32];
         let seed = PdaSeed::new(hashlock);
 
-        let pda1 = AccountId::from((&program_id, &seed));
-        let pda2 = AccountId::from((&program_id, &seed));
+        let pda1 = AccountId::for_public_pda(&program_id, &seed);
+        let pda2 = AccountId::for_public_pda(&program_id, &seed);
         assert_eq!(pda1, pda2);
     }
 
     #[test]
     fn pda_differs_for_different_hashlocks() {
         let program_id = test_program_id();
-        let pda_a = AccountId::from((&program_id, &PdaSeed::new([0xAAu8; 32])));
-        let pda_b = AccountId::from((&program_id, &PdaSeed::new([0xBBu8; 32])));
+        let pda_a = AccountId::for_public_pda(&program_id, &PdaSeed::new([0xAAu8; 32]));
+        let pda_b = AccountId::for_public_pda(&program_id, &PdaSeed::new([0xBBu8; 32]));
         assert_ne!(pda_a, pda_b);
     }
 }

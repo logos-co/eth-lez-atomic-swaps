@@ -5,9 +5,9 @@ use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
-use common::transaction::NSSATransaction;
+use common::transaction::LeeTransaction;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
-use nssa::{
+use lee::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
@@ -57,7 +57,7 @@ impl DemoEnv {
 
         // 1. Read scaffold wallet via WalletCore.
         report(1, "Reading scaffold wallet", "");
-        let wc = scaffold::wallet_core(&scaffold::wallet_home())?;
+        let mut wc = scaffold::wallet_core(&scaffold::wallet_home())?;
         report(1, "Reading scaffold wallet", "OK");
 
         // 2. Start Anvil.
@@ -94,7 +94,7 @@ impl DemoEnv {
 
         // 4. Extract accounts and sequencer URL from WalletCore.
         report(4, "Reading wallet accounts", "");
-        let accounts = scaffold::public_accounts(&wc)?;
+        let accounts = scaffold::public_accounts(&mut wc)?;
         let wallet_home = scaffold::wallet_home();
         let sequencer_url = scaffold::sequencer_url_of(&wc);
         report(
@@ -115,7 +115,7 @@ impl DemoEnv {
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
         wc.sequencer_client
-            .send_transaction(NSSATransaction::ProgramDeployment(tx))
+            .send_transaction(LeeTransaction::ProgramDeployment(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("program deploy failed: {e}")))?;
         tokio::time::sleep(BLOCK_WAIT).await;
