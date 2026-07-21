@@ -30,6 +30,10 @@ pub struct SwapConfig {
 
     // --- LEZ ---
     pub lez_sequencer_url: String,
+    /// Whether `lez_sequencer_url` was explicitly provided (via CLI flag or
+    /// env var) rather than defaulted. In wallet mode this decides whether the
+    /// URL overrides the scaffold wallet config's `sequencer_addr`.
+    pub lez_sequencer_url_explicit: bool,
     pub lez_auth: LezAuth,
     pub lez_htlc_program_id: ProgramId,
 

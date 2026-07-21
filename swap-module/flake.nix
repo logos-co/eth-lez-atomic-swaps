@@ -59,7 +59,13 @@
             version = "0.1.0";
 
             src = swapFfiSource;
-            cargoHash = "sha256-pR1e+m+V6rjNdyDVHcG33Fe+oWYjMR1BFvklG+dlTfo=";
+            cargoHash = "sha256-bhlpCjmLwoVseKZHpqrir237jofdwgW9Gu4iOCAYHDw=";
+            # --no-default-features: the `demo` feature only adds the risc0
+            # guest build (needs the rzup toolchain + a nested cargo build the
+            # sandbox can't run) for the program-ID drift test. The canonical
+            # LEZ HTLC program ID itself ships as a checked-in constant
+            # (swap-ffi/src/lez_htlc_program_id.rs), so the module still
+            # surfaces it via swap_ffi_default_lez_htlc_program_id().
             cargoBuildFlags = [ "-p" "swap-ffi" "--no-default-features" ];
             doCheck = false;
             LOGOS_BLOCKCHAIN_CIRCUITS = circuits;

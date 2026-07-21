@@ -19,6 +19,20 @@ use crate::eth::client::EthClient;
 use crate::lez::client::LezClient;
 use crate::swap::refund::now_unix;
 
+/// Default LEZ sequencer URL used when neither the CLI flag nor the
+/// `LEZ_SEQUENCER_URL` env var is set (standalone/localnet).
+const DEFAULT_LEZ_SEQUENCER_URL: &str = "http://127.0.0.1:3040";
+
+/// Resolve the effective sequencer URL and whether it was explicitly provided.
+/// An explicit value (CLI flag or env var) is distinguishable from the default
+/// so wallet mode can decide whether to override the wallet config's sequencer.
+fn resolve_sequencer_url(arg: Option<String>) -> (String, bool) {
+    match arg {
+        Some(url) => (url, true),
+        None => (DEFAULT_LEZ_SEQUENCER_URL.to_string(), false),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "swap-cli", about = "Atomic swap CLI (LEZ <-> ETH)")]
 pub struct Cli {
@@ -67,13 +81,11 @@ pub struct ConfigArgs {
     #[arg(long, env = "LEZ_ACCOUNT_ID")]
     lez_account_id: Option<String>,
 
-    /// LEZ sequencer URL
-    #[arg(
-        long,
-        env = "LEZ_SEQUENCER_URL",
-        default_value = "http://127.0.0.1:3040"
-    )]
-    lez_sequencer_url: String,
+    /// LEZ sequencer URL (default: http://127.0.0.1:3040).
+    /// In wallet mode, setting this overrides the wallet config's sequencer_addr,
+    /// letting you retarget a hosted/public sequencer via env.
+    #[arg(long, env = "LEZ_SEQUENCER_URL")]
+    lez_sequencer_url: Option<String>,
 
     /// LEZ HTLC program ID (32-byte hex)
     #[arg(long, env = "LEZ_HTLC_PROGRAM_ID")]
@@ -156,11 +168,15 @@ impl ConfigArgs {
 
         let now = now_unix();
 
+        let (lez_sequencer_url, lez_sequencer_url_explicit) =
+            resolve_sequencer_url(self.lez_sequencer_url);
+
         Ok(SwapConfig {
             eth_rpc_url: self.eth_rpc_url,
             eth_private_key: self.eth_private_key,
             eth_htlc_address,
-            lez_sequencer_url: self.lez_sequencer_url,
+            lez_sequencer_url,
+            lez_sequencer_url_explicit,
             lez_auth,
             lez_htlc_program_id,
             lez_amount: self.lez_amount,
@@ -245,5 +261,34 @@ pub async fn run() -> Result<()> {
         Commands::Demo(_) => unreachable!("handled above"),
         #[cfg(feature = "demo")]
         Commands::Infra => unreachable!("handled above"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sequencer_url_defaults_when_unset() {
+        let (url, explicit) = resolve_sequencer_url(None);
+        assert_eq!(url, DEFAULT_LEZ_SEQUENCER_URL);
+        assert!(!explicit);
+    }
+
+    #[test]
+    fn sequencer_url_explicit_when_set() {
+        let (url, explicit) = resolve_sequencer_url(Some("https://seq.example.com".to_string()));
+        assert_eq!(url, "https://seq.example.com");
+        assert!(explicit);
+    }
+
+    #[test]
+    fn sequencer_url_explicit_even_when_equal_to_default() {
+        // A value that happens to equal the default is still "explicit" — the
+        // Option carries presence, so we never confuse a set-to-localhost value
+        // with an unset one.
+        let (url, explicit) = resolve_sequencer_url(Some(DEFAULT_LEZ_SEQUENCER_URL.to_string()));
+        assert_eq!(url, DEFAULT_LEZ_SEQUENCER_URL);
+        assert!(explicit);
     }
 }

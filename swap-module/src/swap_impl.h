@@ -51,6 +51,12 @@ public:
     // Read a dotenv-style file and return its parsed contents as JSON.
     std::string loadEnv(const std::string& path);
 
+    // Canonical LEZ HTLC program ID baked into the Rust library, as a 64-char
+    // hex string — or an empty string if this build doesn't have it compiled
+    // in (the ID is gated behind the FFI's `demo` feature). Lets the UI default
+    // the maker's program-ID field from a single canonical source.
+    std::string defaultLezHtlcProgramId();
+
     // Fetch on-chain ETH and LEZ balances for the configured accounts.
     std::string fetchBalances(const std::string& configJson);
 

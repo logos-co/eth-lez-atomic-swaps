@@ -27,6 +27,9 @@ use swap_orchestrator::{
     },
 };
 
+mod lez_htlc_program_id;
+use lez_htlc_program_id::LEZ_HTLC_PROGRAM_ID_HEX;
+
 fn runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
@@ -207,11 +210,18 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
 
     let now = now_unix();
 
+    // The UI/config-JSON path always carries a sequencer URL entered in the
+    // Config tab, so treat any non-empty value as explicit — it then overrides
+    // the wallet config's sequencer_addr in wallet mode (matches the CLI's
+    // resolve_sequencer_url semantics).
+    let lez_sequencer_url_explicit = !c.lez_sequencer_url.is_empty();
+
     Ok(SwapConfig {
         eth_rpc_url: c.eth_rpc_url,
         eth_private_key: c.eth_private_key,
         eth_htlc_address,
         lez_sequencer_url: c.lez_sequencer_url,
+        lez_sequencer_url_explicit,
         lez_auth: match (&c.lez_wallet_home, &c.lez_account_id) {
             (Some(home), Some(account_id)) => LezAuth::Wallet {
                 home: std::path::PathBuf::from(home),
@@ -682,6 +692,23 @@ pub extern "C" fn swap_ffi_stop_maker_loop() {
     MAKER_LOOP_CANCEL.store(true, Ordering::SeqCst);
 }
 
+/// Return the canonical LEZ HTLC program ID compiled into this library as a
+/// 64-char lowercase hex string (no `0x` prefix). Lets the UI default a
+/// maker's program-ID field from the single canonical source instead of
+/// hand-pasting it.
+///
+/// The value is a checked-in constant (see `lez_htlc_program_id.rs`): the
+/// risc0 ImageID of the `lez-htlc` guest as DEPLOYED on the public testnet
+/// (`testnet.lez.logos.co`), which is what a swap on that network executes
+/// against. A `demo`-gated (currently `#[ignore]`d until the v0.2.0 repin)
+/// test guards it against drifting from `lez_htlc_methods::LEZ_HTLC_PROGRAM_ID`.
+///
+/// The returned pointer must be freed with `swap_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn swap_ffi_default_lez_htlc_program_id() -> *mut c_char {
+    to_c_string(LEZ_HTLC_PROGRAM_ID_HEX)
+}
+
 /// Free a string previously returned by any `swap_ffi_*` function.
 ///
 /// # Safety
@@ -697,6 +724,33 @@ pub unsafe extern "C" fn swap_ffi_free_string(ptr: *mut c_char) {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// Guards the checked-in `LEZ_HTLC_PROGRAM_ID_HEX` constant against drift:
+    /// if the `lez-htlc` guest (or the pinned LEZ toolchain) changes, its
+    /// deterministic risc0 ImageID changes and this test fails loudly with the
+    /// new value. Update `src/lez_htlc_program_id.rs` accordingly.
+    /// Demo-gated because building `lez_htlc_methods` requires the risc0
+    /// toolchain; run via `cargo test -p swap-ffi --features demo -- --ignored`.
+    ///
+    /// Currently `#[ignore]`d: the constant is the DEPLOYED public-testnet
+    /// program ID (v0.2.0-pin guest, see `src/lez_htlc_program_id.rs`), while
+    /// this branch still pins LEZ 9fa541f whose guest builds
+    /// `dbb89112…4d02cf`. Remove the `#[ignore]` when master repins to LEZ
+    /// v0.2.0 (see branch `testnet`) — it then becomes the permanent drift
+    /// tripwire.
+    #[cfg(feature = "demo")]
+    #[test]
+    #[ignore = "enable when master repins to LEZ v0.2.0 (see branch testnet); old pin builds dbb89112…4d02cf"]
+    fn checked_in_program_id_matches_guest_image_id() {
+        let id: [u32; 8] = lez_htlc_methods::LEZ_HTLC_PROGRAM_ID;
+        let bytes: Vec<u8> = id.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(
+            hex::encode(bytes),
+            LEZ_HTLC_PROGRAM_ID_HEX,
+            "lez-htlc guest ImageID drifted; update LEZ_HTLC_PROGRAM_ID_HEX \
+             in swap-ffi/src/lez_htlc_program_id.rs to the left-hand value"
+        );
+    }
 
     #[test]
     fn dotenv_config_json_maps_env_keys_to_ui_config_keys() {

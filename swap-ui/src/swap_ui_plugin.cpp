@@ -132,6 +132,29 @@ QString compactVariantJson(const QVariant& value)
     return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
 }
 
+// Default LEZ sequencer URL pre-filled into the Config tab. Targets the public
+// testnet so a stock catalog install works out of the box; the field stays
+// user-editable. For local dev (localnet runs on :3040) set the env override
+// rather than baking a localhost URL here.
+QString defaultLezSequencerUrl()
+{
+    const QString override = qEnvironmentVariable("SWAP_UI_LEZ_SEQUENCER_URL");
+    return override.isEmpty() ? QStringLiteral("https://testnet.lez.logos.co") : override;
+}
+
+// Default ETH HTLC contract address pre-filled into the Config tab: the
+// canonical shared deployment on Sepolia (chainId 11155111, deployed
+// 2026-07-21, tx 0xb634a97c…e7c1, minTimelockDelta=300). Updating this single
+// constant ships a new default to every install. Takers still inherit the
+// address from accepted offers. An env override is honored for dev/testing.
+QString defaultEthHtlcAddress()
+{
+    const QString override = qEnvironmentVariable("SWAP_UI_ETH_HTLC_ADDRESS");
+    return override.isEmpty()
+        ? QStringLiteral("0x8636Fe66DFee166589a913140f14d5F57394834A")
+        : override;
+}
+
 } // namespace
 
 SwapUiPlugin::SwapUiPlugin(QObject* parent)
@@ -147,8 +170,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
 
     setEthRpcUrl(QString{});
     setEthPrivateKey(QString{});
-    setEthHtlcAddress(QString{});
-    setLezSequencerUrl(QStringLiteral("http://localhost:8080"));
+    setEthHtlcAddress(defaultEthHtlcAddress());
+    setLezSequencerUrl(defaultLezSequencerUrl());
     setLezSigningKey(QString{});
     setLezWalletHome(QString{});
     setLezAccountId(QString{});
@@ -237,6 +260,18 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     m_swap = new Swap(api);
     setBackend(this);
     setStatus(QStringLiteral("Please choose a configuration."));
+
+    // Default the maker's LEZ HTLC program-ID field to the canonical value
+    // compiled into the Rust library (the public-testnet deployment ID, see
+    // swap-ffi/src/lez_htlc_program_id.rs). Only fills when the user hasn't
+    // set one, so a hand-entered ID always wins; empty-guard kept as a
+    // defensive no-op should the library ever ship without a baked-in ID.
+    m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
+        if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
+            setLezHtlcProgramId(programId);
+        }
+    });
+
     swapUiTrace(QStringLiteral("initLogos: starting"));
     const bool subscribed = subscribeToSwapEvents();
     swapUiTrace(QStringLiteral("initLogos: subscribeToSwapEvents=%1").arg(subscribed ? "ok" : "failed"));

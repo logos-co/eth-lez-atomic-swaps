@@ -138,6 +138,7 @@ impl TestEnv {
             eth_private_key: eth_pk.to_string(),
             eth_htlc_address: self.eth_htlc_address,
             lez_sequencer_url: self.sequencer_url.clone(),
+            lez_sequencer_url_explicit: true,
             lez_auth: LezAuth::Wallet {
                 home: self.wallet_home.clone(),
                 account_id: lez_id,

@@ -27,6 +27,9 @@ enum LezBackend {
     Wallet {
         wallet_core: Box<wallet::WalletCore>,
         private_key: PrivateKey,
+        /// When set (LEZ_SEQUENCER_URL was explicit), overrides the wallet
+        /// config's sequencer so a hosted/public sequencer can be targeted.
+        sequencer_override: Option<SequencerClient>,
     },
 }
 
@@ -82,7 +85,8 @@ impl LezClient {
 
     /// Construct from a scaffold-managed wallet. Reads the signing key for the
     /// given account from the wallet config on disk. Uses the WalletCore's
-    /// sequencer client instead of creating a duplicate.
+    /// sequencer client by default, unless `LEZ_SEQUENCER_URL` was explicitly
+    /// set — in which case that URL overrides the wallet config's sequencer.
     pub fn from_wallet(
         wallet_home: &std::path::Path,
         target_account_id: &AccountId,
@@ -100,10 +104,26 @@ impl LezClient {
             })?
             .clone();
 
+        // An explicitly-set LEZ_SEQUENCER_URL takes precedence over the wallet
+        // config's sequencer_addr, so users can retarget a hosted/public
+        // sequencer via env. Falls back to the wallet's own client otherwise.
+        let sequencer_override = if config.lez_sequencer_url_explicit {
+            let url = Url::parse(&config.lez_sequencer_url).map_err(|e| {
+                SwapError::InvalidConfig(format!("invalid sequencer URL: {e}"))
+            })?;
+            let client = SequencerClientBuilder::default()
+                .build(url)
+                .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
+            Some(client)
+        } else {
+            None
+        };
+
         Ok(Self {
             backend: LezBackend::Wallet {
                 wallet_core: Box::new(wc),
                 private_key,
+                sequencer_override,
             },
             account_id: *target_account_id,
             program_id: config.lez_htlc_program_id,
@@ -114,7 +134,13 @@ impl LezClient {
     fn sequencer(&self) -> &SequencerClient {
         match &self.backend {
             LezBackend::Standalone { sequencer, .. } => sequencer,
-            LezBackend::Wallet { wallet_core, .. } => &wallet_core.sequencer_client,
+            LezBackend::Wallet {
+                wallet_core,
+                sequencer_override,
+                ..
+            } => sequencer_override
+                .as_ref()
+                .unwrap_or(&wallet_core.sequencer_client),
         }
     }
 
@@ -241,11 +267,29 @@ impl LezClient {
         }
 
         // Step 2: Fund the escrow PDA (now owned by the HTLC program).
-        // Submit the transfer but don't wait for on-chain confirmation —
-        // the taker's watcher independently verifies the PDA balance before
-        // accepting the lock, so waiting here only adds latency.
         let transfer_hash = self.transfer(pda, amount).await?;
-        debug!(tx_hash = %transfer_hash, "escrow PDA funded");
+        debug!(tx_hash = %transfer_hash, "escrow PDA funding submitted");
+
+        // Confirm the funding transfer actually landed. The sequencer accepts
+        // the transfer eagerly but can still reject it during execution (e.g.
+        // "Guest panicked: Sender has insufficient balance"). Without this
+        // check a rejected transfer looks like success and both peers wait
+        // forever on a zero-balance escrow. Poll the PDA balance until it
+        // reaches the locked amount, or fail loudly.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let balance = self.get_balance(&pda).await.unwrap_or(0);
+            if balance >= amount {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SwapError::LezTransaction(format!(
+                    "LEZ escrow funding transfer did not land (PDA balance {balance} < {amount}) \
+                     — check maker balance (need >= {amount}) and .scaffold/logs/sequencer.log"
+                )));
+            }
+            tokio::time::sleep(self.poll_interval).await;
+        }
 
         info!(lock_tx = %lock_hash, fund_tx = %transfer_hash, "LEZ HTLC locked and funded");
         Ok(lock_hash)
