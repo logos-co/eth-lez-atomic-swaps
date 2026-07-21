@@ -8,6 +8,13 @@ Basecamp — no official-catalog listing required.
 > Platform: **macOS Apple Silicon (darwin-arm64) only** for now. Linux
 > builds are blocked on unpinned circuit hashes (issue #32).
 
+> **Status: pre-release.** No module release has been dispatched yet.
+> The first release will be cut once the LEZ v0.2.0 client repin (branch
+> `testnet`) lands on `master` — modules built from the current `master`
+> pin cannot talk to the public LEZ testnet listed below. Until a
+> release exists, the catalog URL resolves but offers no packages; this
+> guide is a preview of the flow.
+
 ## Prerequisites
 
 - **Logos Basecamp 0.2.1** (macOS dmg) — download from the
@@ -47,6 +54,29 @@ The swap module needs these endpoints/values:
 | ETH HTLC contract (Sepolia) | `0x8636Fe66DFee166589a913140f14d5F57394834A` |
 | ETH RPC (Sepolia, websocket) | `wss://ethereum-sepolia-rpc.publicnode.com` |
 
+The ETH RPC **must** be a WebSocket (`wss://`) endpoint — plain
+`https://` RPCs fail to connect.
+
+Beyond the endpoints, the Config tab needs your own identities before
+`validateConfig` passes:
+
+- **ETH private key** — hex key of a Sepolia account you control (make a
+  throwaway: any wallet, or `cast wallet new` if you have Foundry). It
+  signs your HTLC lock/claim transactions.
+- **ETH recipient address** — where the counterparty's ETH should land
+  (usually the same account's address).
+- **LEZ signing key** — a raw LEZ account key. Easiest path: create an
+  account with the LEZ `wallet` CLI pointed at the public testnet
+  (`wallet config set sequencer_addr https://testnet.lez.logos.co`, then
+  create + init an account) and paste its signing key. Alternatively
+  point the module at a wallet home dir + account ID.
+- **Taker account ID** (taker role) — the LEZ account that receives the
+  maker's LEZ.
+
+Both LEZ accounts must be **initialized and funded on-chain** before a
+swap (see Funds below). See [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/testnet/docs/testnet.md) for the exact
+wallet-CLI commands.
+
 ## 4. Funds
 
 - **Sepolia ETH**: any Sepolia faucet works, e.g.
@@ -55,8 +85,17 @@ The swap module needs these endpoints/values:
   amount of Sepolia ETH for HTLC funding + gas. Any standard ETH wallet
   key works; the module signs Sepolia transactions with the key you
   configure.
-- **LEZ testnet funds**: use the public testnet faucet (pinata faucet
-  for `testnet.lez.logos.co`) to fund your LEZ account.
+- **LEZ testnet funds**: the public testnet's pinata faucet credits
+  150 LEZ per claim, permissionlessly:
+
+  ```
+  wallet pinata claim --to <your-account-id>
+  ```
+
+  Repeat until funded (a maker locking 1000 LEZ needs ≥7 claims). The
+  `wallet` CLI comes from the `logos-execution-zone` repo at the same
+  v0.2.0 tag the module pins — see [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/testnet/docs/testnet.md) for
+  building it and for account create/init commands.
 
 ## How this catalog works (for maintainers)
 
