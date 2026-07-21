@@ -1,0 +1,35 @@
+name: Release swap
+
+# Manually-triggered release of the `swap` backend module. Delegates the
+# build / verify / publish pipeline to the shared
+# logos-co/logos-modules-release-action reusable workflow — the same
+# tested path every module in the official catalog uses. Mirrors the
+# caller convention of logos-co/logos-modules-v2 (e.g.
+# release-logos-wallet-module.yml), with `module_path` pointing at our
+# in-repo subdirectory instead of a submodule.
+#
+# Source of truth for module name + version is swap-module/metadata.json
+# (read by the upstream action) — upstream convention: no version input
+# here; bump metadata.json and dispatch.
+#
+# Publishes GitHub release `swap-v<version>` on THIS repo carrying the
+# .lgx + sidecar.json, then fires the `rebuild-index` repository_dispatch
+# so rebuild-index.yml regenerates the rolling `index` release.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    permissions:
+      contents: write
+    with:
+      module_path: swap-module
+      # darwin-arm64 ONLY for now: the Linux circuit-artifact hashes in
+      # swap-module/flake.nix aren't pinned yet (issue #32), so the
+      # linux-amd64 / linux-arm64 legs of the upstream default matrix
+      # would fail. Widen this list once #32 lands.
+      variants: "darwin-arm64"
+      # signing_mode defaults to "none" (unsigned .lgx). Switch to
+      # inline/external here when a signing key exists.

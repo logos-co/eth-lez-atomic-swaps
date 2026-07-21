@@ -1,0 +1,26 @@
+name: Rebuild index
+
+# Regenerates this repo's catalog index whenever a per-module release
+# fires the `rebuild-index` repository_dispatch event. Also runs on a
+# six-hourly schedule as a catch-up so a missed dispatch can't strand
+# the catalog. Copied from the logos-modules-v2 caller convention.
+#
+# The upstream reusable workflow walks THIS repo's GitHub releases,
+# collects every .lgx asset URL, builds `index.json` with
+# logos-modules-release-tool's index.py, and uploads it to the rolling
+# `index` release tag:
+#   https://github.com/logos-co/eth-lez-atomic-swaps/releases/download/index/index.json
+# That URL is what /logos-repo.json points Basecamp at.
+
+on:
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [rebuild-index]
+  schedule:
+    - cron: '17 */6 * * *'
+
+jobs:
+  rebuild:
+    uses: logos-co/logos-modules-release-action/.github/workflows/rebuild-index.yml@v1
+    permissions:
+      contents: write

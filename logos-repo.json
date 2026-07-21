@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "eth-lez-atomic-swaps",
+  "displayName": "ETH ↔ LEZ Atomic Swaps",
+  "description": "Atomic swap modules for Basecamp: swap (LEZ ↔ ETH backend) and swap_ui (UI). Published from the app repo's own releases.",
+  "homepage": "https://github.com/logos-co/eth-lez-atomic-swaps",
+  "indexUrl": "https://github.com/logos-co/eth-lez-atomic-swaps/releases/download/index/index.json",
+  "trustedSigners": []
+}
