@@ -8,22 +8,23 @@
 
 # --- logos-blockchain-circuits (project-local, isolated from ~/.logos-blockchain-circuits/) ---
 # Circuits are fetched by `lgs setup` into $(CIRCUITS_DIR) (driven by the
-# [circuits] block in scaffold.toml). This Makefile no longer downloads them;
-# it only points every recipe at the project-local dir via the exported env var
-# below so cargo / logos-scaffold and their children never collide with a
-# developer's pre-existing ~/.logos-blockchain-circuits/.
-CIRCUITS_DIR := $(CURDIR)/.scaffold/circuits
+# [circuits] block in scaffold.toml). NOTE: at the LEZ v0.2.0 pin no client
+# code reads LOGOS_BLOCKCHAIN_CIRCUITS any more (builtin ELFs are checked into
+# the LEZ repo and embedded at build time), so this block is now only a proxy
+# check that `lgs setup` has run. Candidate for removal once scaffold drops
+# its [circuits] handling (follow-up; see docs/scaffold-upstream-tracker.md).
+CIRCUITS_DIR := $(CURDIR)/.scaffold/lez-cache/circuits
 
 # Exported so every recipe (cargo, logos-scaffold, and their children) uses the
 # project-local circuits dir instead of ~/.logos-blockchain-circuits/.
 export LOGOS_BLOCKCHAIN_CIRCUITS := $(CIRCUITS_DIR)
 
-# Cheap guard: fail early with actionable guidance if `lgs setup` has not fetched
-# the circuits yet, instead of letting the LEZ build fail cryptically later.
+# Cheap guard: fail early with actionable guidance if `lgs setup` has not run
+# yet, instead of letting later steps fail cryptically.
 check-circuits:
 	@if [ ! -d "$(CIRCUITS_DIR)" ]; then \
 		echo "error: circuits not found at $(CIRCUITS_DIR)."; \
-		echo "       Run 'lgs setup' first (it fetches logos-blockchain-circuits)."; \
+		echo "       Run 'make setup' first (it fetches logos-blockchain-circuits)."; \
 		exit 1; \
 	fi
 
@@ -34,8 +35,10 @@ contracts:
 
 # `lgs setup` fetches the circuits into $(CIRCUITS_DIR) itself, so this target
 # must not depend on check-circuits.
+# scripts/scaffold-setup.sh bridges logos-scaffold 0.1.1 to the LEZ v0.2.0
+# repo layout (wallet crate moved under lez/) — see the script header.
 setup:
-	logos-scaffold setup
+	scripts/scaffold-setup.sh
 
 localnet-start:
 	logos-scaffold localnet start
