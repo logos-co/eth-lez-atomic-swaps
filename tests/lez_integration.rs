@@ -55,6 +55,7 @@ impl TestEnv {
                 account_id,
             },
             lez_sequencer_url: self.sequencer_url.clone(),
+            lez_sequencer_url_explicit: true,
             lez_htlc_program_id: self.program_id,
             lez_taker_account_id: counterparty_lez,
             // Unused by LezClient::new:

@@ -76,6 +76,11 @@ char* swap_ffi_refund_eth(const char*, const char*)
     return copyJson(R"({"ok":true,"method":"refundEth"})");
 }
 
+char* swap_ffi_default_lez_htlc_program_id()
+{
+    return copyJson("27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070");
+}
+
 char* swap_ffi_fetch_balances(const char* config_json)
 {
     fetchBalancesCalls.fetch_add(1);
