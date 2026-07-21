@@ -131,6 +131,8 @@ impl DemoEnv {
             eth_private_key: hex::encode(anvil.keys()[0].to_bytes()),
             eth_htlc_address,
             lez_sequencer_url: sequencer_url.clone(),
+            // Demo drives the wallet-config sequencer path — not an explicit override.
+            lez_sequencer_url_explicit: false,
             lez_auth: LezAuth::Wallet {
                 home: wallet_home.clone(),
                 account_id: accounts[0].account_id,
@@ -150,6 +152,8 @@ impl DemoEnv {
             eth_private_key: hex::encode(anvil.keys()[1].to_bytes()),
             eth_htlc_address,
             lez_sequencer_url: sequencer_url,
+            // Demo drives the wallet-config sequencer path — not an explicit override.
+            lez_sequencer_url_explicit: false,
             lez_auth: LezAuth::Wallet {
                 home: wallet_home,
                 account_id: accounts[1].account_id,

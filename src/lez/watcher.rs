@@ -33,6 +33,9 @@ pub async fn watch_escrow(
 ) -> Result<()> {
     let pda = client.escrow_pda(&hashlock);
     let mut last_state: Option<HTLCState> = None;
+    // Rate-limit the "escrow exists but PDA balance is 0" warning so we surface
+    // a stuck funding transfer without spamming the log every poll interval.
+    let mut last_zero_warn: Option<tokio::time::Instant> = None;
 
     loop {
         match client.get_escrow(&hashlock).await {
@@ -44,7 +47,21 @@ pub async fn watch_escrow(
                 if current == HTLCState::Locked && last_state.is_none() {
                     let balance = client.get_balance(&pda).await.unwrap_or(0);
                     if balance == 0 {
-                        debug!("escrow PDA has zero balance, treating as non-existent");
+                        let now = tokio::time::Instant::now();
+                        let should_warn = last_zero_warn
+                            .map(|t| now.duration_since(t) >= Duration::from_secs(30))
+                            .unwrap_or(true);
+                        if should_warn {
+                            warn!(
+                                %pda,
+                                "escrow exists but PDA balance is 0 — funds transfer not landed; \
+                                 likely insufficient sender balance (check maker balance and \
+                                 .scaffold/logs/sequencer.log)"
+                            );
+                            last_zero_warn = Some(now);
+                        } else {
+                            debug!("escrow PDA has zero balance, treating as non-existent");
+                        }
                         tokio::time::sleep(poll_interval).await;
                         continue;
                     }
