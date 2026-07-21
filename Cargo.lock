@@ -8506,6 +8506,7 @@ name = "swap-orchestrator"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "authenticated_transfer_core",
  "base58",
  "borsh",
  "clap",

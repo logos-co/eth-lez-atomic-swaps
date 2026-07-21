@@ -210,7 +210,9 @@ impl LezClient {
 
         let nonces = self.get_nonces(&[self.account_id]).await?;
 
-        let message = Message::try_new(program_id, account_ids, nonces, amount)
+        // v0.2.0: the transfer instruction is a typed enum, not a bare u128.
+        let instruction = authenticated_transfer_core::Instruction::Transfer { amount };
+        let message = Message::try_new(program_id, account_ids, nonces, instruction)
             .map_err(|e| SwapError::LezTransaction(format!("failed to build message: {e}")))?;
 
         let witness_set = WitnessSet::for_message(&message, &[self.private_key()]);
