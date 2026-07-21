@@ -142,15 +142,17 @@ QString defaultLezSequencerUrl()
     return override.isEmpty() ? QStringLiteral("https://testnet.lez.logos.co") : override;
 }
 
-// Default ETH HTLC contract address pre-filled into the Config tab. Empty until
-// a canonical public deployment (Sepolia) exists — when it does, updating this
-// single constant ships the default to every install. Takers still inherit the
+// Default ETH HTLC contract address pre-filled into the Config tab: the
+// canonical shared deployment on Sepolia (chainId 11155111, deployed
+// 2026-07-21, tx 0xb634a97c…e7c1, minTimelockDelta=300). Updating this single
+// constant ships a new default to every install. Takers still inherit the
 // address from accepted offers. An env override is honored for dev/testing.
 QString defaultEthHtlcAddress()
 {
     const QString override = qEnvironmentVariable("SWAP_UI_ETH_HTLC_ADDRESS");
-    // Placeholder: no public deployment yet — see README once one exists.
-    return override.isEmpty() ? QString{} : override;
+    return override.isEmpty()
+        ? QStringLiteral("0x8636Fe66DFee166589a913140f14d5F57394834A")
+        : override;
 }
 
 } // namespace

@@ -122,7 +122,7 @@ ScrollView {
                 text: swapBackend.ethHtlcAddress
                 onValueEdited: (val) => swapBackend.setConfigValue("eth_htlc_address", val)
                 placeholderText: "0x..."
-                hint: "Sepolia deployment: see README. Takers inherit this from an accepted offer."
+                hint: "Pre-filled with the shared Sepolia deployment. Takers inherit this from an accepted offer."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("eth_htlc_address")
             }
