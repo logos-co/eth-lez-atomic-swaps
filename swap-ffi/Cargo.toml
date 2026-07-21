@@ -19,9 +19,11 @@ dotenvy = "0.15"
 sha2 = "0.10"
 rand = { version = "0.8", features = ["std", "std_rng"] }
 
-# Demo-only: compiles in the deterministic LEZ HTLC risc0 image ID so the UI can
-# surface the canonical program ID (see swap_ffi_default_lez_htlc_program_id).
-# Gated behind `demo` because building the guest requires the risc0 toolchain.
+# Demo-only: builds the LEZ HTLC risc0 guest so the demo-gated drift test can
+# assert the checked-in program ID constant (src/lez_htlc_program_id.rs, see
+# swap_ffi_default_lez_htlc_program_id) still matches the guest's deterministic
+# image ID. Gated behind `demo` because building the guest requires the risc0
+# toolchain, which the sandboxed Nix module build cannot run.
 lez_htlc_methods = { path = "../programs/lez-htlc/methods", optional = true }
 
 [build-dependencies]

@@ -260,9 +260,10 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     setStatus(QStringLiteral("Please choose a configuration."));
 
     // Default the maker's LEZ HTLC program-ID field to the canonical value
-    // compiled into the Rust library. Returns empty on non-demo builds (nothing
-    // baked in) and we only fill when the user hasn't set one, so this is a
-    // no-op unless a canonical ID is available and the field is still blank.
+    // compiled into the Rust library (the public-testnet deployment ID, see
+    // swap-ffi/src/lez_htlc_program_id.rs). Only fills when the user hasn't
+    // set one, so a hand-entered ID always wins; empty-guard kept as a
+    // defensive no-op should the library ever ship without a baked-in ID.
     m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
         if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
             setLezHtlcProgramId(programId);
