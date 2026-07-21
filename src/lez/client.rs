@@ -153,7 +153,7 @@ impl LezClient {
 
     /// Derive the escrow PDA account ID from a hashlock.
     pub fn escrow_pda(&self, hashlock: &[u8; 32]) -> AccountId {
-        AccountId::from((&self.program_id, &PdaSeed::new(*hashlock)))
+        AccountId::for_public_pda(&self.program_id, &PdaSeed::new(*hashlock))
     }
 
     /// Read the escrow PDA state. Returns `None` if the account doesn't exist
@@ -383,16 +383,16 @@ mod tests {
         let hashlock = [0xABu8; 32];
         let seed = PdaSeed::new(hashlock);
 
-        let pda1 = AccountId::from((&program_id, &seed));
-        let pda2 = AccountId::from((&program_id, &seed));
+        let pda1 = AccountId::for_public_pda(&program_id, &seed);
+        let pda2 = AccountId::for_public_pda(&program_id, &seed);
         assert_eq!(pda1, pda2);
     }
 
     #[test]
     fn pda_differs_for_different_hashlocks() {
         let program_id = test_program_id();
-        let pda_a = AccountId::from((&program_id, &PdaSeed::new([0xAAu8; 32])));
-        let pda_b = AccountId::from((&program_id, &PdaSeed::new([0xBBu8; 32])));
+        let pda_a = AccountId::for_public_pda(&program_id, &PdaSeed::new([0xAAu8; 32]));
+        let pda_b = AccountId::for_public_pda(&program_id, &PdaSeed::new([0xBBu8; 32]));
         assert_ne!(pda_a, pda_b);
     }
 }

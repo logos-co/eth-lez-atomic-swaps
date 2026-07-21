@@ -8,6 +8,8 @@ use risc0_zkvm::sha::{Impl, Sha256};
 fn main() {
     let (
         ProgramInput {
+            self_program_id,
+            caller_program_id,
             pre_states,
             instruction,
         },
@@ -22,17 +24,37 @@ fn main() {
             timelock,
         } => {
             let post_states = execute_lock(&pre_states, hashlock, taker_id, amount, timelock);
-            ProgramOutput::new(instruction_data, pre_states, post_states).write();
+            ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
+                instruction_data,
+                pre_states,
+                post_states,
+            )
+            .write();
         }
         HTLCInstruction::Claim { preimage } => {
             let post_states = execute_claim(&pre_states, &preimage);
-            ProgramOutput::new(instruction_data, pre_states, post_states).write();
+            ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
+                instruction_data,
+                pre_states,
+                post_states,
+            )
+            .write();
         }
         HTLCInstruction::Refund => {
             let (post_states, timelock) = execute_refund(&pre_states);
-            ProgramOutput::new(instruction_data, pre_states, post_states)
-                .with_timestamp_validity_window(timelock..)
-                .write();
+            ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
+                instruction_data,
+                pre_states,
+                post_states,
+            )
+            .with_timestamp_validity_window(timelock..)
+            .write();
         }
     };
 }
