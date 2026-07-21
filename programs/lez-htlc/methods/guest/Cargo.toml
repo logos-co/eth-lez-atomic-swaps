@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }

@@ -1,7 +1,6 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction};
 use lee::{
     AccountId, PrivateKey, PublicKey, PublicTransaction,
-    program::Program,
     public_transaction::{Message, WitnessSet},
 };
 use lee_core::{
@@ -206,7 +205,7 @@ impl LezClient {
 
     /// Transfer LEZ to a recipient using the authenticated transfer program.
     pub async fn transfer(&self, recipient: AccountId, amount: u128) -> Result<String> {
-        let program_id = Program::authenticated_transfer_program().id();
+        let program_id = programs::authenticated_transfer().id();
         let account_ids = vec![self.account_id, recipient];
 
         let nonces = self.get_nonces(&[self.account_id]).await?;
@@ -254,8 +253,9 @@ impl LezClient {
             .await?;
         debug!(tx_hash = %lock_hash, "LEZ HTLC lock submitted");
 
-        // Wait for the lock to be committed before funding.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        // Wait for the lock to be committed before funding. Public-testnet
+        // blocks can be a minute or more apart, so allow several blocks.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             if self.get_escrow(&hashlock).await?.is_some() {
                 break;
@@ -275,8 +275,9 @@ impl LezClient {
         // "Guest panicked: Sender has insufficient balance"). Without this
         // check a rejected transfer looks like success and both peers wait
         // forever on a zero-balance escrow. Poll the PDA balance until it
-        // reaches the locked amount, or fail loudly.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        // reaches the locked amount, or fail loudly. Generous deadline for
+        // public-testnet block cadence (~1 min/block).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             let balance = self.get_balance(&pda).await.unwrap_or(0);
             if balance >= amount {

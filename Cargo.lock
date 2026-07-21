@@ -790,7 +790,7 @@ dependencies = [
 [[package]]
 name = "amm_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "borsh",
  "lee_core",
@@ -843,7 +843,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -854,7 +854,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1274,6 +1274,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4858a9d740c5007a9069007c3b4e91152d0506f13c1b31dd49051fd537656156"
 
 [[package]]
+name = "associated_token_account_core"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+dependencies = [
+ "lee_core",
+ "risc0-zkvm",
+ "serde",
+]
+
+[[package]]
 name = "astro-float"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1404,16 +1414,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ata_core"
-version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
-dependencies = [
- "lee_core",
- "risc0-zkvm",
- "serde",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1445,7 +1445,7 @@ dependencies = [
 [[package]]
 name = "authenticated_transfer_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "serde",
 ]
@@ -1758,7 +1758,7 @@ dependencies = [
 [[package]]
 name = "bridge_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "lee_core",
  "serde",
@@ -1771,6 +1771,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
  "tinyvec",
+]
+
+[[package]]
+name = "build_utils"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+dependencies = [
+ "anyhow",
+ "risc0-binfmt",
 ]
 
 [[package]]
@@ -2021,7 +2030,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "clock_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "borsh",
  "lee_core",
@@ -2070,7 +2079,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "anyhow",
  "authenticated_transfer_core",
@@ -2082,9 +2091,11 @@ dependencies = [
  "lee_core",
  "log",
  "logos-blockchain-common-http-client",
+ "programs",
  "serde",
  "serde_with",
  "sha2",
+ "system_accounts",
  "thiserror 2.0.18",
 ]
 
@@ -2473,7 +2484,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2635,7 +2646,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2891,7 +2902,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2946,7 +2957,7 @@ dependencies = [
 [[package]]
 name = "faucet_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "lee_core",
  "serde",
@@ -2960,7 +2971,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4396,7 +4407,7 @@ dependencies = [
 [[package]]
 name = "key_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4418,7 +4429,7 @@ dependencies = [
 [[package]]
 name = "keycard_wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "lee",
  "log",
@@ -4469,20 +4480,17 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lee"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "anyhow",
  "borsh",
- "bridge_core",
- "clock_core",
- "faucet_core",
+ "build_utils",
  "hex",
  "k256",
  "lee_core",
  "log",
  "rand 0.8.5",
  "risc0-binfmt",
- "risc0-build",
  "risc0-zkvm",
  "serde",
  "serde_with",
@@ -4493,7 +4501,7 @@ dependencies = [
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "base58",
  "borsh",
@@ -6078,7 +6086,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6731,6 +6739,15 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "version_check",
+]
+
+[[package]]
+name = "programs"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+dependencies = [
+ "build_utils",
+ "lee",
 ]
 
 [[package]]
@@ -7695,7 +7712,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7775,7 +7792,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.7",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8015,17 +8032,19 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 [[package]]
 name = "sequencer_service_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "common",
+ "hex",
  "lee",
  "lee_core",
+ "serde_with",
 ]
 
 [[package]]
 name = "sequencer_service_rpc"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "jsonrpsee",
  "sequencer_service_protocol",
@@ -8346,7 +8365,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8498,6 +8517,7 @@ dependencies = [
  "lee_core",
  "lez_htlc_methods",
  "lez_htlc_program",
+ "programs",
  "rand 0.8.5",
  "sequencer_service_protocol",
  "sequencer_service_rpc",
@@ -8606,6 +8626,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "system_accounts"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+dependencies = [
+ "bridge_core",
+ "clock_core",
+ "faucet_core",
+ "lee_core",
+ "programs",
+]
+
+[[package]]
 name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8644,19 +8676,20 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "testnet_initial_state"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
- "common",
  "key_protocol",
  "lee",
  "lee_core",
+ "programs",
  "serde",
+ "system_accounts",
 ]
 
 [[package]]
@@ -8785,7 +8818,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "token_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "borsh",
  "lee_core",
@@ -9473,7 +9506,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "vault_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "lee_core",
  "risc0-zkvm",
@@ -9508,12 +9541,12 @@ dependencies = [
 [[package]]
 name = "wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0-rc5#27360cb7d6ccb2bfbcca7d171bab8a3938490264"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone?tag=v0.2.0#a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 dependencies = [
  "amm_core",
  "anyhow",
+ "associated_token_account_core",
  "async-stream",
- "ata_core",
  "authenticated_transfer_core",
  "base58",
  "bip39",
@@ -9534,6 +9567,7 @@ dependencies = [
  "lee_core",
  "log",
  "optfield",
+ "programs",
  "pyo3",
  "rand 0.8.5",
  "rpassword",
@@ -9541,6 +9575,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "system_accounts",
  "testnet_initial_state",
  "thiserror 2.0.18",
  "token_core",
@@ -9783,7 +9818,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
