@@ -104,6 +104,7 @@ ScrollView {
                 text: swapBackend.ethRpcUrl
                 onValueEdited: (val) => swapBackend.setConfigValue("eth_rpc_url", val)
                 placeholderText: "wss://..."
+                hint: "Must be a WebSocket endpoint (wss://); https:// RPCs fail to connect."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("eth_rpc_url")
             }
@@ -121,6 +122,7 @@ ScrollView {
                 text: swapBackend.ethHtlcAddress
                 onValueEdited: (val) => swapBackend.setConfigValue("eth_htlc_address", val)
                 placeholderText: "0x..."
+                hint: "Sepolia deployment: see README. Takers inherit this from an accepted offer."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("eth_htlc_address")
             }
@@ -173,6 +175,7 @@ ScrollView {
                 text: swapBackend.lezHtlcProgramId
                 onValueEdited: (val) => swapBackend.setConfigValue("lez_htlc_program_id", val)
                 placeholderText: "32-byte hex"
+                hint: "Defaults to the canonical compiled-in ID when available; takers inherit it from an accepted offer."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("lez_htlc_program_id")
             }
@@ -276,6 +279,7 @@ ScrollView {
         property alias placeholderText: input.placeholderText
         property bool fieldEnabled: true
         property string errorText: ""
+        property string hint: ""
         signal valueEdited(string val)
 
         spacing: 4
@@ -310,6 +314,14 @@ ScrollView {
             visible: field.errorText !== ""
             text: field.errorText
             color: Theme.error
+            font.pixelSize: 11
+            wrapMode: Text.Wrap
+            Layout.fillWidth: true
+        }
+        Text {
+            visible: field.hint !== "" && field.errorText === ""
+            text: field.hint
+            color: Theme.textSecondary
             font.pixelSize: 11
             wrapMode: Text.Wrap
             Layout.fillWidth: true

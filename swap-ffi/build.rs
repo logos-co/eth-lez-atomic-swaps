@@ -64,6 +64,8 @@ char *swap_ffi_run_maker_loop(const char *config_json,
 
 void swap_ffi_stop_maker_loop(void);
 
+char *swap_ffi_default_lez_htlc_program_id(void);
+
 void swap_ffi_free_string(char *ptr);
 
 #ifdef __cplusplus

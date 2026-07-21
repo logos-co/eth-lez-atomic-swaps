@@ -313,6 +313,10 @@ std::string SwapImpl::loadEnv(const std::string& path) {
     return takeAndFree(swap_ffi_load_env(path.c_str()));
 }
 
+std::string SwapImpl::defaultLezHtlcProgramId() {
+    return takeAndFree(swap_ffi_default_lez_htlc_program_id());
+}
+
 std::string SwapImpl::fetchBalances(const std::string& configJson) {
     return takeAndFree(swap_ffi_fetch_balances(configJson.c_str()));
 }

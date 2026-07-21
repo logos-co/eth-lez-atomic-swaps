@@ -207,11 +207,18 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
 
     let now = now_unix();
 
+    // The UI/config-JSON path always carries a sequencer URL entered in the
+    // Config tab, so treat any non-empty value as explicit — it then overrides
+    // the wallet config's sequencer_addr in wallet mode (matches the CLI's
+    // resolve_sequencer_url semantics).
+    let lez_sequencer_url_explicit = !c.lez_sequencer_url.is_empty();
+
     Ok(SwapConfig {
         eth_rpc_url: c.eth_rpc_url,
         eth_private_key: c.eth_private_key,
         eth_htlc_address,
         lez_sequencer_url: c.lez_sequencer_url,
+        lez_sequencer_url_explicit,
         lez_auth: match (&c.lez_wallet_home, &c.lez_account_id) {
             (Some(home), Some(account_id)) => LezAuth::Wallet {
                 home: std::path::PathBuf::from(home),
@@ -680,6 +687,27 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
 #[unsafe(no_mangle)]
 pub extern "C" fn swap_ffi_stop_maker_loop() {
     MAKER_LOOP_CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// Return the canonical LEZ HTLC program ID compiled into this library as a
+/// 64-char lowercase hex string (no `0x` prefix), or an empty string when the
+/// library was built without the `demo` feature (which bakes in the risc0
+/// guest's deterministic image ID). Lets the UI default a maker's program-ID
+/// field from the single canonical source instead of hand-pasting it.
+///
+/// The returned pointer must be freed with `swap_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn swap_ffi_default_lez_htlc_program_id() -> *mut c_char {
+    #[cfg(feature = "demo")]
+    {
+        let id: [u32; 8] = lez_htlc_methods::LEZ_HTLC_PROGRAM_ID;
+        let bytes: Vec<u8> = id.iter().flat_map(|w| w.to_le_bytes()).collect();
+        to_c_string(&hex::encode(bytes))
+    }
+    #[cfg(not(feature = "demo"))]
+    {
+        to_c_string("")
+    }
 }
 
 /// Free a string previously returned by any `swap_ffi_*` function.

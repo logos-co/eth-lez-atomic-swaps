@@ -132,6 +132,27 @@ QString compactVariantJson(const QVariant& value)
     return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
 }
 
+// Default LEZ sequencer URL pre-filled into the Config tab. Targets the public
+// testnet so a stock catalog install works out of the box; the field stays
+// user-editable. For local dev (localnet runs on :3040) set the env override
+// rather than baking a localhost URL here.
+QString defaultLezSequencerUrl()
+{
+    const QString override = qEnvironmentVariable("SWAP_UI_LEZ_SEQUENCER_URL");
+    return override.isEmpty() ? QStringLiteral("https://testnet.lez.logos.co") : override;
+}
+
+// Default ETH HTLC contract address pre-filled into the Config tab. Empty until
+// a canonical public deployment (Sepolia) exists — when it does, updating this
+// single constant ships the default to every install. Takers still inherit the
+// address from accepted offers. An env override is honored for dev/testing.
+QString defaultEthHtlcAddress()
+{
+    const QString override = qEnvironmentVariable("SWAP_UI_ETH_HTLC_ADDRESS");
+    // Placeholder: no public deployment yet — see README once one exists.
+    return override.isEmpty() ? QString{} : override;
+}
+
 } // namespace
 
 SwapUiPlugin::SwapUiPlugin(QObject* parent)
@@ -147,8 +168,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
 
     setEthRpcUrl(QString{});
     setEthPrivateKey(QString{});
-    setEthHtlcAddress(QString{});
-    setLezSequencerUrl(QStringLiteral("http://localhost:8080"));
+    setEthHtlcAddress(defaultEthHtlcAddress());
+    setLezSequencerUrl(defaultLezSequencerUrl());
     setLezSigningKey(QString{});
     setLezWalletHome(QString{});
     setLezAccountId(QString{});
@@ -237,6 +258,17 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     m_swap = new Swap(api);
     setBackend(this);
     setStatus(QStringLiteral("Please choose a configuration."));
+
+    // Default the maker's LEZ HTLC program-ID field to the canonical value
+    // compiled into the Rust library. Returns empty on non-demo builds (nothing
+    // baked in) and we only fill when the user hasn't set one, so this is a
+    // no-op unless a canonical ID is available and the field is still blank.
+    m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
+        if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
+            setLezHtlcProgramId(programId);
+        }
+    });
+
     swapUiTrace(QStringLiteral("initLogos: starting"));
     const bool subscribed = subscribeToSwapEvents();
     swapUiTrace(QStringLiteral("initLogos: subscribeToSwapEvents=%1").arg(subscribed ? "ok" : "failed"));
