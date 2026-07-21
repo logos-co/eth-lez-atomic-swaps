@@ -24,13 +24,18 @@ alloy = { version = "1", features = [
 ] }
 futures-util = "0.3"
 
-# LEZ
-nssa = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f", features = ["host"] }
-common = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
-wallet = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f", features = ["client"] }
-sequencer_service_protocol = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
+# LEZ — pinned to v0.2.0-rc5, the exact tag the public testnet
+# (https://testnet.lez.logos.co) runs. Do NOT bump to v0.2.0 final until the
+# testnet does: builtin program ImageIDs changed in final and are computed
+# client-side, so a final-pinned client's transfers get rejected by an rc5
+# sequencer. When the testnet upgrades, bumping these six tags is the only
+# change needed (wire encodings are otherwise compatible).
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5", features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5", features = ["client"] }
+sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0-rc5" }
 # LEZ HTLC types (HTLCInstruction, HTLCEscrow, HTLCState)
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 

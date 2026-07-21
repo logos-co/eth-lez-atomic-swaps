@@ -1,14 +1,14 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction};
-use nssa::{
+use lee::{
     AccountId, PrivateKey, PublicKey, PublicTransaction,
     program::Program,
     public_transaction::{Message, WitnessSet},
 };
-use nssa_core::{
+use lee_core::{
     account::Nonce,
     program::{PdaSeed, ProgramId},
 };
-use sequencer_service_protocol::NSSATransaction;
+use sequencer_service_protocol::LeeTransaction;
 use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use tracing::{debug, info};
 use url::Url;
@@ -219,7 +219,7 @@ impl LezClient {
 
         let tx_hash = self
             .sequencer()
-            .send_transaction(NSSATransaction::Public(tx))
+            .send_transaction(LeeTransaction::Public(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("transfer failed: {e}")))?;
 
@@ -349,7 +349,7 @@ impl LezClient {
 
         let tx_hash = self
             .sequencer()
-            .send_transaction(NSSATransaction::Public(tx))
+            .send_transaction(LeeTransaction::Public(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("send_transaction failed: {e}")))?;
 

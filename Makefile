@@ -80,7 +80,7 @@ test: circuits contracts
 	lgs run --profile test
 
 test-makefile: circuits contracts localnet-start
-	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test; logos-scaffold localnet stop
+	LEE_WALLET_HOME_DIR=.scaffold/wallet cargo test; logos-scaffold localnet stop
 
 # --- Demo / Infra (headless CLI flow) ---
 
@@ -88,7 +88,7 @@ demo: circuits contracts
 	lgs run --profile demo
 
 demo-makefile: circuits contracts
-	NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
+	LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo
 
 infra: circuits contracts localnet-start
 	trap 'logos-scaffold localnet stop' EXIT INT TERM; cargo run --features demo -- infra

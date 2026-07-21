@@ -5,9 +5,9 @@ use alloy::primitives::U256;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
-use common::transaction::NSSATransaction;
+use common::transaction::LeeTransaction;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
-use nssa::{
+use lee::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
@@ -54,8 +54,8 @@ pub async fn cmd_infra() -> Result<()> {
 
     // 1. Read scaffold wallet via WalletCore.
     eprint!("  [\x1b[36mlez\x1b[0m]   Reading scaffold wallet...");
-    let wc = scaffold::wallet_core(&scaffold::wallet_home())?;
-    let accounts = scaffold::public_accounts(&wc)?;
+    let mut wc = scaffold::wallet_core(&scaffold::wallet_home())?;
+    let accounts = scaffold::public_accounts(&mut wc)?;
     let wallet_home = scaffold::wallet_home();
     let sequencer_url = scaffold::sequencer_url_of(&wc);
     eprintln!(
@@ -103,7 +103,7 @@ pub async fn cmd_infra() -> Result<()> {
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
     wc.sequencer_client
-        .send_transaction(NSSATransaction::ProgramDeployment(tx))
+        .send_transaction(LeeTransaction::ProgramDeployment(tx))
         .await
         .unwrap();
     tokio::time::sleep(BLOCK_WAIT).await;
@@ -140,7 +140,7 @@ pub async fn cmd_infra() -> Result<()> {
             eth_amount: "10",
             eth_recipient: &format!("{maker_eth_addr}"),
             lez_taker_account: &accounts[1].account_id_b58,
-            nssa_wallet_home_dir: &wallet_home_str,
+            lee_wallet_home_dir: &wallet_home_str,
         },
     )?;
     eprintln!("  [\x1b[1minfra\x1b[0m] Wrote .env (maker)");
@@ -161,7 +161,7 @@ pub async fn cmd_infra() -> Result<()> {
             eth_amount: "10",
             eth_recipient: &format!("{maker_eth_addr}"),
             lez_taker_account: &accounts[1].account_id_b58,
-            nssa_wallet_home_dir: &wallet_home_str,
+            lee_wallet_home_dir: &wallet_home_str,
         },
     )?;
     eprintln!("  [\x1b[1minfra\x1b[0m] Wrote .env.taker (taker)");
@@ -210,7 +210,7 @@ struct EnvParams<'a> {
     eth_amount: &'a str,
     eth_recipient: &'a str,
     lez_taker_account: &'a str,
-    nssa_wallet_home_dir: &'a str,
+    lee_wallet_home_dir: &'a str,
 }
 
 fn write_env_file(path: &str, p: &EnvParams) -> Result<()> {
@@ -256,7 +256,7 @@ LEZ_TAKER_ACCOUNT_ID={lez_taker}
 POLL_INTERVAL_MS=500
 
 # Wallet home (used by wallet::WalletCore::from_env)
-NSSA_WALLET_HOME_DIR={wallet_home}
+LEE_WALLET_HOME_DIR={wallet_home}
 ",
         eth_rpc = p.eth_rpc_url,
         eth_key = p.eth_private_key,
@@ -268,7 +268,7 @@ NSSA_WALLET_HOME_DIR={wallet_home}
         eth_amount = p.eth_amount,
         eth_recipient = p.eth_recipient,
         lez_taker = p.lez_taker_account,
-        wallet_home = p.nssa_wallet_home_dir,
+        wallet_home = p.lee_wallet_home_dir,
     );
 
     let mut f = std::fs::File::create(path)

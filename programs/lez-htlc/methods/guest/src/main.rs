@@ -1,7 +1,7 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
-use nssa_core::{
+use lee_core::{
     account::{Account, AccountId, AccountWithMetadata},
-    program::{AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput, read_nssa_inputs},
+    program::{AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput, read_lee_inputs},
 };
 use risc0_zkvm::sha::{Impl, Sha256};
 
@@ -12,7 +12,7 @@ fn main() {
             instruction,
         },
         instruction_data,
-    ) = read_nssa_inputs::<HTLCInstruction>();
+    ) = read_lee_inputs::<HTLCInstruction>();
 
     match instruction {
         HTLCInstruction::Lock {
@@ -171,8 +171,8 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> (Vec<AccountPostState>,
 mod tests {
     use super::*;
     use lez_htlc_program::{HTLCEscrow, HTLCState};
-    use nssa_core::account::{Account, AccountId, AccountWithMetadata, Nonce};
-    use nssa_core::program::DEFAULT_PROGRAM_ID;
+    use lee_core::account::{Account, AccountId, AccountWithMetadata, Nonce};
+    use lee_core::program::DEFAULT_PROGRAM_ID;
     use risc0_zkvm::sha::{Impl, Sha256};
 
     const AMOUNT: u128 = 1_000;
