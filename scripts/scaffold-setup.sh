@@ -21,10 +21,14 @@ LEZ_PIN=$(sed -n '/^\[repos\.lez\]/,/^\[/p' scaffold.toml | sed -n 's/^pin = "\(
 LEZ_REPO=".scaffold/lez-cache/repos/lez/${LEZ_PIN}"
 
 link_wallet() {
-  if [ -d "${LEZ_REPO}/lez/wallet" ] && [ ! -e "${LEZ_REPO}/wallet" ]; then
-    ln -s lez/wallet "${LEZ_REPO}/wallet"
-    echo "scaffold-setup: linked ${LEZ_REPO}/wallet -> lez/wallet (v0.2.0 layout bridge)"
-  fi
+  # logos-scaffold resolves wallet + sequencer paths from the repo root; the
+  # v0.2.0 repo nests both under lez/.
+  for d in wallet sequencer; do
+    if [ -d "${LEZ_REPO}/lez/${d}" ] && [ ! -e "${LEZ_REPO}/${d}" ]; then
+      ln -s "lez/${d}" "${LEZ_REPO}/${d}"
+      echo "scaffold-setup: linked ${LEZ_REPO}/${d} -> lez/${d} (v0.2.0 layout bridge)"
+    fi
+  done
 }
 
 # The repo may already be cloned from a previous (failed) run.
