@@ -700,8 +700,8 @@ pub extern "C" fn swap_ffi_stop_maker_loop() {
 /// The value is a checked-in constant (see `lez_htlc_program_id.rs`): the
 /// risc0 ImageID of the `lez-htlc` guest as DEPLOYED on the public testnet
 /// (`testnet.lez.logos.co`), which is what a swap on that network executes
-/// against. A `demo`-gated (currently `#[ignore]`d until the v0.2.0 repin)
-/// test guards it against drifting from `lez_htlc_methods::LEZ_HTLC_PROGRAM_ID`.
+/// against. A `demo`-gated test guards it against drifting from
+/// `lez_htlc_methods::LEZ_HTLC_PROGRAM_ID`.
 ///
 /// The returned pointer must be freed with `swap_ffi_free_string`.
 #[unsafe(no_mangle)]
@@ -730,17 +730,13 @@ mod tests {
     /// deterministic risc0 ImageID changes and this test fails loudly with the
     /// new value. Update `src/lez_htlc_program_id.rs` accordingly.
     /// Demo-gated because building `lez_htlc_methods` requires the risc0
-    /// toolchain; run via `cargo test -p swap-ffi --features demo -- --ignored`.
+    /// toolchain; run via `cargo test -p swap-ffi --features demo`.
     ///
-    /// Currently `#[ignore]`d: the constant is the DEPLOYED public-testnet
-    /// program ID (v0.2.0-pin guest, see `src/lez_htlc_program_id.rs`), while
-    /// this branch still pins LEZ 9fa541f whose guest builds
-    /// `dbb89112…4d02cf`. Remove the `#[ignore]` when master repins to LEZ
-    /// v0.2.0 (see branch `testnet`) — it then becomes the permanent drift
-    /// tripwire.
+    /// The constant is the DEPLOYED public-testnet program ID, which is also
+    /// the guest ImageID under this branch's LEZ v0.2.0 pin — this test is
+    /// the permanent drift tripwire.
     #[cfg(feature = "demo")]
     #[test]
-    #[ignore = "enable when master repins to LEZ v0.2.0 (see branch testnet); old pin builds dbb89112…4d02cf"]
     fn checked_in_program_id_matches_guest_image_id() {
         let id: [u32; 8] = lez_htlc_methods::LEZ_HTLC_PROGRAM_ID;
         let bytes: Vec<u8> = id.iter().flat_map(|w| w.to_le_bytes()).collect();
