@@ -8,12 +8,11 @@ Basecamp — no official-catalog listing required.
 > Platform: **macOS Apple Silicon (darwin-arm64) only** for now. Linux
 > builds are blocked on unpinned circuit hashes (issue #32).
 
-> **Status: pre-release.** No module release has been dispatched yet.
-> The first release will be cut once the LEZ v0.2.0 client repin (branch
-> `testnet`) lands on `master` — modules built from the current `master`
-> pin cannot talk to the public LEZ testnet listed below. Until a
-> release exists, the catalog URL resolves but offers no packages; this
-> guide is a preview of the flow.
+> **Status: release imminent.** The LEZ v0.2.0 client repin has landed on
+> `master`, so modules built from `master` talk to the public LEZ testnet
+> listed below. No module release has been *dispatched* yet — until the
+> first release workflow run is cut, the catalog URL resolves but offers
+> no packages; this guide is a preview of the flow.
 
 ## Prerequisites
 
@@ -50,7 +49,7 @@ The swap module needs these endpoints/values:
 | Setting | Value |
 | --- | --- |
 | LEZ sequencer RPC | `https://testnet.lez.logos.co` |
-| LEZ swap program ID | `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` (deployed on the public testnet 2026-07-21; needs the LEZ v0.2.0 client pin — on the `testnet` branch until it lands on master) |
+| LEZ swap program ID | `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` (deployed on the public testnet 2026-07-21; matches the LEZ v0.2.0 client pin on `master`) |
 | ETH HTLC contract (Sepolia) | `0x8636Fe66DFee166589a913140f14d5F57394834A` |
 | ETH RPC (Sepolia, websocket) | `wss://ethereum-sepolia-rpc.publicnode.com` |
 
@@ -74,7 +73,7 @@ Beyond the endpoints, the Config tab needs your own identities before
   maker's LEZ.
 
 Both LEZ accounts must be **initialized and funded on-chain** before a
-swap (see Funds below). See [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/testnet/docs/testnet.md) for the exact
+swap (see Funds below). See [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/master/docs/testnet.md) for the exact
 wallet-CLI commands.
 
 ## 4. Funds
@@ -94,7 +93,7 @@ wallet-CLI commands.
 
   Repeat until funded (a maker locking 1000 LEZ needs ≥7 claims). The
   `wallet` CLI comes from the `logos-execution-zone` repo at the same
-  v0.2.0 tag the module pins — see [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/testnet/docs/testnet.md) for
+  v0.2.0 tag the module pins — see [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/master/docs/testnet.md) for
   building it and for account create/init commands.
 
 ## How this catalog works (for maintainers)

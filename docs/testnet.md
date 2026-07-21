@@ -1,8 +1,8 @@
 # Public testnet swaps (Sepolia ↔ LEZ testnet)
 
-This branch (`testnet`) targets **fully public infrastructure**: the public LEZ
-testnet plus Ethereum Sepolia. The first end-to-end atomic swap on this stack
-completed on 2026-07-21 (evidence at the bottom).
+This app targets **fully public infrastructure**: the public LEZ testnet plus
+Ethereum Sepolia. The first end-to-end atomic swap on this stack completed on
+2026-07-21 (evidence at the bottom).
 
 ## Version pin — why v0.2.0 (final)
 
@@ -22,13 +22,14 @@ When the testnet upgrades, bump the seven `tag = "v0.2.0"` git deps in
 (the guest ImageID changes with the pin — redeploy the program and update
 `LEZ_HTLC_PROGRAM_ID`).
 
-`master` remains on the old `lssa @ 9fa541f` pin for the scaffold localnet
-demo. Do not merge this branch into master until the localnet (scaffold
-`[repos.lez]`) is repinned in lockstep.
+The scaffold localnet toolchain (scaffold.toml `[repos.lez]`) is pinned to the
+same `a58fbce2` commit, so the localnet demo and the public-testnet client run
+the identical LEZ version in lockstep.
 
-Note: no `logos-blockchain-circuits` tarball is needed on this branch — since
-rc5 the builtin ELFs are checked into the LEZ repo and embedded at build time
-(`LOGOS_BLOCKCHAIN_CIRCUITS` is no longer read by the pinned code).
+Note: no `logos-blockchain-circuits` tarball is needed for cargo builds of
+this app — since rc5 the builtin ELFs are checked into the LEZ repo and
+embedded at build time (`LOGOS_BLOCKCHAIN_CIRCUITS` is no longer read by the
+pinned code).
 
 ## Migration summary (old pin → v0.2.0)
 
