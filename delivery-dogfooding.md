@@ -240,6 +240,18 @@ mitigation is in `scripts/basecamp-instance.sh`.
 
 ### Upstream: `bin-macos-app` / `lgpm` variant flavor mismatch silently breaks downstream LGX install
 
+> **Phase 2 update (2026-07-21): RESOLVED upstream.** This is fixed by scaffold
+> `7c52211` + the `lgpm cli-portable` build (see
+> [scaffold#183](https://github.com/logos-co/scaffold/pull/183)). `lgs basecamp
+> install` now installs the `#lgx-portable` packages via `lgpm cli-portable`,
+> which reports the bare host variant (`darwin-arm64`, no `-dev`) — matching
+> `bin-macos-app`. All three packages install into both profiles with zero
+> variant errors. The `extract_lgx_variant` shell workaround described below is
+> **obsolete**; the primary tracking issue
+> [logos-package-manager#14](https://github.com/logos-co/logos-package-manager/issues/14)
+> needs no PR and will be closed as stale post-merge. The rest of this section
+> is kept as the original dogfooding record.
+
 **Classification:** upstream packaging/distribution issue; locally mitigated,
 not fixed.
 
