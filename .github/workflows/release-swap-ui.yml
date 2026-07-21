@@ -1,0 +1,25 @@
+name: Release swap_ui
+
+# Manually-triggered release of the `swap_ui` Basecamp UI module. Same
+# shared-pipeline delegation as release-swap.yml — see the comments
+# there. Source of truth for name + version is swap-ui/metadata.json.
+#
+# Note: swap-ui/flake.nix depends on the backend via `path:../swap-module`,
+# which resolves because the upstream action checks out this whole repo
+# and runs `nix build .#lgx-portable` inside `module_path`.
+#
+# Release swap FIRST for a given version pair — Basecamp resolves
+# swap_ui's declared `swap` dependency from the same catalog index.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    permissions:
+      contents: write
+    with:
+      module_path: swap-ui
+      # darwin-arm64 ONLY for now — see release-swap.yml / issue #32.
+      variants: "darwin-arm64"
