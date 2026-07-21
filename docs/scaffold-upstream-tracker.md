@@ -7,6 +7,19 @@ entry is grounded in concrete pain encountered while upgrading
 `logos-scaffold` master `d50caf4f86f2a913f9dc9985fb2a80f06a3e30d8`
 (41 commits ahead of `v0.1.1`).
 
+> **Phase 2 update (2026-07-21).** The project now builds against
+> `logos-scaffold` `7c52211a3f40a6ac5829905d4569712f414776ed`, which ships the
+> `[circuits]` schema (TR-07), granular `lgs basecamp build` (TR-14), and an
+> `lgpm cli-portable` install path. That landing **resolves TR-03** (portable
+> LGX install now works natively; the `extract_lgx_variant` workaround is
+> obsolete — see the entry below) and moves the project onto a scaffold-native
+> build/circuits/install flow. Two **new** findings surfaced and are now filed
+> with fixes up: a macOS `lgs basecamp launch` `LOGOS_DATA_DIR` gap
+> ([#236](https://github.com/logos-co/scaffold/issues/236) / [PR #238](https://github.com/logos-co/scaffold/pull/238))
+> and `lgs run`'s hardcoded deployable-program directory
+> ([#237](https://github.com/logos-co/scaffold/issues/237) / [PR #239](https://github.com/logos-co/scaffold/pull/239))
+> — see the [Phase 2 addendum](#phase-2-addendum-2026-07-21).
+
 Related upstream work already filed:
 
 - [logos-co/scaffold#170](https://github.com/logos-co/scaffold/issues/170) —
@@ -129,7 +142,7 @@ Terms used throughout this doc:
 
 **TL;DR.** `v0.1.1` has no `basecamp` subcommand at all. Every Logos basecamp project pins scaffold by master SHA in its README. Tag a release so projects can pin a version string.
 
-**Why this hurts us.** [`README.md` lines 102-109](../README.md#L102-L109) hard-codes the install SHA `d50caf4f...`.
+**Why this hurts us.** [`README.md`](../README.md) still hard-codes the install SHA in its Prerequisites section — originally `d50caf4f...`, now `7c52211...` as of Phase 2. Every bump is a raw commit pin because there is still no `v0.2.0` tag to reference.
 
 **Suggested fix.** Tag `v0.2.0` capturing the 0.2.0 schema + `lgs basecamp` + `lgs run` surfaces.
 
@@ -174,7 +187,9 @@ Any of these going dark in a public-reachability sense silently breaks a fresh `
 
 ### Align `bin-macos-app` and `lgpm` on the same `LGPM_PORTABLE_BUILD` mode — P0
 
-**Status.** ✅ Tracked cross-repo since 2026-05-22: primary [`logos-co/logos-package-manager#14`](https://github.com/logos-co/logos-package-manager/issues/14) remains open (the variant-suffix logic + Options A/B/C + sub-ask for loud-error-on-manifest-mismatch), companion [`logos-co/logos-basecamp#197`](https://github.com/logos-co/logos-basecamp/issues/197) is closed (basecamp-side escape hatch). Cross-links established both ways.
+**Status.** ✅ **RESOLVED (Phase 2, 2026-07-21).** Fixed upstream by [logos-co/scaffold#183](https://github.com/logos-co/scaffold/pull/183) plus the `lgpm cli-portable` build: `lgs basecamp install` now installs the `#lgx-portable` packages via `lgpm cli-portable`, whose `platformVariantsToTry()` returns the bare host variant (`darwin-arm64`, no `-dev`). Verified against this project — all three `#lgx-portable` packages (`delivery_module`, `swap`, `swap_ui`) installed into both profiles with **zero** variant errors; every variant marker + manifest `main` key is the bare `darwin-arm64`. The hand-rolled `extract_lgx_variant` shell workaround is **obsolete**. The primary tracking issue [`logos-co/logos-package-manager#14`](https://github.com/logos-co/logos-package-manager/issues/14) no longer needs a PR and will be closed as stale post-merge (the companion [`logos-co/logos-basecamp#197`](https://github.com/logos-co/logos-basecamp/issues/197) is already closed).
+
+Historical context (the original 2026-05 pain, kept for the record):
 
 **TL;DR.** `bin-macos-app` (the released AppImage-style Basecamp) accepts only `#lgx-portable`. The host-installed `lgpm` CLI accepts only `#lgx`. So `lgs basecamp install` is unusable on the distributed stack — we have to bypass `lgpm` with a hand-rolled shell extractor.
 
@@ -652,6 +667,75 @@ Compose order:
 
 ---
 
+## Phase 2 addendum (2026-07-21)
+
+Findings from migrating the project onto scaffold `7c52211` and the portable
+Basecamp + `lgpm cli-portable` install path.
+
+### TR-03 resolved
+
+See the updated [TR-03](#tr-03) status. Portable LGX install works natively via
+[scaffold#183](https://github.com/logos-co/scaffold/pull/183) + `lgpm
+cli-portable`; `extract_lgx_variant` is obsolete; LGPM #14 will be closed as
+stale post-merge.
+
+### NEW (filed): macOS `lgs basecamp launch` `LOGOS_DATA_DIR` gap — P1
+
+**Status.** ✅ Filed as [logos-co/scaffold#236](https://github.com/logos-co/scaffold/issues/236); fix up as [PR #238](https://github.com/logos-co/scaffold/pull/238) (makes `launch` set an absolute `LOGOS_DATA_DIR` for the macOS portable stack; CI green, open/mergeable). Discovered during the Phase 2 two-peer bring-up.
+
+**TL;DR.** `lgs basecamp launch <profile>` isolates each peer via
+`XDG_DATA_HOME`, but the pinned `bin-macos-app` Basecamp (`a746cdbc` / v0.1.1)
+ignores XDG on macOS and reads installed modules from `LOGOS_DATA_DIR`. Scaffold
+installs the modules into the profile's XDG data dir, but Basecamp never loads
+them.
+
+**Critical subtlety.** `LOGOS_DATA_DIR` must be **absolute**. A relative value
+loads the backend modules but breaks `@rpath` resolution for the dlopen'd
+`main_ui` / `package_manager_ui` dylibs (`shared library was not found`), so the
+shell UI never renders. An absolute path loads everything.
+
+**Why this hurts us.** Scaffold cannot portably express an absolute per-profile
+path in a committed `scaffold.toml`. The two peers are currently launched
+through the committed app-owned launch bridge `scripts/basecamp-launch.sh`, which
+sets an absolute `LOGOS_DATA_DIR` per profile before exec'ing the portable
+Basecamp. On Linux, XDG isolation works and no bridge is needed.
+
+**Suggested fix.** `lgs basecamp launch` should compute and set an absolute
+`LOGOS_DATA_DIR` for a `bin-macos-app` attr on macOS, or resolve a relative
+profile-env `LOGOS_DATA_DIR` to absolute. Filed as
+[logos-co/scaffold#236](https://github.com/logos-co/scaffold/issues/236); fix up
+as [PR #238](https://github.com/logos-co/scaffold/pull/238).
+
+### NEW (filed): `lgs run` hardcodes the deployable-program directory — P1
+
+**Status.** ✅ Filed as [logos-co/scaffold#237](https://github.com/logos-co/scaffold/issues/237); fix up as [PR #239](https://github.com/logos-co/scaffold/pull/239) (adds `deploy = false` on `[run]` / `[run.profiles.<name>]`, defaulting to true). Discovered during Phase 2 while validating the
+`[run.profiles.{demo,test}]` blocks.
+
+**TL;DR.** `lgs run --profile demo` / `--profile test` do **not** work in this
+repo. Scaffold's deploy step (`deploy.rs` `discover_deployable_programs`)
+hardcodes the deployable-program directory as
+`<project_root>/methods/guest/src/bin`, but this repo keeps its guest program at
+`programs/lez-htlc/methods/guest/`. `lgs run` therefore fails with a
+missing-deployable-program error before reaching the `post_deploy` hook.
+
+**Why this hurts us.** The `[run.profiles.demo]` / `[run.profiles.test]` blocks
+in `scaffold.toml` are declarative-only today — the working headless swap and
+test paths are `make demo-makefile` / `make test-makefile` (the app's own `demo`
+binary already deploys the LEZ HTLC program, making scaffold's deploy step
+redundant here).
+
+**Suggested fix.** Let `lgs run` (and `lgs deploy`) resolve the deployable
+program directory from `scaffold.toml` (e.g. a `[run].program_dir` or per-program
+path) instead of hardcoding `methods/guest/src/bin`, so repos with a non-standard
+program layout can adopt the pipeline. Filed as
+[logos-co/scaffold#237](https://github.com/logos-co/scaffold/issues/237); fix up
+as [PR #239](https://github.com/logos-co/scaffold/pull/239), which adds
+`deploy = false` on `[run]` / `[run.profiles.<name>]` (default true). Once #239
+merges into a scaffold release we adopt, adding `deploy = false` to
+`[run.profiles.demo]` / `[run.profiles.test]` in `scaffold.toml` re-enables
+`lgs run` for this repo (the app's own `demo` binary already deploys the LEZ HTLC
+program, so scaffold's deploy step is redundant here).
+
 ## Tracker change-log
 
 - **2026-05-20** — Initial draft (TR-01 … TR-13), created during the `eth-lez-atomic-swaps` scaffold 0.1.1 → 0.2.0 upgrade pass against scaffold master `d50caf4`.
@@ -668,3 +752,4 @@ Compose order:
 - **2026-05-22** — TR-20 filed standalone as [logos-co/scaffold#176](https://github.com/logos-co/scaffold/issues/176) (`lgs basecamp develop <module>`; now closed).
 - **2026-05-22** — TR-11 filed as doc PR [logos-co/scaffold#177](https://github.com/logos-co/scaffold/pull/177) blessing hand-authored `[modules.*]` tables for drift-detection / declarative-only adoption; now merged.
 - **2026-05-22** — TR-13 filed as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178) noting that `bin-macos-app --user-dir` is orthogonal to scaffold's per-profile XDG isolation; now merged. **All 19 tracker entries are now tracked upstream, closed/merged, or retired (TR-18).** 7 GitHub issues + 2 doc PRs filed across logos-co/scaffold + logos-co/logos-package-manager + logos-co/logos-basecamp.
+- **2026-07-21 (Phase 2)** — Project migrated onto `logos-scaffold` `7c52211`, which lands the `[circuits]` schema (TR-07), `lgs basecamp build` (TR-14), and the `lgpm cli-portable` install path. **TR-03 marked RESOLVED** (portable install works via [scaffold#183](https://github.com/logos-co/scaffold/pull/183) + `lgpm cli-portable`; `extract_lgx_variant` obsolete; LGPM #14 to be closed as stale post-merge). Added a [Phase 2 addendum](#phase-2-addendum-2026-07-21) recording two new P1s, now filed with fixes up: the macOS `lgs basecamp launch` `LOGOS_DATA_DIR` gap ([#236](https://github.com/logos-co/scaffold/issues/236) / [PR #238](https://github.com/logos-co/scaffold/pull/238)) and `lgs run`'s hardcoded `methods/guest/src/bin` deployable-program directory ([#237](https://github.com/logos-co/scaffold/issues/237) / [PR #239](https://github.com/logos-co/scaffold/pull/239), which adds `deploy = false` on `[run]`/`[run.profiles.<name>]` to re-enable `lgs run` here once adopted). Until then `make demo-makefile` / `make test-makefile` remain the working paths.

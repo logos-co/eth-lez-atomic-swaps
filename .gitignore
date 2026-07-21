@@ -29,7 +29,9 @@ swap-module/generated_code/
 swap-ui/result
 swap-ui/result-*
 
-# Two-Basecamp dogfooding instances (created by `make basecamp-init-{maker,taker}`)
+# Legacy two-Basecamp instance dirs from the pre-scaffold flow
+# (the `make basecamp-init-{maker,taker}` targets no longer exist; kept as a
+# safety ignore for older working copies)
 .basecamp/
 swap-ui/.direnv
 swap-ui/flake.lock
