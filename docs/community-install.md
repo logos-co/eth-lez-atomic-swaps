@@ -43,7 +43,7 @@ The swap module needs these endpoints/values:
 | Setting | Value |
 | --- | --- |
 | LEZ sequencer RPC | `https://testnet.lez.logos.co` |
-| LEZ swap program ID | **TODO** — will be filled in after the public-testnet program deploy completes |
+| LEZ swap program ID | `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` (deployed on the public testnet 2026-07-21; needs the LEZ v0.2.0 client pin — on the `testnet` branch until it lands on master) |
 | ETH HTLC contract (Sepolia) | `0x8636Fe66DFee166589a913140f14d5F57394834A` |
 | ETH RPC (Sepolia, websocket) | `wss://ethereum-sepolia-rpc.publicnode.com` |
 
