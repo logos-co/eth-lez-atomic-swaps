@@ -45,6 +45,35 @@
             url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.4.2/logos-blockchain-circuits-v0.4.2-${circuitsPlatform}.tar.gz";
             sha256 = circuitsHash;
           };
+          # Prebuilt rapidsnark static libs for rust-rapidsnark's build.rs
+          # (pulled in at the v0.2.0 pin via logos-blockchain-circuits-prover,
+          # which forces the static-rapidsnark feature). Outside nix the build
+          # script downloads these itself (see download_rapidsnark.sh in
+          # logos-blockchain-rust-rapidsnark); the sandbox has no network, so
+          # we prefetch the same per-target release asset and point
+          # RAPIDSNARK_LIB_DIR at its lib/ dir.
+          rapidsnarkVersion = "v0.0.8";
+          rapidsnarkAsset = {
+            aarch64-darwin = {
+              url = "https://github.com/iden3/rapidsnark/releases/download/${rapidsnarkVersion}/rapidsnark-macOS-arm64-${rapidsnarkVersion}.zip";
+              sha256 = "1600dzr7hjg6lc5r0cdh189l7019djvy4cz2qyn75z5vrac4qs0f";
+            };
+            x86_64-darwin = {
+              url = "https://github.com/iden3/rapidsnark/releases/download/${rapidsnarkVersion}/rapidsnark-macOS-x86_64-${rapidsnarkVersion}.zip";
+              sha256 = lib.fakeSha256;
+            };
+            x86_64-linux = {
+              url = "https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark/releases/download/rapidsnark-pic-${rapidsnarkVersion}/rapidsnark-linux-x86_64-pic-${rapidsnarkVersion}.zip";
+              sha256 = lib.fakeSha256;
+            };
+            aarch64-linux = {
+              url = "https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark/releases/download/rapidsnark-pic-${rapidsnarkVersion}/rapidsnark-linux-aarch64-pic-${rapidsnarkVersion}.zip";
+              sha256 = lib.fakeSha256;
+            };
+          }.${system} or (throw "no rapidsnark asset mapping for ${system}");
+          rapidsnark = pkgs.fetchzip {
+            inherit (rapidsnarkAsset) url sha256;
+          };
           # LEZ v0.2.0 source (same commit as the Cargo.toml `tag = "v0.2.0"`
           # pins): its checked-in `artifacts/` tree (builtin program ELFs) is
           # copied into the cargo vendor dir below, because build_utils
@@ -74,6 +103,7 @@
             cargoBuildFlags = [ "-p" "swap-ffi" "--no-default-features" ];
             doCheck = false;
             LOGOS_BLOCKCHAIN_CIRCUITS = circuits;
+            RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 
             postPatch = ''
               cp -R ${lezSource}/artifacts "$cargoDepsCopy/artifacts"
