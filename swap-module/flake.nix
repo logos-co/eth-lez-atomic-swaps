@@ -45,9 +45,14 @@
             url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.4.2/logos-blockchain-circuits-v0.4.2-${circuitsPlatform}.tar.gz";
             sha256 = circuitsHash;
           };
-          lssaSource = pkgs.fetchzip {
-            url = "https://github.com/logos-blockchain/lssa/archive/9fa541f3d1cfa2d4415b7c3cf4cd8954a83b78c7.tar.gz";
-            sha256 = "1ay400q0yd5rj80vgkpg1pinxh1jla2al5sdrnyyb7m43rkqn44a";
+          # LEZ v0.2.0 source (same commit as the Cargo.toml `tag = "v0.2.0"`
+          # pins): its checked-in `artifacts/` tree (builtin program ELFs) is
+          # copied into the cargo vendor dir below, because build_utils
+          # resolves `../artifacts/...` relative to its own (vendored)
+          # manifest dir via a compile-time env! — i.e. `<vendor>/artifacts`.
+          lezSource = pkgs.fetchzip {
+            url = "https://github.com/logos-blockchain/logos-execution-zone/archive/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a.tar.gz";
+            sha256 = "0f9vx32kx5y5cscnzb3xs6s9p2lsazs8fw1n1gpvxzn3g73w2x9s";
           };
           swapFfiSource = pkgs.runCommand "swap-ffi-source" {} ''
             cp -R ${swap-source}/. $out
@@ -71,8 +76,7 @@
             LOGOS_BLOCKCHAIN_CIRCUITS = circuits;
 
             postPatch = ''
-              mkdir -p "$cargoDepsCopy/artifacts"
-              cp -R ${lssaSource}/artifacts/program_methods "$cargoDepsCopy/artifacts/program_methods"
+              cp -R ${lezSource}/artifacts "$cargoDepsCopy/artifacts"
             '';
 
             installPhase = ''
