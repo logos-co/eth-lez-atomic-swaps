@@ -1,4 +1,4 @@
-use nssa_core::account::AccountId;
+use lee_core::account::AccountId;
 use serde::{Deserialize, Serialize};
 
 /// Instructions the HTLC program can execute.
@@ -135,7 +135,7 @@ impl HTLCEscrow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nssa_core::account::AccountId;
+    use lee_core::account::AccountId;
 
     fn sample_escrow() -> HTLCEscrow {
         HTLCEscrow {

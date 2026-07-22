@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use alloy::primitives::Address;
-use nssa_core::account::AccountId;
-use nssa_core::program::ProgramId;
+use lee_core::account::AccountId;
+use lee_core::program::ProgramId;
 
 use crate::error::{Result, SwapError};
 

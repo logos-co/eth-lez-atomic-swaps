@@ -1,18 +1,20 @@
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
-use nssa_core::{
+use lee_core::{
     account::{Account, AccountId, AccountWithMetadata},
-    program::{AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput, read_nssa_inputs},
+    program::{AccountPostState, Claim, PdaSeed, ProgramInput, ProgramOutput, read_lee_inputs},
 };
 use risc0_zkvm::sha::{Impl, Sha256};
 
 fn main() {
     let (
         ProgramInput {
+            self_program_id,
+            caller_program_id,
             pre_states,
             instruction,
         },
         instruction_data,
-    ) = read_nssa_inputs::<HTLCInstruction>();
+    ) = read_lee_inputs::<HTLCInstruction>();
 
     match instruction {
         HTLCInstruction::Lock {
@@ -22,17 +24,37 @@ fn main() {
             timelock,
         } => {
             let post_states = execute_lock(&pre_states, hashlock, taker_id, amount, timelock);
-            ProgramOutput::new(instruction_data, pre_states, post_states).write();
+            ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
+                instruction_data,
+                pre_states,
+                post_states,
+            )
+            .write();
         }
         HTLCInstruction::Claim { preimage } => {
             let post_states = execute_claim(&pre_states, &preimage);
-            ProgramOutput::new(instruction_data, pre_states, post_states).write();
+            ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
+                instruction_data,
+                pre_states,
+                post_states,
+            )
+            .write();
         }
         HTLCInstruction::Refund => {
             let (post_states, timelock) = execute_refund(&pre_states);
-            ProgramOutput::new(instruction_data, pre_states, post_states)
-                .with_timestamp_validity_window(timelock..)
-                .write();
+            ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
+                instruction_data,
+                pre_states,
+                post_states,
+            )
+            .with_timestamp_validity_window(timelock..)
+            .write();
         }
     };
 }
@@ -171,8 +193,8 @@ fn execute_refund(pre_states: &[AccountWithMetadata]) -> (Vec<AccountPostState>,
 mod tests {
     use super::*;
     use lez_htlc_program::{HTLCEscrow, HTLCState};
-    use nssa_core::account::{Account, AccountId, AccountWithMetadata, Nonce};
-    use nssa_core::program::DEFAULT_PROGRAM_ID;
+    use lee_core::account::{Account, AccountId, AccountWithMetadata, Nonce};
+    use lee_core::program::DEFAULT_PROGRAM_ID;
     use risc0_zkvm::sha::{Impl, Sha256};
 
     const AMOUNT: u128 = 1_000;

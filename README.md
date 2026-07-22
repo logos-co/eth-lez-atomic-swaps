@@ -23,7 +23,7 @@ make demo-makefile
 make test-makefile
 ```
 
-`make demo-makefile` runs `NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo`: it starts its own scaffold localnet, deploys the LEZ HTLC program, starts Anvil, deploys the Ethereum HTLC, completes a full swap headlessly, and tears the localnet down. `make test-makefile` runs the contracts + localnet + `cargo test` flow.
+`make demo-makefile` runs `LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo`: it starts its own scaffold localnet, deploys the LEZ HTLC program, starts Anvil, deploys the Ethereum HTLC, completes a full swap headlessly, and tears the localnet down. `make test-makefile` runs the contracts + localnet + `cargo test` flow.
 
 > **Note — `lgs run` profiles are currently blocked in this repo.** The scaffold-native `make demo` / `make test` wrappers call `lgs run --profile demo` / `--profile test`, but `lgs run` does not work here today. Its deploy step hardcodes the deployable-program directory as `<project_root>/methods/guest/src/bin`, while this repo keeps its guest program at `programs/lez-htlc/methods/guest/`, so `lgs run` fails with a missing-deployable-program error. The app's own `demo` binary deploys the LEZ HTLC program itself, so scaffold's deploy step is redundant here anyway. This is filed upstream as [Scaffold issue #237](https://github.com/logos-co/scaffold/issues/237), with fix [PR #239](https://github.com/logos-co/scaffold/pull/239) adding a `deploy = false` toggle on `[run]` / `[run.profiles.<name>]` (default true). Once PR #239 merges into a scaffold release we adopt, adding `deploy = false` to `[run.profiles.demo]` / `[run.profiles.test]` in `scaffold.toml` re-enables `lgs run` for this repo. Until then, use the `-makefile` targets above.
 
@@ -241,7 +241,7 @@ For a quick automated end-to-end swap without the UI:
 make demo-makefile
 ```
 
-`make demo-makefile` runs `NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo`, which manages its own scaffold localnet, deploys the LEZ HTLC program, starts app-owned Anvil, deploys the Ethereum HTLC, and completes a full swap headlessly. The scaffold-native `make demo` / `lgs run --profile demo` path is currently blocked — see the note under [Local Checks](#default-local-checks).
+`make demo-makefile` runs `LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo`, which manages its own scaffold localnet, deploys the LEZ HTLC program, starts app-owned Anvil, deploys the Ethereum HTLC, and completes a full swap headlessly. The scaffold-native `make demo` / `lgs run --profile demo` path is currently blocked — see the note under [Local Checks](#default-local-checks).
 
 For manual CLI use, start the infrastructure and leave it running:
 
@@ -283,7 +283,7 @@ Single integration test flow:
 
 ```bash
 make localnet-start
-NSSA_WALLET_HOME_DIR=.scaffold/wallet cargo test --test <file> <name> -- --nocapture
+LEE_WALLET_HOME_DIR=.scaffold/wallet cargo test --test <file> <name> -- --nocapture
 make localnet-stop
 ```
 
@@ -386,7 +386,7 @@ The scaffold-native `make demo` / `make test` wrappers (`lgs run --profile demo`
 |                                |       |               |
 |                                v       v               |
 |                          +-----+--+ +--+-------+       |
-|                          | alloy  | | nssa     |       |
+|                          | alloy  | | lee      |       |
 |                          | (ETH)  | | (LEZ)    |       |
 |                          +--------+ +----------+       |
 +--------------------------------------------------------+
@@ -416,8 +416,8 @@ For more detail on the messaging side, see [delivery-dogfooding.md](delivery-dog
   Install RISC Zero and run `rzup install rust`, then rerun the command that failed.
 - Git pull blocked by untracked `scaffold.toml`
   Older clones sometimes had that file gitignored. Move it aside, pull again, then compare your old copy with the checked-in [`scaffold.toml`](scaffold.toml).
-- `make demo-makefile` hangs silently at `[taker] Locking ETH`
-  The LEZ HTLC lock is two transactions — a Lock instruction, then a funds transfer to the escrow PDA — and the orchestrator submits the transfer without confirming it executed. If the maker wallet holds fewer than 1000 LEZ, the sequencer rejects the transfer (`Guest panicked: Sender has insufficient balance`, visible in `.scaffold/logs/sequencer.log`) and both peers' watchers then poll a zero-balance escrow forever, so the demo spins with no error. Remedy: top up the maker (`NSSA_WALLET_HOME_DIR=.scaffold/wallet <lez wallet binary> pinata claim --to <maker account>` — each claim credits 150 LEZ; repeat until the maker holds ≥ 1000) and rerun. This was root-caused 2026-07-21, after which a clean standalone `make demo-makefile` completed the full atomic swap end-to-end (both peers `Completed`, preimage revealed, ETH + LEZ claims). The missing transfer-confirmation and resulting silent spin are a known app-side robustness gap (candidate future fix: confirm the funds transfer landed and surface the watcher wait-reason instead of polling indefinitely).
+- Maker fails with an escrow-funding error (or, taker-side, the demo waits then errors)
+  The LEZ HTLC lock is two transactions — a Lock instruction, then a funds transfer to the escrow PDA. The maker's `lock()` confirms the transfer landed and returns a hard error (after a bounded ~300s poll) if it didn't; the taker's watcher logs rate-limited warnings while an escrow sits unfunded. The usual cause: the maker wallet holds fewer than the demo's 1000 LEZ, so the sequencer rejects the transfer (`Guest panicked: Sender has insufficient balance`, visible in `.scaffold/logs/sequencer.log`). Remedy: top up the maker (`LEE_WALLET_HOME_DIR=.scaffold/wallet <lez wallet binary> pinata claim --to <maker account>` — each claim credits 150 LEZ; repeat until the maker holds ≥ 1000) and rerun. Root-caused 2026-07-21; the original silent-infinite-spin failure mode was fixed by the funding-confirmation change that ships in this repo.
 
 ## Maintainer Notes
 

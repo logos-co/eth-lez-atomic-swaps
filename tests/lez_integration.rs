@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use common::transaction::NSSATransaction;
+use common::transaction::LeeTransaction;
 use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use lez_htlc_program::HTLCState;
-use nssa::{
+use lee::{
     AccountId, ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
-use nssa_core::program::ProgramId;
+use lee_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use sha2::{Digest, Sha256};
 use swap_orchestrator::{
@@ -83,9 +83,9 @@ impl TestEnv {
 
 async fn setup() -> TestEnv {
     // Read scaffold wallet via WalletCore.
-    let wc = scaffold::wallet_core(&scaffold::wallet_home())
+    let mut wc = scaffold::wallet_core(&scaffold::wallet_home())
         .expect("scaffold wallet not found — run `make setup` first");
-    let accounts = scaffold::public_accounts(&wc).unwrap();
+    let accounts = scaffold::public_accounts(&mut wc).unwrap();
     let maker_id = accounts[0].account_id;
     let taker_id = accounts[1].account_id;
     let sequencer_url = scaffold::sequencer_url_of(&wc);
@@ -103,7 +103,7 @@ async fn setup() -> TestEnv {
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
     wc.sequencer_client
-        .send_transaction(NSSATransaction::ProgramDeployment(tx))
+        .send_transaction(LeeTransaction::ProgramDeployment(tx))
         .await
         .unwrap();
 

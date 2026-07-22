@@ -24,13 +24,20 @@ alloy = { version = "1", features = [
 ] }
 futures-util = "0.3"
 
-# LEZ
-nssa = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f", features = ["host"] }
-common = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
-wallet = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f", features = ["client"] }
-sequencer_service_protocol = { git = "https://github.com/logos-blockchain/lssa", rev = "9fa541f" }
+# LEZ — pinned to v0.2.0 (final), the exact version the public testnet
+# (https://testnet.lez.logos.co) runs: all five builtin program ImageIDs
+# reported by its getProgramIds RPC match the v0.2.0 artifacts bit-for-bit
+# (verified 2026-07-21). Builtin IDs are computed client-side from embedded
+# ELFs, so this pin MUST track the deployed sequencer version exactly.
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["client"] }
+sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+# Builtin program registry (authenticated_transfer & co. moved here in v0.2.0)
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["artifacts"] }
+authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
 # LEZ HTLC types (HTLCInstruction, HTLCEscrow, HTLCState)
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 

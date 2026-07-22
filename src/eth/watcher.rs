@@ -1,11 +1,10 @@
 use alloy::primitives::{Address, FixedBytes};
 use alloy::providers::Provider;
-use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::client::EthHTLC;
-use crate::error::{Result, SwapError};
+use crate::error::Result;
 
 #[derive(Debug, Clone)]
 pub enum EthHtlcEvent {
@@ -26,101 +25,136 @@ pub enum EthHtlcEvent {
     },
 }
 
-/// Subscribe to all EthHTLC events via WebSocket and forward them to `tx`.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+const REPLAY_BLOCKS: u64 = 256;
+
+/// Watch EthHTLC events by polling `eth_getLogs` and forward them to `tx`.
 ///
-/// Replays historical Locked events from the last 256 blocks before subscribing
-/// to new events, so events emitted before the watcher started are not missed.
+/// Replays historical events from the last 256 blocks on startup, then polls
+/// incrementally. Polling `eth_getLogs` (rather than `watch()`/`subscribe()`)
+/// is deliberate: public RPC providers aggressively expire filter IDs and
+/// pubsub subscriptions, which silently kills stream-based watchers. Log
+/// queries are stateless and survive provider restarts/load-balancing.
 pub async fn watch_events(
     client: &super::client::EthClient,
     tx: mpsc::Sender<EthHtlcEvent>,
 ) -> Result<()> {
     let contract = EthHTLC::new(client.contract_address(), client.provider().clone());
+    let provider = client.provider();
 
-    // Replay recent Locked events so we don't miss locks that happened before
-    // the watcher started. Query from (current - 256) to latest.
-    let current_block = client.provider().get_block_number().await.unwrap_or(0);
-    let from_block = current_block.saturating_sub(256);
-
-    let historical_locked = contract
-        .Locked_filter()
-        .from_block(from_block)
-        .query()
-        .await
-        .unwrap_or_default();
-
-    for (event, _) in &historical_locked {
-        debug!(swap_id = %event.swapId, "replaying historical Locked event");
-        let ev = EthHtlcEvent::Locked {
-            swap_id: event.swapId,
-            sender: event.sender,
-            recipient: event.recipient,
-            amount: event.amount,
-            hashlock: event.hashlock,
-            timelock: event.timelock,
-        };
-        if tx.send(ev).await.is_err() {
-            return Ok(());
+    // Retry the initial lookup rather than defaulting to 0: a genesis-anchored
+    // from_block makes every subsequent eth_getLogs span the whole chain, which
+    // public RPCs reject — wedging the watcher permanently.
+    let current_block = loop {
+        match provider.get_block_number().await {
+            Ok(b) => break b,
+            Err(e) => {
+                warn!(%e, "transient error fetching initial block number, will retry");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
         }
-    }
-
-    // Now subscribe to new events going forward.
-    let locked = contract
-        .Locked_filter()
-        .watch()
-        .await
-        .map_err(|e| SwapError::EthRpc(format!("subscribe Locked failed: {e}")))?;
-
-    let claimed = contract
-        .Claimed_filter()
-        .watch()
-        .await
-        .map_err(|e| SwapError::EthRpc(format!("subscribe Claimed failed: {e}")))?;
-
-    let refunded = contract
-        .Refunded_filter()
-        .watch()
-        .await
-        .map_err(|e| SwapError::EthRpc(format!("subscribe Refunded failed: {e}")))?;
-
-    let mut locked_stream = locked.into_stream();
-    let mut claimed_stream = claimed.into_stream();
-    let mut refunded_stream = refunded.into_stream();
+    };
+    let mut from_block = current_block.saturating_sub(REPLAY_BLOCKS);
 
     loop {
-        tokio::select! {
-            Some(log) = locked_stream.next() => {
-                if let Ok((event, _)) = log {
-                    let ev = EthHtlcEvent::Locked {
-                        swap_id: event.swapId,
-                        sender: event.sender,
-                        recipient: event.recipient,
-                        amount: event.amount,
-                        hashlock: event.hashlock,
-                        timelock: event.timelock,
-                    };
-                    if tx.send(ev).await.is_err() { return Ok(()); }
-                }
+        let latest = match provider.get_block_number().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(%e, "transient error fetching block number, will retry");
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
             }
-            Some(log) = claimed_stream.next() => {
-                if let Ok((event, _)) = log {
-                    let ev = EthHtlcEvent::Claimed {
-                        swap_id: event.swapId,
-                        preimage: event.preimage.into(),
-                    };
-                    if tx.send(ev).await.is_err() { return Ok(()); }
-                }
-            }
-            Some(log) = refunded_stream.next() => {
-                if let Ok((event, _)) = log {
-                    let ev = EthHtlcEvent::Refunded {
-                        swap_id: event.swapId,
-                    };
-                    if tx.send(ev).await.is_err() { return Ok(()); }
-                }
-            }
-            else => break,
-        }
-    }
+        };
 
-    Ok(())
+        if latest >= from_block {
+            // Locked
+            match contract
+                .Locked_filter()
+                .from_block(from_block)
+                .to_block(latest)
+                .query()
+                .await
+            {
+                Ok(events) => {
+                    for (event, _) in events {
+                        debug!(swap_id = %event.swapId, "Locked event");
+                        let ev = EthHtlcEvent::Locked {
+                            swap_id: event.swapId,
+                            sender: event.sender,
+                            recipient: event.recipient,
+                            amount: event.amount,
+                            hashlock: event.hashlock,
+                            timelock: event.timelock,
+                        };
+                        if tx.send(ev).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(%e, "transient error querying Locked logs, will retry");
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+
+            // Claimed
+            match contract
+                .Claimed_filter()
+                .from_block(from_block)
+                .to_block(latest)
+                .query()
+                .await
+            {
+                Ok(events) => {
+                    for (event, _) in events {
+                        debug!(swap_id = %event.swapId, "Claimed event");
+                        let ev = EthHtlcEvent::Claimed {
+                            swap_id: event.swapId,
+                            preimage: event.preimage.into(),
+                        };
+                        if tx.send(ev).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(%e, "transient error querying Claimed logs, will retry");
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+
+            // Refunded
+            match contract
+                .Refunded_filter()
+                .from_block(from_block)
+                .to_block(latest)
+                .query()
+                .await
+            {
+                Ok(events) => {
+                    for (event, _) in events {
+                        debug!(swap_id = %event.swapId, "Refunded event");
+                        let ev = EthHtlcEvent::Refunded {
+                            swap_id: event.swapId,
+                        };
+                        if tx.send(ev).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(%e, "transient error querying Refunded logs, will retry");
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+
+            // All three ranges succeeded — advance the cursor.
+            from_block = latest + 1;
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }

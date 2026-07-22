@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use nssa::AccountId;
+use lee::AccountId;
 
 use crate::error::{Result, SwapError};
 
@@ -50,35 +50,43 @@ pub fn wallet_core(home: &Path) -> Result<wallet::WalletCore> {
     if storage_path.exists() {
         wallet::WalletCore::new_update_chain(config_path, storage_path, None)
     } else {
-        wallet::WalletCore::new_init_storage(config_path, storage_path, None, String::new())
+        // rc5: new_init_storage takes a password and also returns the mnemonic;
+        // we use an empty password and discard the mnemonic (throwaway wallets).
+        wallet::WalletCore::new_init_storage(config_path, storage_path, None, "")
+            .map(|(wc, _mnemonic)| wc)
     }
     .map_err(|e| SwapError::Scaffold(format!("failed to initialize wallet: {e}")))
 }
 
-/// Extract public accounts from a WalletCore's config.
-/// Returns at least 2 accounts (maker + taker) or errors.
-pub fn public_accounts(wc: &wallet::WalletCore) -> Result<Vec<WalletAccount>> {
-    let mut result = Vec::new();
-    if let Some(initial_accounts) = &wc.config().initial_accounts {
-        for entry in initial_accounts {
-            if let wallet::config::InitialAccountData::Public(pub_data) = entry {
-                let account_id = pub_data.account_id;
-                let account_id_b58 = base58::ToBase58::to_base58(account_id.value().as_slice());
-                result.push(WalletAccount {
-                    account_id,
-                    account_id_b58,
-                });
+/// Extract public accounts from the wallet's key chain, creating new ones if
+/// fewer than 2 exist (rc5 wallets no longer carry `initial_accounts` in
+/// config — accounts live in the HD key chain inside storage).
+/// Returns at least 2 accounts (maker + taker).
+pub fn public_accounts(wc: &mut wallet::WalletCore) -> Result<Vec<WalletAccount>> {
+    let mut ids: Vec<_> = wc
+        .storage()
+        .key_chain()
+        .public_account_ids()
+        .map(|(id, _chain_index)| id)
+        .collect();
+
+    while ids.len() < 2 {
+        let (id, _chain_index) = wc.create_new_account_public(None);
+        wc.store_persistent_data()
+            .map_err(|e| SwapError::Scaffold(format!("failed to persist wallet storage: {e}")))?;
+        ids.push(id);
+    }
+
+    Ok(ids
+        .into_iter()
+        .map(|account_id| {
+            let account_id_b58 = base58::ToBase58::to_base58(account_id.value().as_slice());
+            WalletAccount {
+                account_id,
+                account_id_b58,
             }
-        }
-    }
-
-    if result.len() < 2 {
-        return Err(SwapError::Scaffold(
-            "wallet config needs at least 2 public accounts (maker + taker)".into(),
-        ));
-    }
-
-    Ok(result)
+        })
+        .collect())
 }
 
 /// Get the sequencer URL string from a WalletCore's config.

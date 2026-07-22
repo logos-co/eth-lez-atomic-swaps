@@ -3,7 +3,7 @@
 //! Prints the deterministic config values for local testing.
 //! Does NOT deploy anything — just computes keys and IDs.
 
-use nssa::{AccountId, PrivateKey, PublicKey};
+use lee::{AccountId, PrivateKey, PublicKey};
 
 fn lez_key(seed: u8) -> (String, String) {
     let key = PrivateKey::try_new([seed; 32]).unwrap();
