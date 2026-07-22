@@ -107,6 +107,9 @@
             # surfaces it via swap_ffi_default_lez_htlc_program_id().
             cargoBuildFlags = [ "-p" "swap-ffi" "--no-default-features" ];
             doCheck = false;
+            # pyo3-ffi (transitive at the v0.2.0 pin) probes for a python3
+            # interpreter in its build script.
+            nativeBuildInputs = [ pkgs.python3 ];
             LBC_ROOT_DIR = circuits;
             RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 
