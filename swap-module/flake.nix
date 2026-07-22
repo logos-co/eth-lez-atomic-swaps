@@ -33,16 +33,21 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
+          # logos-blockchain-circuits prebuilt artifact. Version must match the
+          # logos-blockchain-circuits-* crates in the workspace lock (v0.5.3 at
+          # the LEZ v0.2.0 pin); their build scripts resolve it via
+          # LBC_ROOT_DIR (the pre-0.5 LOGOS_BLOCKCHAIN_CIRCUITS env is gone)
+          # and would otherwise try to download it inside the sandbox.
           circuitsPlatform = {
             aarch64-darwin = "macos-aarch64";
             x86_64-linux = "linux-x86_64";
             aarch64-linux = "linux-aarch64";
           }.${system} or (throw "logos-blockchain-circuits is not published for ${system}");
           circuitsHash = {
-            aarch64-darwin = "1s5k0fmb8zic2pb03102vny9w1akqwzrp96ajmvzh9ylvdjbf7f0";
+            aarch64-darwin = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
           }.${system} or lib.fakeSha256;
           circuits = pkgs.fetchzip {
-            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.4.2/logos-blockchain-circuits-v0.4.2-${circuitsPlatform}.tar.gz";
+            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.3/logos-blockchain-circuits-v0.5.3-${circuitsPlatform}.tar.gz";
             sha256 = circuitsHash;
           };
           # Prebuilt rapidsnark static libs for rust-rapidsnark's build.rs
@@ -102,7 +107,7 @@
             # surfaces it via swap_ffi_default_lez_htlc_program_id().
             cargoBuildFlags = [ "-p" "swap-ffi" "--no-default-features" ];
             doCheck = false;
-            LOGOS_BLOCKCHAIN_CIRCUITS = circuits;
+            LBC_ROOT_DIR = circuits;
             RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 
             postPatch = ''
