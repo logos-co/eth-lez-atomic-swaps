@@ -17,7 +17,7 @@ The pin **must track the deployed sequencer version exactly**, because builtin
 program IDs are computed client-side from ELFs embedded at build time. A
 client pinned to any other tag produces transfer transactions whose
 `program_id` the sequencer does not recognize — they are silently dropped.
-When the testnet upgrades, bump the seven `tag = "v0.2.0"` git deps in
+When the testnet upgrades, bump the eight `tag = "v0.2.0"` git deps in
 `Cargo.toml` + one in `programs/lez-htlc/methods/guest/Cargo.toml` and rebuild
 (the guest ImageID changes with the pin — redeploy the program and update
 `LEZ_HTLC_PROGRAM_ID`).

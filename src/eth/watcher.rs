@@ -42,7 +42,18 @@ pub async fn watch_events(
     let contract = EthHTLC::new(client.contract_address(), client.provider().clone());
     let provider = client.provider();
 
-    let current_block = provider.get_block_number().await.unwrap_or(0);
+    // Retry the initial lookup rather than defaulting to 0: a genesis-anchored
+    // from_block makes every subsequent eth_getLogs span the whole chain, which
+    // public RPCs reject — wedging the watcher permanently.
+    let current_block = loop {
+        match provider.get_block_number().await {
+            Ok(b) => break b,
+            Err(e) => {
+                warn!(%e, "transient error fetching initial block number, will retry");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        }
+    };
     let mut from_block = current_block.saturating_sub(REPLAY_BLOCKS);
 
     loop {
