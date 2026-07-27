@@ -13,19 +13,19 @@ This repo includes:
 Run setup once from the repo root:
 
 ```bash
-lgs setup
+make setup
 ```
+
+`make setup` wraps `lgs setup` in [`scripts/scaffold-setup.sh`](scripts/scaffold-setup.sh), which bridges two gaps scaffold has with the pinned LEZ v0.2.0 repo layout (wallet crate under `lez/`, no preconfigured debug wallet account — upstream [Scaffold #240](https://github.com/logos-co/scaffold/issues/240)): it retries setup with a layout symlink and seeds the default wallet address `lgs run`'s topup step needs. Use `make setup` rather than plain `lgs setup` until #240 lands in the adopted pin.
 
 For the headless demo swap and the test suite, use:
 
 ```bash
-make demo-makefile
-make test-makefile
+make demo
+make test
 ```
 
-`make demo-makefile` runs `LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo`: it starts its own scaffold localnet, deploys the LEZ HTLC program, starts Anvil, deploys the Ethereum HTLC, completes a full swap headlessly, and tears the localnet down. `make test-makefile` runs the contracts + localnet + `cargo test` flow.
-
-> **Note — `lgs run` profiles are currently blocked in this repo.** The scaffold-native `make demo` / `make test` wrappers call `lgs run --profile demo` / `--profile test`, but `lgs run` does not work here today. Its deploy step hardcodes the deployable-program directory as `<project_root>/methods/guest/src/bin`, while this repo keeps its guest program at `programs/lez-htlc/methods/guest/`, so `lgs run` fails with a missing-deployable-program error. The app's own `demo` binary deploys the LEZ HTLC program itself, so scaffold's deploy step is redundant here anyway. This is filed upstream as [Scaffold issue #237](https://github.com/logos-co/scaffold/issues/237), with fix [PR #239](https://github.com/logos-co/scaffold/pull/239) adding a `deploy = false` toggle on `[run]` / `[run.profiles.<name>]` (default true). Once PR #239 merges into a scaffold release we adopt, adding `deploy = false` to `[run.profiles.demo]` / `[run.profiles.test]` in `scaffold.toml` re-enables `lgs run` for this repo. Until then, use the `-makefile` targets above.
+`make demo` runs `lgs run --profile demo`: scaffold builds the project, ensures the localnet is up, and tops up the wallet, then the profile's `post_deploy` hook runs the app's demo binary, which deploys the LEZ HTLC program, starts Anvil, deploys the Ethereum HTLC, and completes a full swap headlessly. `make test` runs `lgs run --profile test` (same pipeline, with `cargo test` as the hook). Both profiles set `deploy = false` in [`scaffold.toml`](scaffold.toml) — scaffold's own deploy step expects `methods/guest/src/bin` and is redundant here because the app deploys its LEZ program itself ([Scaffold #237](https://github.com/logos-co/scaffold/issues/237), fixed by [PR #239](https://github.com/logos-co/scaffold/pull/239) and adopted at the pinned scaffold commit). `lgs run` leaves the localnet running when the hook exits (`stop_on_exit` is a pending upstream ask, [Scaffold #172](https://github.com/logos-co/scaffold/issues/172)), so both Make targets stop it on exit themselves.
 
 ## Manual Basecamp Run
 
@@ -34,7 +34,7 @@ For local manual testing, run two isolated Basecamp peers: one maker and one tak
 Build the module artifacts and set up the portable Basecamp stack once:
 
 ```bash
-lgs setup
+make setup
 lgs basecamp build
 lgs basecamp setup
 lgs basecamp install
@@ -46,30 +46,25 @@ Then start the local chain infrastructure and keep it running:
 make infra
 ```
 
-In two more terminals, launch the Basecamp peers (see the [macOS launch note](#macos-lgs-basecamp-launch-note) below):
+In two more terminals, launch the Basecamp peers:
 
 ```bash
 lgs basecamp launch maker
 lgs basecamp launch taker
 ```
 
-On macOS, launch each peer through the committed launch bridge instead, so each gets an absolute `LOGOS_DATA_DIR` (see the [macOS launch note](#macos-lgs-basecamp-launch-note)):
-
-```bash
-scripts/basecamp-launch.sh maker
-scripts/basecamp-launch.sh taker
-```
+This works the same on macOS and Linux. On macOS the pinned `bin-macos-app` Basecamp ignores XDG isolation and loads its modules from `LOGOS_DATA_DIR`, which must be absolute; since [Scaffold PR #238](https://github.com/logos-co/scaffold/pull/238) (adopted at the pinned scaffold commit) `lgs basecamp launch` computes and sets that absolute per-profile path itself, so the former committed `scripts/basecamp-launch.sh` bridge is gone.
 
 What each phase does:
 
 | Command | Why it is needed |
 |---|---|
-| `lgs setup` | Fetches `logos-blockchain-circuits` v0.4.2 into `.scaffold/circuits` (driven by the `[circuits]` block in [`scaffold.toml`](scaffold.toml)), creates the local LEZ checkout and wallet under `.scaffold/`, and exports `LOGOS_BLOCKCHAIN_CIRCUITS`. |
+| `make setup` | Runs `lgs setup` through the [v0.2.0 bridge](scripts/scaffold-setup.sh): fetches `logos-blockchain-circuits` into `.scaffold/lez-cache/circuits` (driven by the `[circuits]` block in [`scaffold.toml`](scaffold.toml)), creates the local LEZ checkout and wallet under `.scaffold/`, and seeds the default wallet address. |
 | `lgs basecamp build` | Runs the aggregate module build, producing the `swap`, `swap_ui`, and `delivery_module` LGX artifacts under `.scaffold/basecamp/{lgx,portable}/`. |
 | `lgs basecamp setup` | Builds the portable `bin-macos-app` Basecamp (`a746cdbc` / v0.1.1) and the `cli-portable` LGPM (`e5c25989`), then seeds the two Basecamp profiles. |
 | `lgs basecamp install` | Installs the three `#lgx-portable` packages (`delivery_module` + `swap` as modules, `swap_ui` as a plugin) into each profile via `lgpm cli-portable`. The portable Basecamp and `lgpm cli-portable` agree on the bare `darwin-arm64` variant, so the install completes with zero variant errors. |
 | `make infra` | Starts Anvil and the LEZ localnet, deploys the ETH HTLC contract, and writes `.env` / `.env.taker`. Keep this running. |
-| `lgs basecamp launch maker` / `lgs basecamp launch taker` | Launches the two Basecamp windows with the correct role and env file. |
+| `lgs basecamp launch maker` / `lgs basecamp launch taker` | Launches the two Basecamp windows with the correct role, env file, and (on macOS) an absolute per-profile `LOGOS_DATA_DIR`. |
 
 Re-run `lgs basecamp build` and `lgs basecamp install` after changing the module, UI, or Delivery package inputs so each profile gets the updated LGX packages.
 
@@ -91,12 +86,6 @@ flake = "git+file:.?dir=swap-ui#lgx"
 
 **Operational implication:** a `git+file:.` ref hashes the whole committed git tree, so any tracked-file edit changes the tree hash. The next `lgs basecamp build` / `lgs basecamp install` therefore rebuilds `swap` and `swap_ui` (the `swap-module` build copies the whole repo as the `swap-ffi` source; a cold rebuild is ~10 min). Batch tracked edits and rebuild once.
 
-### macOS `lgs basecamp launch` note
-
-On macOS, `lgs basecamp launch <profile>` isolates each peer via `XDG_DATA_HOME`, but the pinned `bin-macos-app` Basecamp (`a746cdbc` / v0.1.1) ignores XDG on macOS and reads its installed modules from `LOGOS_DATA_DIR`. That path must be **absolute**: a relative `LOGOS_DATA_DIR` loads the backend modules but breaks `@rpath` resolution for the dlopen'd `main_ui` / `package_manager_ui` dylibs, so the shell UI never renders. An absolute path loads everything.
-
-Scaffold cannot portably express an absolute per-profile path in a committed `scaffold.toml`, so on macOS the two peers are currently launched through the committed app-owned launch bridge [`scripts/basecamp-launch.sh`](scripts/basecamp-launch.sh), which sets an absolute `LOGOS_DATA_DIR` per profile before exec'ing the portable Basecamp (replaying the profile's XDG/runtime/role env). Run it as `scripts/basecamp-launch.sh maker` / `scripts/basecamp-launch.sh taker` once the profiles are installed via `lgs basecamp install` and `make infra` has written the `.env` files. This is filed upstream as [Scaffold issue #236](https://github.com/logos-co/scaffold/issues/236), with fix [PR #238](https://github.com/logos-co/scaffold/pull/238) making `lgs basecamp launch` set an absolute `LOGOS_DATA_DIR` for the macOS portable stack; until it lands in an adopted release, the bridge stays. On Linux, XDG isolation works and no bridge is needed.
-
 ## Prerequisites
 
 Supported platforms:
@@ -113,7 +102,7 @@ Required for the default Basecamp UI flow:
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `anvil`)
 - GNU `make`
 - a C/C++ toolchain
-- [`logos-scaffold`](https://github.com/logos-co/logos-scaffold) on your `PATH` from commit `7c52211a3f40a6ac5829905d4569712f414776ed` (provides the `[circuits]` schema, `lgs basecamp build`, and `lgpm cli-portable` install path this repo depends on)
+- [`logos-scaffold`](https://github.com/logos-co/logos-scaffold) on your `PATH` from commit `6789ec04b2ad256186a5894710c419b42d16e479` (adds the `deploy = false` run-profile toggle and the macOS `lgs basecamp launch` `LOGOS_DATA_DIR` fix on top of the `[circuits]` schema, `lgs basecamp build`, and `lgpm cli-portable` install path this repo depends on)
 - the RISC Zero toolchain installed with `rzup install rust`
 - [Nix](https://nixos.org/) with flakes enabled
 
@@ -151,7 +140,7 @@ Install `logos-scaffold` and `lgs` from the supported upstream commit:
 ```bash
 git clone https://github.com/logos-co/logos-scaffold.git
 cd logos-scaffold
-git checkout 7c52211a3f40a6ac5829905d4569712f414776ed
+git checkout 6789ec04b2ad256186a5894710c419b42d16e479
 cargo install --path . --locked --bins
 ```
 
@@ -175,10 +164,10 @@ git submodule update --init --recursive
 Run setup once from the repo root:
 
 ```bash
-lgs setup
+make setup
 ```
 
-`lgs setup` must finish successfully before `make infra` or most other flows. It fetches circuits into `.scaffold/circuits` (from the `[circuits]` block in `scaffold.toml`), runs the scaffold LEZ setup, and creates the local LEZ checkout and wallet under `.scaffold/`.
+`make setup` must finish successfully before `make infra` or most other flows. It runs `lgs setup` through the [v0.2.0 bridge](scripts/scaffold-setup.sh) (see [Local Checks](#default-local-checks)): fetching circuits into `.scaffold/lez-cache/circuits` (from the `[circuits]` block in `scaffold.toml`), running the scaffold LEZ setup, creating the local LEZ checkout and wallet under `.scaffold/`, and seeding the default wallet address.
 
 You do not need `lgs init`. This repo already ships a checked-in [`scaffold.toml`](scaffold.toml) with the expected relative paths.
 
@@ -238,10 +227,10 @@ This runs `swap_ui` in the dependency-bundling `logos-standalone-app` runner. It
 For a quick automated end-to-end swap without the UI:
 
 ```bash
-make demo-makefile
+make demo
 ```
 
-`make demo-makefile` runs `LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo`, which manages its own scaffold localnet, deploys the LEZ HTLC program, starts app-owned Anvil, deploys the Ethereum HTLC, and completes a full swap headlessly. The scaffold-native `make demo` / `lgs run --profile demo` path is currently blocked — see the note under [Local Checks](#default-local-checks).
+`make demo` runs `lgs run --profile demo`: scaffold owns build + localnet + wallet topup, then the profile hook runs the app's demo binary (`cargo run --features demo -- demo --no-localnet`), which deploys the LEZ HTLC program, starts app-owned Anvil, deploys the Ethereum HTLC, and completes a full swap headlessly. The Make target stops the localnet when the run finishes — see the note under [Local Checks](#default-local-checks).
 
 For manual CLI use, start the infrastructure and leave it running:
 
@@ -274,10 +263,10 @@ If you are not using the local stack from `make infra`, start from [`.env.exampl
 Full test flow:
 
 ```bash
-make test-makefile
+make test
 ```
 
-`make test-makefile` builds the contracts, starts the localnet, runs the cargo tests, and stops the localnet. The scaffold-native `make test` / `lgs run --profile test` path hits the same `lgs run` program-directory limitation as `make demo` — see the note under [Local Checks](#default-local-checks).
+`make test` builds the contracts, then runs `lgs run --profile test`: scaffold builds the project, ensures the localnet, and tops up the wallet before the profile hook runs `cargo test`; the Make target stops the localnet afterwards — see the note under [Local Checks](#default-local-checks).
 
 Single integration test flow:
 
@@ -332,7 +321,7 @@ If one side stops responding, the timelocks allow refunds.
 | `swap-ui/` | Basecamp UI app (Logos `type: "ui_qml"`) calling `swap` over Qt Remote Objects |
 | `tests/` | Integration tests for the Rust orchestrator |
 
-The headless CLI flow (`swap-cli`, `make demo-makefile`, `make infra`) is independent of the UI and works without Nix.
+The headless CLI flow (`swap-cli`, `make demo`, `make infra`) is independent of the UI and works without Nix.
 
 ## Common Commands
 
@@ -340,26 +329,26 @@ Scaffold-native (`lgs`) commands are the primary flow for setup, module builds, 
 
 | Command | What it does |
 |---|---|
-| `lgs setup` | Fetch circuits, create the LEZ checkout + wallet, export `LOGOS_BLOCKCHAIN_CIRCUITS` |
+| `make setup` | Run `lgs setup` via the v0.2.0 bridge: fetch circuits, create the LEZ checkout + wallet, seed the default wallet address |
 | `lgs basecamp build` | Build the `swap` / `swap_ui` / `delivery_module` LGX artifacts |
 | `lgs basecamp setup` | Build the portable Basecamp + LGPM and seed the profiles |
 | `lgs basecamp install` | Install the `#lgx-portable` packages into each profile via `lgpm cli-portable` |
-| `lgs basecamp launch <profile>` | Launch a Basecamp peer (`maker` / `taker`; see the [macOS launch note](#macos-lgs-basecamp-launch-note)) |
+| `lgs basecamp launch <profile>` | Launch a Basecamp peer (`maker` / `taker`) |
 | `lgs basecamp run swap_ui` | Run `swap_ui` standalone in `logos-standalone-app` for smoke testing |
 | `lgs doctor --json` | Report resolved scaffold / circuits / module / profile state |
 
-The retained Makefile targets own the app-specific Ethereum/localnet orchestration scaffold does not model yet:
+The retained Makefile targets wrap the scaffold-native flows and own the app-specific Ethereum/localnet orchestration scaffold does not model yet:
 
 | Command | What it does |
 |---|---|
 | `make infra` | Start Anvil + the LEZ localnet, deploy contracts, and write `.env` files |
-| `make demo-makefile` | Run a full headless swap (manages its own localnet + app-owned Anvil) |
-| `make test-makefile` | Build contracts, start localnet, run `cargo test`, stop localnet |
+| `make demo` | Run a full headless swap via `lgs run --profile demo`, then stop the localnet |
+| `make test` | Build contracts, run `lgs run --profile test` (`cargo test` as the hook), then stop the localnet |
 | `make contracts` | Run `forge build` inside `contracts/` |
 | `make localnet-start` / `make localnet-stop` | Start / stop the LEZ localnet |
 | `cd swap-module && nix develop` | Enter the swap-module dev shell: pre-builds `swap-ffi`, stages `libswap_ffi.{dylib,so}` into `swap-module/lib/`, and exports `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` / `CMAKE_LIBRARY_PATH` / `CMAKE_EXPORT_COMPILE_COMMANDS` for ad hoc non-Nix CMake / clangd / IDE work |
 
-The scaffold-native `make demo` / `make test` wrappers (`lgs run --profile demo` / `--profile test`) are currently blocked by scaffold's hardcoded `methods/guest/src/bin` program-directory convention — use the `-makefile` targets above (see the note under [Local Checks](#default-local-checks)). The legacy `make swap-lgx-build`, `make swap-module-build`, `make swap-ui-build`, `make swap-ui-run`, and `make basecamp-{init,run,clean}-*` build/launch targets are being retired in favor of the `lgs basecamp` commands above.
+The former `make demo-makefile` / `make test-makefile` fallbacks (direct cargo + manual localnet lifecycle) are gone — `lgs run` owns build, localnet, and wallet topup for both flows (see the note under [Local Checks](#default-local-checks)). The legacy `make swap-lgx-build`, `make swap-module-build`, `make swap-ui-build`, `make swap-ui-run`, and `make basecamp-{init,run,clean}-*` build/launch targets were retired earlier in favor of the `lgs basecamp` commands above, and the macOS launch bridge `scripts/basecamp-launch.sh` is gone as of the scaffold pin bump (see [Manual Basecamp Run](#manual-basecamp-run)).
 
 ## Architecture
 
@@ -411,13 +400,13 @@ For more detail on the messaging side, see [delivery-dogfooding.md](delivery-dog
 - `lgs: command not found` (or `logos-scaffold: command not found`)
   Ensure `logos-scaffold` is installed and that `~/.cargo/bin` is on your `PATH`.
 - `missing lez at .scaffold/lez-cache/repos/lez/...`
-  `lgs setup` did not finish successfully. Install `logos-scaffold` if needed, then rerun `lgs setup`.
+  `make setup` did not finish successfully. Install `logos-scaffold` if needed, then rerun `make setup`.
 - `Risc Zero Rust toolchain not found. Try running rzup install rust`
   Install RISC Zero and run `rzup install rust`, then rerun the command that failed.
 - Git pull blocked by untracked `scaffold.toml`
   Older clones sometimes had that file gitignored. Move it aside, pull again, then compare your old copy with the checked-in [`scaffold.toml`](scaffold.toml).
-- Maker fails with an escrow-funding error (or, taker-side, the demo waits then errors)
-  The LEZ HTLC lock is two transactions — a Lock instruction, then a funds transfer to the escrow PDA. The maker's `lock()` confirms the transfer landed and returns a hard error (after a bounded ~300s poll) if it didn't; the taker's watcher logs rate-limited warnings while an escrow sits unfunded. The usual cause: the maker wallet holds fewer than the demo's 1000 LEZ, so the sequencer rejects the transfer (`Guest panicked: Sender has insufficient balance`, visible in `.scaffold/logs/sequencer.log`). Remedy: top up the maker (`LEE_WALLET_HOME_DIR=.scaffold/wallet <lez wallet binary> pinata claim --to <maker account>` — each claim credits 150 LEZ; repeat until the maker holds ≥ 1000) and rerun. Root-caused 2026-07-21; the original silent-infinite-spin failure mode was fixed by the funding-confirmation change that ships in this repo.
+- Maker fails with an escrow-funding error (or, taker-side, the swap waits then errors)
+  The LEZ HTLC lock is two transactions — a Lock instruction, then a funds transfer to the escrow PDA. The maker's `lock()` confirms the transfer landed and returns a hard error (after a bounded ~300s poll) if it didn't; the taker's watcher logs rate-limited warnings while an escrow sits unfunded. The usual cause: the maker wallet holds fewer than the swap's 1000 LEZ, so the sequencer rejects the transfer (`Guest panicked: Sender has insufficient balance`, visible in `.scaffold/logs/sequencer.log`). The headless demo (`make demo`) now funds the maker itself with a bounded faucet-claim loop before locking, so this mainly affects the manual Basecamp flow. Remedy there: top up the maker (`LEE_WALLET_HOME_DIR=.scaffold/wallet <lez wallet binary> pinata claim --to <maker account>` — each claim credits 150 LEZ; repeat until the maker holds ≥ 1000) and rerun. Root-caused 2026-07-21; the original silent-infinite-spin failure mode was fixed by the funding-confirmation change that ships in this repo.
 
 ## Maintainer Notes
 

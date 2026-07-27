@@ -61,7 +61,6 @@ log_file = ".scaffold/basecamp/profiles/maker/basecamp.log"
 [basecamp.profiles.maker.env]
 SWAP_UI_AUTO_ENV_FILE = ".env"
 SWAP_UI_AUTO_ROLE = "maker"
-LOGOS_DATA_DIR = ".scaffold/basecamp/profiles/maker/xdg-data/Logos/LogosBasecamp"
 
 [basecamp.profiles.taker]
 env_file = ".env.taker"
@@ -71,10 +70,14 @@ log_file = ".scaffold/basecamp/profiles/taker/basecamp.log"
 [basecamp.profiles.taker.env]
 SWAP_UI_AUTO_ENV_FILE = ".env.taker"
 SWAP_UI_AUTO_ROLE = "taker"
-LOGOS_DATA_DIR = ".scaffold/basecamp/profiles/taker/xdg-data/Logos/LogosBasecamp"
 
+# deploy = false skips scaffold's deploy step (hardcoded methods/guest/src/bin
+# discovery, which this repo's programs/lez-htlc/ layout doesn't match); the
+# app's demo binary deploys the LEZ HTLC program itself.
 [run.profiles.demo]
-post_deploy = "cargo run --features demo -- demo --no-localnet"
+deploy = false
+post_deploy = "LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo --no-localnet"
 
 [run.profiles.test]
-post_deploy = "cargo test"
+deploy = false
+post_deploy = "LEE_WALLET_HOME_DIR=.scaffold/wallet cargo test"

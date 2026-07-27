@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Bridge for `lgs setup` against the LEZ v0.2.0 repo layout.
+# Bridge for `lgs setup` against the LEZ v0.2.0 repo layout
+# (upstream: https://github.com/logos-co/scaffold/issues/240).
 #
-# logos-scaffold 0.1.1 hardcodes the wallet debug config path as
+# logos-scaffold hardcodes the wallet debug config path as
 # `<lez repo>/wallet/configs/debug/wallet_config.json`, but the v0.2.0 repo
 # moved the crate tree under a `lez/` subdirectory
 # (`<lez repo>/lez/wallet/configs/debug/wallet_config.json`), so the wallet
@@ -11,11 +12,47 @@
 # Workaround: run setup once (clones the pinned repo, builds the toolchain),
 # and if it fails, drop a `wallet -> lez/wallet` compatibility symlink into
 # the pinned repo checkout and retry (idempotent — cached builds are reused).
-# Remove this bridge when upstream scaffold understands the lez/ layout
-# (tracked in docs/scaffold-upstream-tracker.md).
+#
+# Second v0.2.0 gap, same upstream issue: the v0.2.0 debug wallet config no
+# longer ships preconfigured `initial_accounts`, so scaffold's setup ends with
+# "could not seed default wallet automatically" and never writes the
+# `default_address=` line into .scaffold/state/wallet.state — which
+# `lgs run`'s wallet-topup step requires. And the v0.2.0 wallet binary reads
+# LEE_WALLET_HOME_DIR (scaffold still exports the older NSSA_WALLET_HOME_DIR),
+# so without the explicit export below the wallet CLI would silently operate
+# on ~/.lee/wallet instead of the project wallet. seed_default_wallet()
+# replicates scaffold's seeding: initialize the project wallet storage (the
+# wallet CLI creates a default Public/Private account pair on first use) and
+# register the first public account as scaffold's default topup address.
+#
+# Remove this bridge when upstream scaffold understands the lez/ v0.2.0
+# layout (scaffold#240; also tracked in docs/scaffold-upstream-tracker.md).
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+
+# v0.2.0 wallet env name; scaffold's own subprocess env still uses NSSA_*.
+export LEE_WALLET_HOME_DIR="$PWD/.scaffold/wallet"
+
+seed_default_wallet() {
+  local state=.scaffold/state/wallet.state
+  if [ -f "$state" ] && grep -q '^default_address=' "$state"; then
+    return 0
+  fi
+  # `wallet list` initializes the wallet storage on first use (creating a
+  # default Public/Private account pair); scaffold pipes the wallet password
+  # itself and LEE_WALLET_HOME_DIR (exported above) points it at the project
+  # wallet.
+  local addr
+  addr=$(logos-scaffold wallet list 2>/dev/null \
+    | grep -o 'Public/[1-9A-HJ-NP-Za-km-z]\{32,\}' | head -1)
+  if [ -z "$addr" ]; then
+    echo "scaffold-setup: could not seed a default wallet account (wallet list returned none)" >&2
+    return 1
+  fi
+  logos-scaffold wallet default set "$addr"
+  echo "scaffold-setup: seeded default wallet address ${addr} (v0.2.0 seeding bridge)"
+}
 
 LEZ_PIN=$(sed -n '/^\[repos\.lez\]/,/^\[/p' scaffold.toml | sed -n 's/^pin = "\([0-9a-f]*\)".*/\1/p' | head -1)
 LEZ_REPO=".scaffold/lez-cache/repos/lez/${LEZ_PIN}"
@@ -35,9 +72,11 @@ link_wallet() {
 link_wallet
 
 if logos-scaffold setup; then
-  exit 0
+  seed_default_wallet
+  exit $?
 fi
 
 echo "scaffold-setup: first setup attempt failed; applying v0.2.0 layout bridge and retrying" >&2
 link_wallet
-exec logos-scaffold setup
+logos-scaffold setup || exit $?
+seed_default_wallet
