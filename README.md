@@ -146,6 +146,22 @@ cargo install --path . --locked --bins
 
 The workspace [`.cargo/config.toml`](.cargo/config.toml) contains the macOS `aarch64` linker flags used by the Rust/LEZ build.
 
+## Known Sharp Edges
+
+Read this before filing an issue — these are the current known rough spots for testers.
+
+- **Raw scaffold pin.** `logos-scaffold` must be installed from the exact pinned commit `6789ec04b2ad256186a5894710c419b42d16e479` — there is no scaffold release tag containing the required fixes yet ([Scaffold #170](https://github.com/logos-co/scaffold/issues/170)). A different scaffold build will fail in confusing ways.
+- **Platforms.** Apple Silicon macOS and Linux `x86_64`/`aarch64` only; Intel macOS is unsupported (no circuits bundle).
+- **Cold first run takes ~50+ minutes.** `make setup` builds the LEZ toolchain (~10 min), `lgs basecamp build` takes ~26 min, `lgs basecamp setup` ~5 min, and `lgs basecamp install` ~20 min. Nothing is hung — subsequent runs reuse caches.
+- **Any tracked-file edit triggers a big rebuild.** The modules build from the committed git tree (`git+file:` refs), so any commit or tracked-file edit changes the tree hash and the next `lgs basecamp build`/`install` rebuilds `swap` + `swap_ui` (~10 min). Batch your edits.
+- **Maker funding in the UI flow.** The maker account must hold at least 1000 LEZ before locking. The headless `make demo` self-funds, but for the manual Basecamp flow you may need repeated `logos-scaffold wallet topup <maker-account>` claims (150 LEZ each). See [Troubleshooting](#troubleshooting).
+- **`make infra` must stay running** in its own terminal for the whole swap; Ctrl-C tears down Anvil and the localnet. Stopping and restarting the localnet wipes on-chain state (balances reset).
+- **First `lgs basecamp launch <profile>` is slower** — `lgs basecamp install` provisions scaffold's default profiles; `maker`/`taker` provision themselves on first launch.
+- **Dev keys only.** The generated `.env` files use Anvil dev keys and local wallets; logs may contain key material — redact before sharing, and never reuse these keys elsewhere.
+- **`lgs doctor` shows one expected warning** — a `delivery_module` pin-drift warn (v0.1.1 vs scaffold's default rev) keeps the status at "Needs attention"; it is benign.
+
+Found something else? File it with the [Feedback template](https://github.com/logos-co/eth-lez-atomic-swaps/issues/new?template=feedback.yml) so we get your environment and logs.
+
 ## Clone And Setup
 
 Clone with submodules:

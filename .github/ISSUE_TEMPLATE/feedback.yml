@@ -1,0 +1,89 @@
+name: Tester feedback / bug report
+description: Report a bug or share feedback from testing the ETH <> LEZ atomic swap app.
+title: "[feedback] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Please check the [Known Sharp Edges](https://github.com/logos-co/eth-lez-atomic-swaps#known-sharp-edges) section of the README first — your issue may already be a known rough spot.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Which platform were you running on?
+      options:
+        - Apple Silicon macOS
+        - Linux x86_64
+        - Linux aarch64
+        - Other (describe below)
+    validations:
+      required: true
+  - type: input
+    id: repo-commit
+    attributes:
+      label: Repo commit
+      description: Output of `git rev-parse HEAD` in this repo.
+      placeholder: e.g. 5858f91...
+    validations:
+      required: true
+  - type: input
+    id: scaffold-commit
+    attributes:
+      label: Scaffold version
+      description: Output of `lgs --version` plus the commit SHA you installed `logos-scaffold` from.
+      placeholder: e.g. lgs 0.x.y, installed from 6789ec04b2ad256186a5894710c419b42d16e479
+    validations:
+      required: true
+  - type: dropdown
+    id: flow
+    attributes:
+      label: Which flow were you running?
+      options:
+        - Headless `make demo`
+        - Manual Basecamp two-peer flow
+        - CLI (`swap-cli`)
+        - Setup only (`make setup` / `lgs basecamp build` / `install`)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened vs what you expected
+      description: Describe the actual behavior and what you expected instead.
+      placeholder: |
+        Actual: ...
+        Expected: ...
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Exact commands run
+      description: The exact sequence of commands that led to the problem.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: "`lgs doctor --json` output"
+      description: Paste the full output; it will be rendered as a code block. Note that one `delivery_module` pin-drift warning is expected.
+      render: json
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Attach or paste the relevant parts of `.scaffold/logs/sequencer.log`, `.scaffold/basecamp/profiles/<profile>/basecamp.log`, and the `make infra` terminal output. REDACT any private keys or mnemonics before pasting — the generated `.env` files and logs can contain key material.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: sharp-edges-ack
+    attributes:
+      label: Checklist
+      options:
+        - label: I read the Known Sharp Edges section of the README
+          required: true
