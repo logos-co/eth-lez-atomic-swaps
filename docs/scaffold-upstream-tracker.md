@@ -7,7 +7,7 @@ entry is grounded in concrete pain encountered while upgrading
 `logos-scaffold` master `d50caf4f86f2a913f9dc9985fb2a80f06a3e30d8`
 (41 commits ahead of `v0.1.1`).
 
-> **Phase 2 update (2026-07-21).** The project now builds against
+> **Phase 2 update (2026-07-21).** The project migrated onto
 > `logos-scaffold` `7c52211a3f40a6ac5829905d4569712f414776ed`, which ships the
 > `[circuits]` schema (TR-07), granular `lgs basecamp build` (TR-14), and an
 > `lgpm cli-portable` install path. That landing **resolves TR-03** (portable
@@ -19,6 +19,16 @@ entry is grounded in concrete pain encountered while upgrading
 > and `lgs run`'s hardcoded deployable-program directory
 > ([#237](https://github.com/logos-co/scaffold/issues/237) / [PR #239](https://github.com/logos-co/scaffold/pull/239))
 > — see the [Phase 2 addendum](#phase-2-addendum-2026-07-21).
+
+> **Pin bump (2026-07-27).** The project now builds against `logos-scaffold`
+> `6789ec04b2ad256186a5894710c419b42d16e479` (scaffold master), which adds
+> exactly the two Phase 2 fixes as merged:
+> [PR #238](https://github.com/logos-co/scaffold/pull/238) (closes
+> [#236](https://github.com/logos-co/scaffold/issues/236); merged 2026-07-22) and
+> [PR #239](https://github.com/logos-co/scaffold/pull/239) (closes
+> [#237](https://github.com/logos-co/scaffold/issues/237); merged 2026-07-22).
+> Both are adopted downstream as of 2026-07-27 — see the updated addendum
+> statuses and the [Tracker change-log](#tracker-change-log).
 
 Related upstream work already filed:
 
@@ -142,7 +152,7 @@ Terms used throughout this doc:
 
 **TL;DR.** `v0.1.1` has no `basecamp` subcommand at all. Every Logos basecamp project pins scaffold by master SHA in its README. Tag a release so projects can pin a version string.
 
-**Why this hurts us.** [`README.md`](../README.md) still hard-codes the install SHA in its Prerequisites section — originally `d50caf4f...`, now `7c52211...` as of Phase 2. Every bump is a raw commit pin because there is still no `v0.2.0` tag to reference.
+**Why this hurts us.** [`README.md`](../README.md) still hard-codes the install SHA in its Prerequisites section — originally `d50caf4f...`, then `7c52211...` as of Phase 2, now `6789ec04...` as of the 2026-07-27 pin bump. Every bump is a raw commit pin because there is still no `v0.2.0` tag to reference.
 
 **Suggested fix.** Tag `v0.2.0` capturing the 0.2.0 schema + `lgs basecamp` + `lgs run` surfaces.
 
@@ -307,7 +317,7 @@ A successful design would let this project shrink `src/cli/infra.rs` to a small 
 
 ### `[circuits]` schema + `lgs setup` auto-fetch — P1
 
-**Status.** ✅ Filed 2026-05-22 as [logos-co/scaffold#173](https://github.com/logos-co/scaffold/issues/173) (standalone, U-C). Body proposes `[circuits]` schema + auto-export + `lgs doctor` check; flagged "derive circuits version from LEZ pin" as potential follow-on.
+**Status.** ✅ Filed 2026-05-22 as [logos-co/scaffold#173](https://github.com/logos-co/scaffold/issues/173) (standalone, U-C). Body proposes `[circuits]` schema + auto-export + `lgs doctor` check; flagged "derive circuits version from LEZ pin" as potential follow-on. Functionally delivered by scaffold [PR #221](https://github.com/logos-co/scaffold/pull/221) (merged 2026-07-20): `[circuits]` schema + on-demand auto-materialize in setup/build/localnet/test-node + `lgs doctor` circuits check with remediation guidance. [#173](https://github.com/logos-co/scaffold/issues/173) still shows open on GitHub despite the functional delivery; this repo's `check-circuits` Makefile guard was removed 2026-07-27 as superseded.
 
 **TL;DR.** Every LEZ project needs to fetch a matching `logos-blockchain-circuits` release bundle and point `LOGOS_BLOCKCHAIN_CIRCUITS` at it. This project does 68 lines of platform-detect + curl in the Makefile. Scaffold should own this.
 
@@ -681,7 +691,7 @@ stale post-merge.
 
 ### NEW (filed): macOS `lgs basecamp launch` `LOGOS_DATA_DIR` gap — P1
 
-**Status.** ✅ Filed as [logos-co/scaffold#236](https://github.com/logos-co/scaffold/issues/236); fix up as [PR #238](https://github.com/logos-co/scaffold/pull/238) (makes `launch` set an absolute `LOGOS_DATA_DIR` for the macOS portable stack; CI green, open/mergeable). Discovered during the Phase 2 two-peer bring-up.
+**Status.** ✅ **MERGED + ADOPTED.** Filed as [logos-co/scaffold#236](https://github.com/logos-co/scaffold/issues/236); fixed by [PR #238](https://github.com/logos-co/scaffold/pull/238) (makes `launch` compute and set an absolute per-profile `LOGOS_DATA_DIR` for the macOS portable stack, and absolutize a relative caller-supplied value; merged 2026-07-22, merge `1aa71be9c323`). Adopted downstream 2026-07-27 at pin `6789ec04`: `scripts/basecamp-launch.sh` is deleted and `lgs basecamp launch <profile>` is the launch path on every platform. Discovered during the Phase 2 two-peer bring-up.
 
 **TL;DR.** `lgs basecamp launch <profile>` isolates each peer via
 `XDG_DATA_HOME`, but the pinned `bin-macos-app` Basecamp (`a746cdbc` / v0.1.1)
@@ -708,7 +718,7 @@ as [PR #238](https://github.com/logos-co/scaffold/pull/238).
 
 ### NEW (filed): `lgs run` hardcodes the deployable-program directory — P1
 
-**Status.** ✅ Filed as [logos-co/scaffold#237](https://github.com/logos-co/scaffold/issues/237); fix up as [PR #239](https://github.com/logos-co/scaffold/pull/239) (adds `deploy = false` on `[run]` / `[run.profiles.<name>]`, defaulting to true). Discovered during Phase 2 while validating the
+**Status.** ✅ **MERGED + ADOPTED.** Filed as [logos-co/scaffold#237](https://github.com/logos-co/scaffold/issues/237); fixed by [PR #239](https://github.com/logos-co/scaffold/pull/239) (adds `deploy = false` on `[run]` / `[run.profiles.<name>]`, defaulting to true; merged 2026-07-22, merge `6789ec04b2ad`). Adopted 2026-07-27: `deploy = false` set on both `[run.profiles.demo]` / `[run.profiles.test]`; `make demo` / `make test` now run `lgs run --profile demo|test`; `make demo-makefile` / `make test-makefile` deleted as superseded. Discovered during Phase 2 while validating the
 `[run.profiles.{demo,test}]` blocks.
 
 **TL;DR.** `lgs run --profile demo` / `--profile test` do **not** work in this
@@ -753,3 +763,4 @@ program, so scaffold's deploy step is redundant here).
 - **2026-05-22** — TR-11 filed as doc PR [logos-co/scaffold#177](https://github.com/logos-co/scaffold/pull/177) blessing hand-authored `[modules.*]` tables for drift-detection / declarative-only adoption; now merged.
 - **2026-05-22** — TR-13 filed as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178) noting that `bin-macos-app --user-dir` is orthogonal to scaffold's per-profile XDG isolation; now merged. **All 19 tracker entries are now tracked upstream, closed/merged, or retired (TR-18).** 7 GitHub issues + 2 doc PRs filed across logos-co/scaffold + logos-co/logos-package-manager + logos-co/logos-basecamp.
 - **2026-07-21 (Phase 2)** — Project migrated onto `logos-scaffold` `7c52211`, which lands the `[circuits]` schema (TR-07), `lgs basecamp build` (TR-14), and the `lgpm cli-portable` install path. **TR-03 marked RESOLVED** (portable install works via [scaffold#183](https://github.com/logos-co/scaffold/pull/183) + `lgpm cli-portable`; `extract_lgx_variant` obsolete; LGPM #14 to be closed as stale post-merge). Added a [Phase 2 addendum](#phase-2-addendum-2026-07-21) recording two new P1s, now filed with fixes up: the macOS `lgs basecamp launch` `LOGOS_DATA_DIR` gap ([#236](https://github.com/logos-co/scaffold/issues/236) / [PR #238](https://github.com/logos-co/scaffold/pull/238)) and `lgs run`'s hardcoded `methods/guest/src/bin` deployable-program directory ([#237](https://github.com/logos-co/scaffold/issues/237) / [PR #239](https://github.com/logos-co/scaffold/pull/239), which adds `deploy = false` on `[run]`/`[run.profiles.<name>]` to re-enable `lgs run` here once adopted). Until then `make demo-makefile` / `make test-makefile` remain the working paths.
+- **2026-07-27** — Pin bumped to `logos-scaffold` `6789ec04` (scaffold master), which adds [PR #238](https://github.com/logos-co/scaffold/pull/238) and [PR #239](https://github.com/logos-co/scaffold/pull/239) (both merged 2026-07-22, closing [#236](https://github.com/logos-co/scaffold/issues/236) / [#237](https://github.com/logos-co/scaffold/issues/237)). Adopted downstream: the launch bridge `scripts/basecamp-launch.sh` is deleted (`lgs basecamp launch <profile>` is the launch path on every platform); `deploy = false` set on both run profiles so `make demo` / `make test` run `lgs run --profile demo|test` (the trailing localnet stop stays app-owned until TR-19 / [#172](https://github.com/logos-co/scaffold/issues/172) lands); `make demo-makefile` / `make test-makefile` and the `check-circuits` Makefile guard deleted — the guard superseded by scaffold [PR #221](https://github.com/logos-co/scaffold/pull/221) (circuits auto-materialize + `lgs doctor` check; TR-07 / [#173](https://github.com/logos-co/scaffold/issues/173) functionally delivered but still open upstream). `scripts/scaffold-setup.sh` remains, now tracked upstream as [scaffold#240](https://github.com/logos-co/scaffold/issues/240) (LEZ v0.2.0 repo layout — wallet crate under `lez/` — in `lgs setup`; filed 2026-07-22), and grew a second v0.2.0 seeding bridge during this adoption: the v0.2.0 debug wallet config ships no `initial_accounts`, so scaffold's setup cannot seed the `default_address=` line in `.scaffold/state/wallet.state` that `lgs run`'s mandatory topup step requires — the bridge initializes the project wallet and runs `logos-scaffold wallet default set` itself. Relatedly, the Makefile now exports `LEE_WALLET_HOME_DIR` (the v0.2.0 wallet env name; scaffold subprocesses still export the older `NSSA_WALLET_HOME_DIR`, so without it wallet CLI children operate on `~/.lee/wallet` instead of the project wallet — both facets belong to [#240](https://github.com/logos-co/scaffold/issues/240)). Still no scaffold release tag (TR-01 / [#170](https://github.com/logos-co/scaffold/issues/170) still open), so the pin remains a raw master SHA.

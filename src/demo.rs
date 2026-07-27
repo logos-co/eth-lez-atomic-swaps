@@ -20,6 +20,18 @@ use crate::swap::refund::now_unix;
 
 const BLOCK_WAIT: Duration = Duration::from_secs(4);
 
+/// LEZ amount the maker locks in the demo swap (mirrored in the maker/taker
+/// configs below). The maker wallet must hold at least this much before the
+/// escrow funding transfer, or the sequencer rejects it with
+/// "Sender has insufficient balance".
+const DEMO_LEZ_AMOUNT: u128 = 1000;
+
+/// Upper bound on faucet claims when funding the maker. Each pinata claim
+/// credits a fixed amount (150 LEZ on the pinned localnet), so an empty
+/// wallet needs ~7 claims; the bound only exists to fail loudly instead of
+/// looping forever if claims stop landing.
+const MAX_TOPUP_CLAIMS: usize = 12;
+
 sol! {
     #[sol(rpc)]
     EthHTLC,
@@ -109,8 +121,32 @@ impl DemoEnv {
 
         // 5. Fund accounts + deploy LEZ HTLC program.
         report(5, "Deploying LEZ HTLC program", "");
-        scaffold::wallet_topup(Some(&accounts[0].account_id_b58)).await?;
+        // The taker only pays fees on LEZ, so one claim is enough. The maker
+        // must fund the DEMO_LEZ_AMOUNT escrow transfer in full, and a single
+        // pinata claim credits less than that, so claim in a bounded loop
+        // until the balance covers the lock (fresh localnet state starts all
+        // accounts at zero).
         scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await?;
+        let mut claims = 0;
+        loop {
+            let balance = wc
+                .sequencer_client
+                .get_account_balance(accounts[0].account_id)
+                .await
+                .map_err(|e| SwapError::LezSequencer(format!("get_account_balance failed: {e}")))?;
+            if balance >= DEMO_LEZ_AMOUNT {
+                break;
+            }
+            if claims >= MAX_TOPUP_CLAIMS {
+                return Err(SwapError::Scaffold(format!(
+                    "maker account still holds {balance} < {DEMO_LEZ_AMOUNT} LEZ after \
+                     {claims} faucet claims — check .scaffold/logs/sequencer.log"
+                )));
+            }
+            scaffold::wallet_topup(Some(&accounts[0].account_id_b58)).await?;
+            claims += 1;
+            tokio::time::sleep(BLOCK_WAIT).await;
+        }
 
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
@@ -138,7 +174,7 @@ impl DemoEnv {
                 account_id: accounts[0].account_id,
             },
             lez_htlc_program_id: LEZ_HTLC_PROGRAM_ID,
-            lez_amount: 1000,
+            lez_amount: DEMO_LEZ_AMOUNT,
             eth_amount: 1_000_000,
             lez_timelock,
             eth_timelock,
@@ -159,7 +195,7 @@ impl DemoEnv {
                 account_id: accounts[1].account_id,
             },
             lez_htlc_program_id: LEZ_HTLC_PROGRAM_ID,
-            lez_amount: 1000,
+            lez_amount: DEMO_LEZ_AMOUNT,
             eth_amount: 1_000_000,
             lez_timelock,
             eth_timelock,

@@ -59,6 +59,41 @@ For mental model + per-entry rationale, see
 > and the `basecamp-instance.sh` install path are now **unblocked** (see the
 > updated table below).
 
+> **Phase 2 close-out (2026-07-27).** The pin is now `logos-scaffold`
+> `6789ec04b2ad256186a5894710c419b42d16e479` (scaffold master), which adds the
+> merged [PR #238](https://github.com/logos-co/scaffold/pull/238) and
+> [PR #239](https://github.com/logos-co/scaffold/pull/239). Adoption on this
+> repo:
+> - **`lgs basecamp launch` works on macOS without a bridge** — PR #238 makes
+>   `launch` set an absolute per-profile `LOGOS_DATA_DIR`, so
+>   `scripts/basecamp-launch.sh` is deleted; `lgs basecamp launch <profile>` is
+>   the launch path on every platform.
+> - **`lgs run` re-enabled** — `deploy = false` set on
+>   `[run.profiles.{demo,test}]` (PR #239), so `make demo` / `make test` are now
+>   the scaffold-native paths and `make demo-makefile` / `make test-makefile`
+>   are deleted. The trailing localnet stop stays in the Make targets until
+>   TR-19 / [scaffold#172](https://github.com/logos-co/scaffold/issues/172)
+>   lands.
+> - **`check-circuits` Makefile guard deleted** — superseded by scaffold
+>   [PR #221](https://github.com/logos-co/scaffold/pull/221) (circuits
+>   auto-materialize + `lgs doctor` check).
+> - **Remaining app-owned glue:** `scripts/scaffold-setup.sh` (LEZ v0.2.0 repo
+>   layout in `lgs setup`, tracked upstream as
+>   [scaffold#240](https://github.com/logos-co/scaffold/issues/240) — during
+>   this adoption it also grew a default-wallet seeding bridge, because the
+>   v0.2.0 debug wallet config ships no `initial_accounts` and `lgs run`'s
+>   mandatory topup step needs the `default_address=` wallet state scaffold's
+>   setup cannot seed; the Makefile likewise exports `LEE_WALLET_HOME_DIR`
+>   since scaffold subprocesses still export the older `NSSA_WALLET_HOME_DIR`
+>   name);
+>   `make infra` + Anvil orchestration (TR-06 /
+>   [scaffold#172](https://github.com/logos-co/scaffold/issues/172)); and the
+>   localnet-stop traps in `make demo` / `make test` (TR-19 /
+>   [scaffold#172](https://github.com/logos-co/scaffold/issues/172)).
+> - **Still no scaffold release tag** (TR-01 /
+>   [scaffold#170](https://github.com/logos-co/scaffold/issues/170)) — the pin
+>   remains a raw master SHA.
+
 ### Upstream filings (all 2026-05-22 unless noted)
 
 | Tracker | Issue / PR | Repo |
@@ -81,7 +116,7 @@ For mental model + per-entry rationale, see
 |---|---|---|
 | `scaffold.toml` upgraded to 0.2.0 schema + `[modules.*]` block added (swap, swap_ui, delivery_module) | [PR #26](https://github.com/logos-co/eth-lez-atomic-swaps/pull/26) — swap-vendor-ffi → Nix dev shell *(landed without approval — review needed)* | All Bucket 1 Makefile deletions |
 | `docs/scaffold-upstream-tracker.md` — 19 entries (incl. TR-20), mental model, glossary, TOC | T-019e45fb — LMB-01 investigation (logos-module-builder upstream) | All Bucket 2 / 3 long-term deletions (wait on upstream) |
-| `[run.profiles.{test,demo}]` blocks added to `scaffold.toml` in [PR #29](https://github.com/logos-co/eth-lez-atomic-swaps/pull/29) for Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27) — **but see the Phase 2 correction: `lgs run` is blocked by its hardcoded program dir, so these are declarative-only; use `make demo-makefile` / `make test-makefile`** |  |  |
+| `[run.profiles.{test,demo}]` blocks added to `scaffold.toml` in [PR #29](https://github.com/logos-co/eth-lez-atomic-swaps/pull/29) for Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27) — **but see the Phase 2 correction: `lgs run` is blocked by its hardcoded program dir, so these are declarative-only; use `make demo-makefile` / `make test-makefile`** — **update 2026-07-27: adopted with `deploy = false` at pin `6789ec04`; `make demo` / `make test` now run `lgs run`** |  |  |
 | All 9 upstream filings done (see table above) | [logos-co/scaffold#169](https://github.com/logos-co/scaffold/pull/169) — narrow SPel public-pin fix (near landing) | All Bucket 2 / 3 long-term deletions (wait on upstream) |
 
 ## Upstream filing queue (scaffold)
@@ -157,7 +192,7 @@ conventions look like (check open issues first).
 | Item | Effort | Handoff prompt sketch |
 |---|---|---|
 | **Bucket 1 deletions:** localnet-{start,stop}, swap-module-build, swap-ui-build, swap-ui-run, basecamp-paths-* | ~30 min | "Delete Bucket 1 Makefile targets per Bucket 1 analysis in docs/scaffold-upstream-tracker.md + this plan doc. Update README to point at `lgs localnet`/`nix build`/`nix run` invocations. Verify `make` with no args still lists remaining targets. Don't push without approval." |
-| **Add `[run.profiles.{test,demo}]` partial** | Blocked (Phase 2 correction) — fix filed | Blocks added in Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27), but `lgs run --profile demo`/`test` fails here: scaffold's deploy step hardcodes `methods/guest/src/bin` while the guest program lives at `programs/lez-htlc/methods/guest/`. Filed as [scaffold#237](https://github.com/logos-co/scaffold/issues/237) with fix up as [PR #239](https://github.com/logos-co/scaffold/pull/239) (`deploy = false` on `[run]`/`[run.profiles.<name>]`); adding `deploy = false` to `[run.profiles.demo]`/`[run.profiles.test]` re-enables `lgs run` here once #239 lands in an adopted release. Working headless paths remain `make demo-makefile` / `make test-makefile`; the blocks are declarative-only until then. |
+| **Add `[run.profiles.{test,demo}]` partial** | ✅ **DONE (2026-07-27)** | Blocks added in Phase 1 of [eth-lez-atomic-swaps#27](https://github.com/logos-co/eth-lez-atomic-swaps/issues/27), but `lgs run --profile demo`/`test` fails here: scaffold's deploy step hardcodes `methods/guest/src/bin` while the guest program lives at `programs/lez-htlc/methods/guest/`. Filed as [scaffold#237](https://github.com/logos-co/scaffold/issues/237) with fix up as [PR #239](https://github.com/logos-co/scaffold/pull/239) (`deploy = false` on `[run]`/`[run.profiles.<name>]`); adding `deploy = false` to `[run.profiles.demo]`/`[run.profiles.test]` re-enables `lgs run` here once #239 lands in an adopted release. Working headless paths remain `make demo-makefile` / `make test-makefile`; the blocks are declarative-only until then. [PR #239](https://github.com/logos-co/scaffold/pull/239) merged and was adopted 2026-07-27 at pin `6789ec04`: `deploy = false` set on both profiles, `make demo` / `make test` now call `lgs run`, and the `-makefile` fallbacks are deleted. |
 | **PR #26 review/merge** | ~10 min | Already landed; review the diff. Force-update if needed. |
 
 ### Cleanup status (updated Phase 2, 2026-07-21)
@@ -166,9 +201,9 @@ conventions look like (check open issues first).
 |---|---|---|
 | Delete `make circuits` (68 lines); keep only the `CIRCUITS_DIR` + `LOGOS_BLOCKCHAIN_CIRCUITS` bridge | TR-07 | ✅ **Unblocked** — scaffold `7c52211` `[circuits]` + `lgs setup` fetch. Ready for the Makefile cleanup pass. |
 | Delete `make swap-lgx-build` (+ `swap-module-build` / `swap-ui-build` / `swap-ui-run`) | TR-10 + TR-14 | ✅ **Unblocked** — replaced by `lgs basecamp build` / `lgs basecamp run swap_ui`. |
-| Delete `scripts/basecamp-instance.sh` + `make basecamp-{init,run,clean}-*` | TR-03 + TR-04 + TR-05 + TR-08 + TR-12 + TR-16 + TR-17 | ✅ **DONE** — `basecamp-instance.sh` and all `basecamp-*` Makefile targets deleted; `lgs basecamp setup`/`install` own the install path (TR-03 resolved). The retained fallback is the new committed launch bridge `scripts/basecamp-launch.sh` (bridge until [scaffold PR #238](https://github.com/logos-co/scaffold/pull/238) for the macOS `LOGOS_DATA_DIR` gap lands in an adopted release). |
+| Delete `scripts/basecamp-instance.sh` + `make basecamp-{init,run,clean}-*` | TR-03 + TR-04 + TR-05 + TR-08 + TR-12 + TR-16 + TR-17 | ✅ **DONE** — `basecamp-instance.sh` and all `basecamp-*` Makefile targets deleted; `lgs basecamp setup`/`install` own the install path (TR-03 resolved). The interim committed launch bridge `scripts/basecamp-launch.sh` (for the macOS `LOGOS_DATA_DIR` gap) was deleted 2026-07-27 after [scaffold PR #238](https://github.com/logos-co/scaffold/pull/238) merged and the pin moved to `6789ec04`. |
 | Gut `src/cli/infra.rs` + delete `make infra` | TR-06 | Blocked — Anvil co-process hook not yet in scaffold. |
-| Delete `make test` / `make demo` entirely | TR-06 + TR-07 + TR-19 | Blocked — retained; `demo`/`test` already call `lgs run --profile`, but Anvil orchestration stays app-owned. |
+| Delete `make test` / `make demo` entirely | TR-06 + TR-07 + TR-19 | Partially done — `lgs run` adoption landed 2026-07-27 ([PR #239](https://github.com/logos-co/scaffold/pull/239) profiles + `deploy = false`); the thin Make wrappers remain only for the trailing localnet stop (TR-19 / [#172](https://github.com/logos-co/scaffold/issues/172)) and Anvil stays app-owned (TR-06); full deletion still blocked on [#172](https://github.com/logos-co/scaffold/issues/172). |
 
 ## Sequencing
 
