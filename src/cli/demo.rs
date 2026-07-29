@@ -72,7 +72,7 @@ async fn run_demo() -> Result<()> {
             let lez = LezClient::new(&config).unwrap();
 
             eprintln!("  [maker] Waiting for ETH lock");
-            run_maker(&config, &eth, &lez, Some(hashlock), None, None).await
+            run_maker(&config, &eth, &lez, Some(hashlock), None, None, None).await
         })
     };
 

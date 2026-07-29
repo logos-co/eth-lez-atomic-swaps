@@ -202,7 +202,7 @@ async fn test_atomic_swap_happy_path() {
     let maker_handle = tokio::spawn(async move {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None).await
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None, None).await
     });
 
     // Brief pause so maker's ETH watcher is ready before taker locks.
@@ -281,7 +281,7 @@ async fn test_maker_refunds_on_timeout() {
     let outcome = {
         let eth = EthClient::new(&maker_config).await.unwrap();
         let lez = LezClient::new(&maker_config).unwrap();
-        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None)
+        maker::run_maker(&maker_config, &eth, &lez, Some(hashlock), None, None, None)
             .await
             .unwrap()
     };

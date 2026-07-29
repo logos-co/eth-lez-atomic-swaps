@@ -50,6 +50,19 @@ pub struct MakerArgs {
     #[arg(long, env = "TIMELOCK_MARGIN_MINUTES", default_value_t = 5)]
     timelock_margin_minutes: u64,
 
+    /// Acknowledge that `--loop` serves only the single designated taker given
+    /// by `--lez-taker-account` (env `LEZ_TAKER_ACCOUNT_ID`).
+    ///
+    /// The LEZ HTLC `Claim` instruction is gated on `signer == taker_id`, and
+    /// the loop has no inbound channel to learn a public taker's LEZ account
+    /// per-swap (the offer board is publish-only). Every escrow is therefore
+    /// locked to the static configured taker; an arbitrary public taker cannot
+    /// claim. To avoid silently shipping that broken-for-the-public default,
+    /// `--loop` refuses to start unless this flag is set, making the
+    /// designated-counterparty limitation explicit.
+    #[arg(long, env = "RESTRICT_COUNTERPARTY")]
+    restrict_counterparty: bool,
+
     /// Faucet sidecar: loop `wallet pinata claim` (150 LEZ each) until the
     /// maker LEZ balance reaches this target. Standalone (exits when reached)
     /// unless combined with --loop, where it tops up before the loop starts.
@@ -106,7 +119,7 @@ pub async fn cmd_maker(
         println!("Waiting for taker to lock ETH...");
     }
 
-    let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None, None).await?;
+    let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None, None, None).await?;
 
     output::print_swap_outcome(&outcome, json);
     Ok(())
@@ -129,6 +142,23 @@ async fn cmd_maker_loop(
     // Startup guard 1: timelock safety invariant.
     bot::validate_timelocks(lez_minutes, eth_minutes, args.timelock_margin_minutes)?;
 
+    // Startup guard 2 (P1-2): the loop can only serve the single configured
+    // taker, because the LEZ HTLC gates Claim on `signer == taker_id` and there
+    // is no inbound channel to learn a public taker's LEZ account per-swap.
+    // Refuse to run the silently-broken-for-the-public default unless the
+    // operator explicitly opts into the designated-counterparty semantics.
+    if !args.restrict_counterparty {
+        return Err(SwapError::InvalidConfig(
+            "refusing to start --loop: it can only serve the single designated taker set via \
+             --lez-taker-account (LEZ_TAKER_ACCOUNT_ID). The LEZ HTLC Claim is gated on \
+             signer == taker_id and the loop has no way to learn an arbitrary public taker's \
+             LEZ account per-swap, so every escrow would be locked to that one account and no \
+             other taker could claim. Pass --restrict-counterparty (RESTRICT_COUNTERPARTY=1) to \
+             acknowledge this and run the loop for the designated taker."
+                .into(),
+        ));
+    }
+
     let lez_client = LezClient::new(config)?;
     let maker_account = lez_client.account_id();
 
@@ -137,30 +167,49 @@ async fn cmd_maker_loop(
         bot::fund_to_target(config, &args.wallet_bin, target, json).await?;
     }
 
-    // Startup guard 2: LEZ inventory.
+    // Crash recovery FIRST (P1-3): reconcile journaled in-flight swaps before
+    // the free-inventory guard, so an escrow that a previous crash left locked
+    // is refunded/claimed (restoring balance) instead of wedging startup into a
+    // restart-forever loop that never recovers the funds.
+    let store = Arc::new(bot::StateStore::load(&args.state_file)?);
+    let resume_handles = bot::reconcile(config, &store, json).await;
+
+    // Free-inventory guard, applied only before accepting NEW swaps (P1-3).
+    // If we are underfunded but still have in-flight/resuming swaps, do NOT
+    // hard-exit (that would abandon them) — finish recovery, then stop.
     let balance = lez_client.get_balance(&maker_account).await?;
     if balance < config.lez_amount {
-        return Err(SwapError::InvalidConfig(format!(
-            "insufficient LEZ inventory: balance {balance} < offer amount {}; \
-             top up with `swap-cli maker --fund-to <target>` or `wallet pinata claim`",
-            config.lez_amount
-        )));
+        if store.snapshot().is_empty() && resume_handles.is_empty() {
+            return Err(SwapError::InvalidConfig(format!(
+                "insufficient LEZ inventory: balance {balance} < offer amount {}; \
+                 top up with `swap-cli maker --fund-to <target>` or `wallet pinata claim`",
+                config.lez_amount
+            )));
+        }
+        warn!(
+            "LEZ balance {balance} < offer amount {}; not accepting new swaps, \
+             finishing {} in-flight swap(s) then stopping",
+            config.lez_amount,
+            resume_handles.len()
+        );
+        for handle in resume_handles {
+            let _ = handle.await;
+        }
+        return Ok(());
     }
-
-    // Crash recovery: reconcile journaled in-flight swaps.
-    let store = Arc::new(bot::StateStore::load(&args.state_file)?);
-    bot::reconcile(config, &store, json).await;
 
     let cancel = Arc::new(AtomicBool::new(false));
 
-    // Ctrl-C → graceful stop between/within iterations.
+    // Ctrl-C (SIGINT) or SIGTERM → graceful stop between/within iterations.
+    // Handling SIGTERM matters for `systemctl stop` / container shutdown:
+    // otherwise the Node offer-publisher sidecar is orphaned and keeps
+    // advertising an offline maker (P2-1).
     {
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                eprintln!("Ctrl-C received — stopping after current wait...");
-                cancel.store(true, Ordering::Relaxed);
-            }
+            wait_for_shutdown_signal().await;
+            eprintln!("shutdown signal received — stopping after current wait...");
+            cancel.store(true, Ordering::Relaxed);
         });
     }
 
@@ -215,12 +264,12 @@ async fn cmd_maker_loop(
         );
     }
 
-    // Progress drain: prints events and journals in-flight swaps.
+    // Progress drain: prints events. Journaling is NOT done here — the swap flow
+    // records each in-flight swap durably (fsync'd) BEFORE locking LEZ and clears
+    // it only on a confirmed terminal state, via the SwapJournal handle passed
+    // into run_maker_loop (P1-4/P1-5). A print-only drain cannot race the lock.
     let (tx, mut rx) = mpsc::unbounded_channel::<SwapProgress>();
-    let drain_store = store.clone();
     let drain = tokio::spawn(async move {
-        // The loop runs swaps sequentially, so at most one in-flight hashlock.
-        let mut current: Option<String> = None;
         while let Some(event) = rx.recv().await {
             if json {
                 if let Ok(line) = serde_json::to_string(&event) {
@@ -229,24 +278,6 @@ async fn cmd_maker_loop(
             } else {
                 println!("[maker-loop] {}", describe(&event));
             }
-            match &event {
-                SwapProgress::EthLockDetected { swap_id, hashlock } => {
-                    current = Some(hashlock.clone());
-                    drain_store.add(bot::InFlightSwap {
-                        hashlock: hashlock.clone(),
-                        swap_id: swap_id.clone(),
-                        recorded_at: crate::swap::refund::now_unix(),
-                    });
-                }
-                SwapProgress::AutoAcceptSwapCompleted { .. }
-                | SwapProgress::AutoAcceptSwapFailed { .. }
-                | SwapProgress::AutoAcceptStopped { .. } => {
-                    if let Some(hashlock) = current.take() {
-                        drain_store.remove(&hashlock);
-                    }
-                }
-                _ => {}
-            }
         }
     });
 
@@ -254,13 +285,28 @@ async fn cmd_maker_loop(
         lez_timelock_minutes: lez_minutes,
         eth_timelock_minutes: eth_minutes,
     };
-    let result = run_maker_loop(config, &auto_config, &cancel, Some(tx)).await;
+    let timelock_margin_secs = args.timelock_margin_minutes * 60;
+    let result = run_maker_loop(
+        config,
+        &auto_config,
+        &cancel,
+        Some(tx),
+        store.as_ref(),
+        timelock_margin_secs,
+    )
+    .await;
 
     // tx was moved into the loop and dropped on return — drain ends naturally.
     let _ = drain.await;
     cancel.store(true, Ordering::Relaxed);
     if let Some(handle) = publisher_handle {
         handle.abort(); // kill_on_drop reaps the node child
+    }
+
+    // Let any background resume tasks (live escrows recovered at startup) reach a
+    // terminal state before exiting, so we never abandon a locked escrow.
+    for handle in resume_handles {
+        let _ = handle.await;
     }
 
     if json {
@@ -278,6 +324,34 @@ async fn cmd_maker_loop(
         );
     }
     Ok(())
+}
+
+/// Resolve when the process receives a graceful-shutdown signal. On Unix this
+/// is either SIGINT (Ctrl-C) or SIGTERM (`systemctl stop`, `docker stop`,
+/// orchestrator termination); elsewhere it falls back to Ctrl-C only. Handling
+/// SIGTERM ensures the Node offer-publisher sidecar is reaped instead of being
+/// orphaned to keep advertising an offline maker (P2-1).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("failed to install SIGTERM handler ({e}); Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Human-readable one-liner for a progress event.

@@ -1,4 +1,4 @@
-use lez_htlc_program::{HTLCEscrow, HTLCInstruction};
+use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
 use lee::{
     AccountId, PrivateKey, PublicKey, PublicTransaction,
     public_transaction::{Message, WitnessSet},
@@ -17,6 +17,19 @@ use crate::{
     error::{Result, SwapError},
     scaffold,
 };
+
+/// Terminal outcome of a confirmed LEZ refund attempt.
+///
+/// See [`LezClient::refund_confirmed`].
+#[derive(Debug)]
+pub enum RefundOutcome {
+    /// Escrow observed in the `Refunded` state. Carries the submit tx hash when
+    /// this call issued the refund (empty if it was already refunded).
+    Refunded(String),
+    /// A taker claim won the race: the escrow is `Claimed` and carries the
+    /// revealed 32-byte preimage. The maker must claim the ETH side.
+    ClaimedByTaker([u8; 32]),
+}
 
 enum LezBackend {
     Standalone {
@@ -324,6 +337,80 @@ impl LezClient {
 
         info!(tx_hash = %tx_hash, "LEZ HTLC refunded");
         Ok(tx_hash)
+    }
+
+    /// Refund LEZ and wait until the escrow reaches a terminal on-chain state.
+    ///
+    /// The bare [`refund`](Self::refund) returns as soon as the transaction is
+    /// *submitted* — it is not yet committed and can still lose a race to a
+    /// last-moment taker claim, or be rejected during execution. Callers that
+    /// journal in-flight swaps must not drop the entry until the escrow is
+    /// confirmed terminal, otherwise a rejected refund strands locked LEZ (and,
+    /// if the taker actually claimed, the maker still owes itself an ETH claim
+    /// with the revealed preimage). This mirrors the confirmation polling in
+    /// [`lock`](Self::lock).
+    ///
+    /// Returns:
+    /// - [`RefundOutcome::Refunded`] once the escrow is observed `Refunded`.
+    /// - [`RefundOutcome::ClaimedByTaker`] if a taker claim won the race (the
+    ///   escrow is `Claimed` and carries the revealed preimage) — the caller
+    ///   should claim the ETH side instead of treating this as a plain refund.
+    /// - `Err` if neither terminal state is reached before the deadline (the
+    ///   caller must keep the journal entry and retry on the next restart).
+    pub async fn refund_confirmed(&self, hashlock: &[u8; 32]) -> Result<RefundOutcome> {
+        // Fast path: escrow already terminal (or gone) — nothing to submit.
+        match self.get_escrow(hashlock).await? {
+            Some(escrow) => match escrow.state {
+                HTLCState::Refunded => return Ok(RefundOutcome::Refunded(String::new())),
+                HTLCState::Claimed => return Self::claimed_outcome(&escrow),
+                HTLCState::Locked => {}
+            },
+            None => return Ok(RefundOutcome::Refunded(String::new())),
+        }
+
+        // Submit the refund. A concurrent taker claim can make this revert; poll
+        // for the terminal state regardless of the submit result.
+        let submit = self.refund(hashlock).await;
+        let submit_tx = submit.as_ref().ok().cloned();
+        let submit_err = submit.as_ref().err().map(|e| e.to_string());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            match self.get_escrow(hashlock).await? {
+                Some(escrow) => match escrow.state {
+                    HTLCState::Refunded => {
+                        return Ok(RefundOutcome::Refunded(submit_tx.unwrap_or_default()));
+                    }
+                    HTLCState::Claimed => return Self::claimed_outcome(&escrow),
+                    HTLCState::Locked => {}
+                },
+                None => return Ok(RefundOutcome::Refunded(submit_tx.unwrap_or_default())),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SwapError::LezTransaction(match &submit_err {
+                    Some(m) => {
+                        format!("LEZ refund not confirmed and submit failed: {m}")
+                    }
+                    None => "LEZ refund not confirmed before deadline".into(),
+                }));
+            }
+            tokio::time::sleep(self.poll_interval).await;
+        }
+    }
+
+    /// Extract the revealed preimage from a `Claimed` escrow.
+    fn claimed_outcome(escrow: &HTLCEscrow) -> Result<RefundOutcome> {
+        let preimage = escrow
+            .preimage
+            .clone()
+            .and_then(|p| <[u8; 32]>::try_from(p).ok())
+            .ok_or_else(|| {
+                SwapError::InvalidState {
+                    expected: "revealed 32-byte preimage on claimed escrow".into(),
+                    actual: "missing or malformed preimage".into(),
+                }
+            })?;
+        Ok(RefundOutcome::ClaimedByTaker(preimage))
     }
 
     pub fn account_id(&self) -> AccountId {

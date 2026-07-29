@@ -31,7 +31,7 @@ use tracing::{error, info, warn};
 use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
-use crate::lez::client::LezClient;
+use crate::lez::client::{LezClient, RefundOutcome};
 use crate::lez::watcher::{self as lez_watcher, LezHtlcEvent};
 use crate::swap::refund::now_unix;
 
@@ -131,28 +131,59 @@ impl StateStore {
         })
     }
 
-    fn persist(&self, state: &BotState) {
-        let json = match serde_json::to_string_pretty(state) {
-            Ok(j) => j,
-            Err(e) => {
-                error!("maker state serialize failed: {e}");
-                return;
-            }
-        };
+    /// Durably serialize the journal: write a temp file, `fsync` it, atomically
+    /// rename over the target, then best-effort `fsync` the directory so the
+    /// rename itself survives a crash. Returns `Err` on any I/O failure so the
+    /// caller can refuse to proceed (e.g. lock LEZ) without a durable record.
+    fn persist(&self, state: &BotState) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let tmp = self.path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &self.path))
         {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &self.path)?;
+        if let Some(dir) = self.path.parent() {
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
+    }
+
+    /// Best-effort persist: logs on failure. Used by non-critical mutations.
+    fn persist_logged(&self, state: &BotState) {
+        if let Err(e) = self.persist(state) {
             error!("maker state write failed ({}): {e}", self.path.display());
         }
     }
 
-    /// Record an in-flight swap (idempotent on hashlock).
-    pub fn add(&self, swap: InFlightSwap) {
+    /// Durably record an in-flight swap (idempotent on hashlock), returning
+    /// `Err` if the write cannot be made durable. This is the pre-lock journal
+    /// path: the maker must not lock LEZ unless this succeeds.
+    pub fn record(&self, swap: InFlightSwap) -> Result<()> {
         let mut state = self.state.lock().expect("state lock");
-        if !state.in_flight.iter().any(|s| s.hashlock == swap.hashlock) {
-            state.in_flight.push(swap);
-            self.persist(&state);
+        if state.in_flight.iter().any(|s| s.hashlock == swap.hashlock) {
+            return Ok(());
         }
+        state.in_flight.push(swap);
+        self.persist(&state).map_err(|e| {
+            // Roll back the in-memory add so a later retry can re-record.
+            state.in_flight.pop();
+            SwapError::InvalidConfig(format!(
+                "failed to durably journal in-flight swap to {}: {e}",
+                self.path.display()
+            ))
+        })
     }
 
     /// Remove a swap by hashlock (no-op if absent).
@@ -161,12 +192,31 @@ impl StateStore {
         let before = state.in_flight.len();
         state.in_flight.retain(|s| s.hashlock != hashlock);
         if state.in_flight.len() != before {
-            self.persist(&state);
+            self.persist_logged(&state);
         }
     }
 
     pub fn snapshot(&self) -> Vec<InFlightSwap> {
         self.state.lock().expect("state lock").in_flight.clone()
+    }
+}
+
+/// The maker loop drives the journal through this trait (defined in the swap
+/// layer): a durable pre-lock record and a post-terminal clear.
+impl crate::swap::maker::SwapJournal for StateStore {
+    fn record(&self, hashlock_hex: &str, swap_id: &str) -> Result<()> {
+        StateStore::record(
+            self,
+            InFlightSwap {
+                hashlock: hashlock_hex.to_string(),
+                swap_id: swap_id.to_string(),
+                recorded_at: now_unix(),
+            },
+        )
+    }
+
+    fn clear(&self, hashlock_hex: &str) {
+        self.remove(hashlock_hex);
     }
 }
 
@@ -183,19 +233,69 @@ fn parse_swap_id(s: &str) -> Option<FixedBytes<32>> {
     s.parse().ok()
 }
 
-/// Claim the ETH side with a revealed preimage. Best-effort: errors are logged
-/// (the HTLC may already be claimed/refunded), never fatal to the bot.
-async fn claim_eth(config: &SwapConfig, swap_id_str: &str, preimage: [u8; 32]) {
+/// Disposition of an ETH-claim recovery attempt — decides whether the journal
+/// entry may be dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EthClaimOutcome {
+    /// The maker's ETH was claimed by this call.
+    Claimed,
+    /// The ETH HTLC is already terminal on-chain (claimed or refunded) — there
+    /// is nothing left to do, so the journal entry can be dropped.
+    AlreadyTerminal,
+    /// The claim could not be completed (unparseable id, RPC/init failure, or a
+    /// still-OPEN HTLC that reverted). The journal entry MUST be retained so a
+    /// later reconcile retries before the taker's ETH refund deadline.
+    Failed,
+}
+
+/// Whether the journal entry must be retained after an ETH-claim attempt.
+/// Retain only when the attempt failed and the ETH is still recoverable (P1-6).
+pub fn retain_after_eth_claim(outcome: EthClaimOutcome) -> bool {
+    matches!(outcome, EthClaimOutcome::Failed)
+}
+
+/// Claim the ETH side with a revealed preimage. Returns an [`EthClaimOutcome`]
+/// so callers keep the journal entry on transient failure instead of dropping
+/// it (a transient WS/RPC failure must not permanently disable the retry while
+/// the taker's ETH refund deadline approaches).
+async fn claim_eth(config: &SwapConfig, swap_id_str: &str, preimage: [u8; 32]) -> EthClaimOutcome {
     let Some(swap_id) = parse_swap_id(swap_id_str) else {
         warn!("reconcile: unparseable swap_id '{swap_id_str}', cannot claim ETH");
-        return;
+        // Unparseable id is permanent, not transient — nothing to retry.
+        return EthClaimOutcome::AlreadyTerminal;
     };
-    match EthClient::new(config).await {
-        Ok(eth) => match eth.claim(swap_id, preimage).await {
-            Ok(tx) => info!(%tx, "reconcile: claimed ETH with recovered preimage"),
-            Err(e) => warn!("reconcile: ETH claim failed for {swap_id_str}: {e}"),
-        },
-        Err(e) => warn!("reconcile: ETH client init failed: {e}"),
+    let eth = match EthClient::new(config).await {
+        Ok(eth) => eth,
+        Err(e) => {
+            warn!("reconcile: ETH client init failed: {e}");
+            return EthClaimOutcome::Failed;
+        }
+    };
+
+    // Already terminal? Then there is nothing to claim and nothing to retry.
+    if let Ok(htlc) = eth.get_htlc(swap_id).await
+        && !matches!(htlc.state, crate::eth::client::EthHTLC::SwapState::OPEN)
+    {
+        info!(%swap_id, "reconcile: ETH HTLC already terminal, dropping entry");
+        return EthClaimOutcome::AlreadyTerminal;
+    }
+
+    match eth.claim(swap_id, preimage).await {
+        Ok(tx) => {
+            info!(%tx, "reconcile: claimed ETH with recovered preimage");
+            EthClaimOutcome::Claimed
+        }
+        Err(e) => {
+            // The claim may have reverted because it landed after all — re-check.
+            if let Ok(htlc) = eth.get_htlc(swap_id).await
+                && matches!(htlc.state, crate::eth::client::EthHTLC::SwapState::CLAIMED)
+            {
+                info!(%swap_id, "reconcile: ETH already claimed on re-check, dropping entry");
+                return EthClaimOutcome::AlreadyTerminal;
+            }
+            warn!("reconcile: ETH claim failed for {swap_id_str}, keeping entry: {e}");
+            EthClaimOutcome::Failed
+        }
     }
 }
 
@@ -239,46 +339,77 @@ async fn resume_swap(
         "resume: watching live escrow ({expiry_secs}s until LEZ timelock)"
     );
 
-    loop {
+    // Whether the journal entry may be cleared. Only a CONFIRMED terminal state
+    // (ETH claimed, or LEZ refund observed on-chain) drops it — a transient
+    // failure keeps it for the next reconcile (P1-6 / P1-7).
+    let remove_entry = loop {
         tokio::select! {
             Some(event) = rx.recv() => match event {
                 LezHtlcEvent::Claimed { preimage, .. } => {
-                    if let Ok(preimage) = <[u8; 32]>::try_from(preimage) {
-                        info!(hashlock = %entry.hashlock, "resume: taker claimed LEZ, claiming ETH");
-                        claim_eth(&config, &entry.swap_id, preimage).await;
-                    } else {
-                        warn!(hashlock = %entry.hashlock, "resume: preimage has wrong length");
+                    match <[u8; 32]>::try_from(preimage) {
+                        Ok(preimage) => {
+                            info!(hashlock = %entry.hashlock, "resume: taker claimed LEZ, claiming ETH");
+                            let outcome = claim_eth(&config, &entry.swap_id, preimage).await;
+                            break !retain_after_eth_claim(outcome);
+                        }
+                        Err(_) => {
+                            warn!(hashlock = %entry.hashlock, "resume: preimage wrong length, keeping entry");
+                            break false;
+                        }
                     }
-                    break;
                 }
                 LezHtlcEvent::Refunded { .. } => {
                     info!(hashlock = %entry.hashlock, "resume: escrow already refunded");
-                    break;
+                    break true;
                 }
                 LezHtlcEvent::Locked { .. } => {}
             },
             _ = tokio::time::sleep(std::time::Duration::from_secs(expiry_secs.max(1))) => {
                 info!(hashlock = %entry.hashlock, "resume: LEZ timelock expired, refunding");
-                match lez_client.refund(&hashlock).await {
-                    Ok(tx) => info!(%tx, "resume: LEZ refunded"),
-                    Err(e) => warn!(hashlock = %entry.hashlock, "resume: LEZ refund failed: {e}"),
+                match lez_client.refund_confirmed(&hashlock).await {
+                    Ok(RefundOutcome::Refunded(tx)) => {
+                        if !tx.is_empty() {
+                            info!(%tx, "resume: LEZ refunded");
+                        }
+                        break true;
+                    }
+                    Ok(RefundOutcome::ClaimedByTaker(preimage)) => {
+                        info!(hashlock = %entry.hashlock, "resume: taker claimed during refund race, claiming ETH");
+                        let outcome = claim_eth(&config, &entry.swap_id, preimage).await;
+                        break !retain_after_eth_claim(outcome);
+                    }
+                    Err(e) => {
+                        warn!(hashlock = %entry.hashlock, "resume: LEZ refund not confirmed, keeping entry: {e}");
+                        break false;
+                    }
                 }
-                break;
             }
         }
-    }
+    };
 
     watcher.abort();
-    store.remove(&entry.hashlock);
+    if remove_entry {
+        store.remove(&entry.hashlock);
+    }
 }
 
 /// Startup reconciliation pass: inspect every journaled in-flight swap
 /// on-chain and refund / complete / resume / drop it. Never fatal — failures
 /// are logged and the entry retained for the next restart.
-pub async fn reconcile(config: &SwapConfig, store: &Arc<StateStore>, json: bool) {
+///
+/// Returns join handles for any still-live escrows resumed in the background so
+/// the caller can await them before exiting (rather than stranding a locked
+/// escrow when the process shuts down right after startup).
+#[must_use]
+pub async fn reconcile(
+    config: &SwapConfig,
+    store: &Arc<StateStore>,
+    json: bool,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut resume_handles = Vec::new();
     let entries = store.snapshot();
     if entries.is_empty() {
-        return;
+        return resume_handles;
     }
     if !json {
         println!(
@@ -291,7 +422,7 @@ pub async fn reconcile(config: &SwapConfig, store: &Arc<StateStore>, json: bool)
         Ok(c) => c,
         Err(e) => {
             error!("reconcile: LEZ client init failed, keeping journal: {e}");
-            return;
+            return resume_handles;
         }
     };
 
@@ -316,14 +447,24 @@ pub async fn reconcile(config: &SwapConfig, store: &Arc<StateStore>, json: bool)
                     match escrow.preimage.and_then(|p| <[u8; 32]>::try_from(p).ok()) {
                         Some(preimage) => {
                             info!(hashlock = %entry.hashlock, "reconcile: escrow claimed, claiming ETH");
-                            claim_eth(config, &entry.swap_id, preimage).await;
+                            let outcome = claim_eth(config, &entry.swap_id, preimage).await;
+                            // Keep the entry on a transient ETH-claim failure so
+                            // the next reconcile retries (P1-6).
+                            if !retain_after_eth_claim(outcome) {
+                                store.remove(&entry.hashlock);
+                            }
                         }
-                        None => warn!(
-                            hashlock = %entry.hashlock,
-                            "reconcile: escrow claimed but preimage missing/invalid"
-                        ),
+                        None => {
+                            // LEZ is terminally claimed but the preimage is
+                            // missing/invalid — the ETH is unrecoverable and
+                            // there is nothing to retry, so drop the entry.
+                            error!(
+                                hashlock = %entry.hashlock,
+                                "reconcile: escrow claimed but preimage missing/invalid, dropping (ETH unrecoverable)"
+                            );
+                            store.remove(&entry.hashlock);
+                        }
                     }
-                    store.remove(&entry.hashlock);
                 }
                 HTLCState::Refunded => {
                     info!(hashlock = %entry.hashlock, "reconcile: escrow already refunded, dropping");
@@ -333,25 +474,37 @@ pub async fn reconcile(config: &SwapConfig, store: &Arc<StateStore>, json: bool)
                     // Escrow timelock is stored in milliseconds.
                     if now_unix() * 1000 >= escrow.timelock {
                         info!(hashlock = %entry.hashlock, "reconcile: escrow expired, refunding LEZ");
-                        match lez_client.refund(&hashlock).await {
-                            Ok(tx) => {
-                                info!(%tx, "reconcile: LEZ refunded");
+                        // Confirm a terminal state before dropping: a taker claim
+                        // can win the race, in which case we claim the ETH side
+                        // instead (P1-7).
+                        match lez_client.refund_confirmed(&hashlock).await {
+                            Ok(RefundOutcome::Refunded(tx)) => {
+                                if !tx.is_empty() {
+                                    info!(%tx, "reconcile: LEZ refunded");
+                                }
                                 store.remove(&entry.hashlock);
+                            }
+                            Ok(RefundOutcome::ClaimedByTaker(preimage)) => {
+                                info!(hashlock = %entry.hashlock, "reconcile: taker claimed during refund race, claiming ETH");
+                                let outcome = claim_eth(config, &entry.swap_id, preimage).await;
+                                if !retain_after_eth_claim(outcome) {
+                                    store.remove(&entry.hashlock);
+                                }
                             }
                             Err(e) => {
                                 // Keep the entry: retry on next restart.
-                                warn!(hashlock = %entry.hashlock, "reconcile: refund failed: {e}");
+                                warn!(hashlock = %entry.hashlock, "reconcile: refund not confirmed, keeping: {e}");
                             }
                         }
                     } else {
                         // Still live — resume it in the background.
-                        tokio::spawn(resume_swap(
+                        resume_handles.push(tokio::spawn(resume_swap(
                             config.clone(),
                             entry.clone(),
                             hashlock,
                             escrow.timelock,
                             store.clone(),
-                        ));
+                        )));
                     }
                 }
             },
@@ -360,6 +513,8 @@ pub async fn reconcile(config: &SwapConfig, store: &Arc<StateStore>, json: bool)
             }
         }
     }
+
+    resume_handles
 }
 
 // ---------------------------------------------------------------------------
@@ -600,17 +755,21 @@ mod tests {
         let store = StateStore::load(&path).unwrap();
         assert!(store.snapshot().is_empty());
 
-        store.add(InFlightSwap {
-            hashlock: "ab".repeat(32),
-            swap_id: format!("0x{}", "cd".repeat(32)),
-            recorded_at: 123,
-        });
+        store
+            .record(InFlightSwap {
+                hashlock: "ab".repeat(32),
+                swap_id: format!("0x{}", "cd".repeat(32)),
+                recorded_at: 123,
+            })
+            .unwrap();
         // Idempotent on hashlock.
-        store.add(InFlightSwap {
-            hashlock: "ab".repeat(32),
-            swap_id: format!("0x{}", "cd".repeat(32)),
-            recorded_at: 456,
-        });
+        store
+            .record(InFlightSwap {
+                hashlock: "ab".repeat(32),
+                swap_id: format!("0x{}", "cd".repeat(32)),
+                recorded_at: 456,
+            })
+            .unwrap();
         assert_eq!(store.snapshot().len(), 1);
 
         // Reload from disk — entry survives a "crash".
@@ -632,6 +791,45 @@ mod tests {
             std::env::temp_dir().join(format!("maker-state-corrupt-{}.json", std::process::id()));
         std::fs::write(&path, "{not json").unwrap();
         assert!(StateStore::load(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn eth_claim_outcome_retain_semantics() {
+        // Only a transient failure retains the journal entry (P1-6): a
+        // confirmed claim or an already-terminal HTLC drops it, a failure keeps
+        // it so a later reconcile retries before the taker's refund deadline.
+        assert!(retain_after_eth_claim(EthClaimOutcome::Failed));
+        assert!(!retain_after_eth_claim(EthClaimOutcome::Claimed));
+        assert!(!retain_after_eth_claim(EthClaimOutcome::AlreadyTerminal));
+    }
+
+    #[test]
+    fn durable_record_survives_reload_and_is_idempotent() {
+        // P1-4 / P1-5: the pre-lock record must be durable (fsync'd) so a crash
+        // between locking LEZ and any later mutation still leaves the entry for
+        // reconcile — and it must not be dropped merely because a swap failed.
+        let path =
+            std::env::temp_dir().join(format!("maker-record-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let store = StateStore::load(&path).unwrap();
+        let swap = InFlightSwap {
+            hashlock: "ab".repeat(32),
+            swap_id: format!("0x{}", "cd".repeat(32)),
+            recorded_at: 7,
+        };
+        store.record(swap.clone()).expect("durable record");
+        // Idempotent on hashlock.
+        store.record(swap).expect("idempotent record");
+        assert_eq!(store.snapshot().len(), 1);
+
+        // Simulate a crash: reload from disk. Entry must still be present
+        // (retained across the "crash" — not silently lost).
+        let reloaded = StateStore::load(&path).unwrap();
+        assert_eq!(reloaded.snapshot().len(), 1);
+        assert_eq!(reloaded.snapshot()[0].recorded_at, 7);
+
         let _ = std::fs::remove_file(&path);
     }
 
