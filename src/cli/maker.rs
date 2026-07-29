@@ -174,28 +174,44 @@ async fn cmd_maker_loop(
     let store = Arc::new(bot::StateStore::load(&args.state_file)?);
     let resume_handles = bot::reconcile(config, &store, json).await;
 
-    // Free-inventory guard, applied only before accepting NEW swaps (P1-3).
-    // If we are underfunded but still have in-flight/resuming swaps, do NOT
-    // hard-exit (that would abandon them) — finish recovery, then stop.
+    // P1-A: fully RESOLVE all reconciled/resumed entries BEFORE the loop accepts
+    // any new swap. Running resume watchers concurrently with the loop lets the
+    // loop's 256-block replay rematch a still-live retained escrow's OPEN ETH
+    // lock and double-fund it (LezClient::lock would see the existing PDA as its
+    // own confirmation and transfer the amount a second time). Draining them
+    // here makes startup sequential and closes that race structurally; the
+    // journal-skip belt (run_maker) and lock() check-before-fund are backstops.
+    let resumed = resume_handles.len();
+    for handle in resume_handles {
+        let _ = handle.await;
+    }
+    if resumed > 0 && !json {
+        println!("Resolved {resumed} resumed in-flight swap(s) before accepting new swaps.");
+    }
+
+    // If the journal STILL holds unresolved fund-bearing entries (reconcile
+    // could not reach a terminal state — e.g. RPC/sequencer trouble), do NOT
+    // start accepting new swaps: exit cleanly so the supervisor restarts and
+    // reconciliation retries, rather than running the loop past unresolved funds
+    // whose still-OPEN locks a fresh watcher could rematch.
+    if !store.snapshot().is_empty() {
+        warn!(
+            "{} in-flight swap(s) still unresolved after reconciliation; stopping so the \
+             supervisor restarts and retries (check RPC/sequencer connectivity)",
+            store.snapshot().len()
+        );
+        return Ok(());
+    }
+
+    // Free-inventory guard: recovery is complete and the journal is empty, so a
+    // shortfall now means we genuinely cannot fund a swap — refuse to start.
     let balance = lez_client.get_balance(&maker_account).await?;
     if balance < config.lez_amount {
-        if store.snapshot().is_empty() && resume_handles.is_empty() {
-            return Err(SwapError::InvalidConfig(format!(
-                "insufficient LEZ inventory: balance {balance} < offer amount {}; \
-                 top up with `swap-cli maker --fund-to <target>` or `wallet pinata claim`",
-                config.lez_amount
-            )));
-        }
-        warn!(
-            "LEZ balance {balance} < offer amount {}; not accepting new swaps, \
-             finishing {} in-flight swap(s) then stopping",
-            config.lez_amount,
-            resume_handles.len()
-        );
-        for handle in resume_handles {
-            let _ = handle.await;
-        }
-        return Ok(());
+        return Err(SwapError::InvalidConfig(format!(
+            "insufficient LEZ inventory: balance {balance} < offer amount {}; \
+             top up with `swap-cli maker --fund-to <target>` or `wallet pinata claim`",
+            config.lez_amount
+        )));
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -303,11 +319,8 @@ async fn cmd_maker_loop(
         handle.abort(); // kill_on_drop reaps the node child
     }
 
-    // Let any background resume tasks (live escrows recovered at startup) reach a
-    // terminal state before exiting, so we never abandon a locked escrow.
-    for handle in resume_handles {
-        let _ = handle.await;
-    }
+    // (Resumed in-flight swaps were already drained before the loop started, so
+    // there are no background recovery tasks left to await here — P1-A.)
 
     if json {
         println!(

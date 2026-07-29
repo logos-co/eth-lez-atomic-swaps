@@ -35,14 +35,42 @@ LEZ_SEQUENCER_URL=https://testnet.lez.logos.co
 LEZ_WALLET_HOME=.scaffold/wallet
 LEZ_ACCOUNT_ID=<maker base58>
 LEZ_HTLC_PROGRAM_ID=<64 hex>
-LEZ_TAKER_ACCOUNT_ID=<any placeholder — real taker comes from the accept>
+LEZ_TAKER_ACCOUNT_ID=<designated taker's LEZ account, base58>   # the ONE counterparty
 LEZ_AMOUNT=150
 ETH_AMOUNT=0.001
 LEZ_TIMELOCK_MINUTES=20
 ETH_TIMELOCK_MINUTES=40
 OFFER_HEARTBEAT_SECS=45
 MAKER_STATE_FILE=/var/lib/lez-maker/state.json
+RESTRICT_COUNTERPARTY=1                 # required to start --loop (see below)
 ```
+
+### Designated-taker requirement (read before you set `LEZ_TAKER_ACCOUNT_ID`)
+
+The LEZ HTLC `Claim` instruction is gated on `signer == taker_id`: only the
+account you name in `LEZ_TAKER_ACCOUNT_ID` can ever claim the LEZ the maker
+locks. The loop has **no inbound channel** to learn a public taker's LEZ
+account per-swap (the offer board is publish-only), so every escrow it creates
+is locked to that one static account. `--loop` therefore refuses to start
+unless you pass `--restrict-counterparty` (`RESTRICT_COUNTERPARTY=1`) to
+acknowledge this — the standing bot serves a **single, pre-arranged
+counterparty**, not the open public.
+
+Real designated-taker flow:
+
+1. Agree the swap with your counterparty out-of-band.
+2. Obtain their LEZ account id (base58): `wallet account list` on their side,
+   or have them send it to you.
+3. Set `LEZ_TAKER_ACCOUNT_ID=<their base58 account>` in `maker.env`.
+4. Start with `--restrict-counterparty` (or `RESTRICT_COUNTERPARTY=1`).
+
+> **⚠️ WARNING — funds lock to whatever taker you configure.** The maker
+> transfers `LEZ_AMOUNT` into an escrow that **only** `LEZ_TAKER_ACCOUNT_ID`
+> can claim. If that value is a placeholder, a typo, or the wrong account, the
+> LEZ is **not lost but is stranded**: no one can claim it, and the maker can
+> only recover it by **refunding after `LEZ_TIMELOCK_MINUTES` expires**
+> (default 20 min per swap). Never point the bot at a placeholder account —
+> set the real counterparty before you start.
 
 ## Funding lifecycle
 

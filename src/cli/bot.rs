@@ -147,16 +147,17 @@ impl StateStore {
             f.sync_all()?;
         }
         std::fs::rename(&tmp, &self.path)?;
-        if let Some(dir) = self.path.parent() {
-            let dir = if dir.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                dir
-            };
-            if let Ok(d) = std::fs::File::open(dir) {
-                let _ = d.sync_all();
-            }
-        }
+        // fsync the directory so the rename's new dir entry survives power loss.
+        // On the critical pre-lock `record` path this MUST NOT be swallowed: a
+        // dropped dir entry after `record` returned Ok would lose the journal on
+        // power loss and strand locked LEZ (the escrow PDA can't be enumerated by
+        // owner). Propagate every failure so the caller refuses to lock (P1-D).
+        let dir = match self.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let d = std::fs::File::open(dir)?;
+        d.sync_all()?;
         Ok(())
     }
 
@@ -199,6 +200,16 @@ impl StateStore {
     pub fn snapshot(&self) -> Vec<InFlightSwap> {
         self.state.lock().expect("state lock").in_flight.clone()
     }
+
+    /// Whether a hashlock is currently journaled as in-flight.
+    pub fn contains(&self, hashlock: &str) -> bool {
+        self.state
+            .lock()
+            .expect("state lock")
+            .in_flight
+            .iter()
+            .any(|s| s.hashlock == hashlock)
+    }
 }
 
 /// The maker loop drives the journal through this trait (defined in the swap
@@ -217,6 +228,10 @@ impl crate::swap::maker::SwapJournal for StateStore {
 
     fn clear(&self, hashlock_hex: &str) {
         self.remove(hashlock_hex);
+    }
+
+    fn contains(&self, hashlock_hex: &str) -> bool {
+        StateStore::contains(self, hashlock_hex)
     }
 }
 
@@ -593,6 +608,17 @@ impl OfferPublisherEnv {
 /// `heartbeat_secs`. If it exits (crash, network loss) it is restarted with a
 /// 30s backoff until `cancel` is set. The offer heartbeat is best-effort: its
 /// failure never affects the swap loop (which coordinates purely on-chain).
+/// Resolve once the cancel flag is set (polled). Used to race a child process
+/// wait against a graceful-shutdown request.
+async fn wait_for_cancel(cancel: &AtomicBool) {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 pub fn spawn_offer_publisher(
     script: PathBuf,
     env: OfferPublisherEnv,
@@ -614,12 +640,26 @@ pub fn spawn_offer_publisher(
                 .envs(env_vars.iter().cloned())
                 .kill_on_drop(true);
             match cmd.spawn() {
-                Ok(mut child) => match child.wait().await {
-                    Ok(status) => {
-                        warn!("offer publisher exited ({status}); restarting in 30s")
+                Ok(mut child) => {
+                    // Race the child against cancellation. On SIGTERM/stop we must
+                    // KILL and REAP the child immediately — otherwise the Node
+                    // sidecar is orphaned and keeps advertising an offline maker
+                    // (relying on kill_on_drop alone can race process teardown).
+                    tokio::select! {
+                        status = child.wait() => match status {
+                            Ok(status) => {
+                                warn!("offer publisher exited ({status}); restarting in 30s")
+                            }
+                            Err(e) => warn!("offer publisher wait failed: {e}; restarting in 30s"),
+                        },
+                        _ = wait_for_cancel(&cancel) => {
+                            info!("offer publisher: cancellation received — killing sidecar");
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            return;
+                        }
                     }
-                    Err(e) => warn!("offer publisher wait failed: {e}; restarting in 30s"),
-                },
+                }
                 Err(e) => warn!(
                     "offer publisher spawn failed ({}): {e}; retrying in 30s \
                      (is node installed and `npm install` run in web/offer-board?)",
@@ -830,6 +870,30 @@ mod tests {
         assert_eq!(reloaded.snapshot().len(), 1);
         assert_eq!(reloaded.snapshot()[0].recorded_at, 7);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_contains_reports_in_flight_hashlocks() {
+        // P1-A belt: the loop skips a hashlock the journal already holds, so
+        // `contains` must reflect recorded/removed entries exactly.
+        let path =
+            std::env::temp_dir().join(format!("maker-contains-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = StateStore::load(&path).unwrap();
+        let hl = "ab".repeat(32);
+        assert!(!store.contains(&hl));
+        store
+            .record(InFlightSwap {
+                hashlock: hl.clone(),
+                swap_id: format!("0x{}", "cd".repeat(32)),
+                recorded_at: 1,
+            })
+            .unwrap();
+        assert!(store.contains(&hl));
+        assert!(!store.contains(&"ff".repeat(32)));
+        store.remove(&hl);
+        assert!(!store.contains(&hl));
         let _ = std::fs::remove_file(&path);
     }
 
