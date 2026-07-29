@@ -26,10 +26,41 @@ use lee::public_transaction::{Message, WitnessSet};
 use lee::{AccountId, PrivateKey, PublicKey, PublicTransaction};
 use lee_core::program::ProgramId;
 use sequencer_service_protocol::LeeTransaction;
-use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
+use sequencer_service_rpc::{ClientError, RpcClient as _, SequencerClient, SequencerClientBuilder};
 use url::Url;
 
 const AT_KEY: &str = "authenticated_transfer";
+
+/// JSON-RPC `InvalidParams`. The sequencer's `send_transaction` returns exactly
+/// this code (via `ErrorObjectOwned::owned(ErrorCode::InvalidParams, ...)`) when
+/// its `transaction_stateless_check()` rejects a transaction — i.e. a genuine
+/// instruction-decoding/validation rejection. See the LEZ repo
+/// `lez/sequencer/service/src/service.rs::send_transaction`. This is the ONLY
+/// submit-time rejection that would prove #640 fixed: nonce/funding are stateful
+/// and never cause a submit rejection, so a stale-nonce/unfunded sender cannot
+/// masquerade as this.
+const JSONRPC_INVALID_PARAMS: i32 = -32602;
+
+/// Why a `send_transaction` call failed, for the malformed-tx branch.
+enum RejectKind {
+    /// The sequencer actively rejected the tx at stateless validation
+    /// (JSON-RPC `InvalidParams`). The only rejection that counts as "#640 fixed".
+    Validation,
+    /// A transport/timeout/protocol/other error — the experiment could not be
+    /// run cleanly. NOT evidence about #640; the canary must report `broken`.
+    Infra,
+}
+
+/// Classify a `send_transaction` error. Only a server-side `Call` carrying the
+/// `InvalidParams` code is a validation rejection; everything else (transport
+/// outage, request timeout, restart, parse error, custom, disconnect, or any
+/// other JSON-RPC error code) is infrastructure noise.
+fn classify_reject(e: &ClientError) -> RejectKind {
+    match e {
+        ClientError::Call(obj) if obj.code() == JSONRPC_INVALID_PARAMS => RejectKind::Validation,
+        _ => RejectKind::Infra,
+    }
+}
 
 fn log(msg: &str) {
     eprintln!("[chain-probe] {msg}");
@@ -221,10 +252,22 @@ async fn main() {
         None => keypair(rand::random()),
     };
 
-    // Optional funding: move each sender's debug-genesis vault supply into its
-    // spendable account. Only then does the control transfer actually finalize a
-    // balance move and the #640 case become "funded sender, still no-op".
+    // Distinct recipients so a silent drop is unambiguous: recipient_valid must
+    // gain `amount`; recipient_invalid must stay at zero. Fresh accounts must be
+    // Initialize'd under authenticated_transfer before they can receive.
+    let (recip_valid_sk, recipient_valid) = keypair(rand::random());
+    let (recip_invalid_sk, recipient_invalid) = keypair(rand::random());
+
+    // Optional funding + initialization. The malformed-tx branch's PASS verdict
+    // ("#640 fixed") is only trustworthy if the invalid-sender was a viable
+    // sender to begin with — funded AND initialized. Otherwise a rejection could
+    // be blamed on an unfunded/uninitialized account rather than the malformed
+    // instruction. So in funded mode we track the invalid-sender's setup and
+    // require it as a precondition before running the experiment.
+    let mut bad_claim_ok = false;
+    let mut bad_init_sent = false;
     if args.funded {
+        // Move each sender's debug-genesis vault supply into its spendable account.
         for (label, id, sk) in [
             ("valid-sender", sender_id, &sender_sk),
             ("invalid-sender", bad_id, &bad_sk),
@@ -233,19 +276,14 @@ async fn main() {
                 Ok(h) => {
                     let ok = poll_balance_at_least(&client, id, args.amount, 20).await;
                     log(&format!("{label} {id}: vault-claim {h}, funded>= {}: {ok}", args.amount));
+                    if id == bad_id {
+                        bad_claim_ok = ok;
+                    }
                 }
                 Err(e) => log(&format!("{label} vault claim failed (continuing): {e}")),
             }
         }
-    }
-
-    // Distinct recipients so a silent drop is unambiguous: recipient_valid must
-    // gain `amount`; recipient_invalid must stay at zero. Fresh accounts must be
-    // Initialize'd under authenticated_transfer before they can receive.
-    let (recip_valid_sk, recipient_valid) = keypair(rand::random());
-    let (recip_invalid_sk, recipient_invalid) = keypair(rand::random());
-
-    if args.funded {
+        // Initialize every account under authenticated_transfer.
         for (label, id, sk) in [
             ("valid-sender", sender_id, &sender_sk),
             ("recipient-valid", recipient_valid, &recip_valid_sk),
@@ -253,12 +291,40 @@ async fn main() {
             ("recipient-invalid", recipient_invalid, &recip_invalid_sk),
         ] {
             match at_initialize(&client, id, sk).await {
-                Ok(h) => log(&format!("{label} authenticated_transfer Initialize: {h}")),
+                Ok(h) => {
+                    log(&format!("{label} authenticated_transfer Initialize: {h}"));
+                    if id == bad_id {
+                        bad_init_sent = true;
+                    }
+                }
                 Err(e) => log(&format!("{label} Initialize skipped/err (ok if already init): {e}")),
             }
         }
-        // Let the Initialize txs land in a block before transferring.
+        // Let the Initialize/claim txs land in a block before transferring.
         tokio::time::sleep(Duration::from_secs(18)).await;
+
+        // PRECONDITION: the invalid-sender must actually hold a spendable
+        // balance now — the real proof it is a viable sender, regardless of
+        // whether Initialize reported "already initialized". If we cannot
+        // establish this, we must NOT run (and cannot trust) the #640
+        // experiment: a later rejection could not be attributed to the
+        // malformed instruction. Report broken and stop.
+        let bad_balance_ready = poll_balance_at_least(&client, bad_id, args.amount, 15).await;
+        log(&format!(
+            "invalid-sender setup: claim_funded={bad_claim_ok} initialize_sent={bad_init_sent} \
+             balance_ready={bad_balance_ready}"
+        ));
+        if !(bad_claim_ok && bad_balance_ready) {
+            verdict(
+                "broken",
+                &format!(
+                    "PRECONDITION FAILED: could not establish a funded+initialized invalid-sender \
+                     ({bad_id}) before the #640 experiment (claim_funded={bad_claim_ok}, \
+                     balance_ready={bad_balance_ready}). A rejection here could not be attributed to \
+                     the malformed instruction vs an unfunded/uninitialized account — not running."
+                ),
+            );
+        }
     }
 
     // 2. VALID typed transfer (control) -----------------------------------
@@ -280,8 +346,34 @@ async fn main() {
     };
     let valid_hash = valid_h.to_string();
     log(&format!("valid typed transfer accepted: {valid_hash}"));
+
+    // GATE on the control BEFORE testing the malformed tx. The malformed-tx
+    // verdict is only meaningful if the sequencer is demonstrably including AND
+    // executing well-formed transfers on this substrate. If the control does not
+    // land, the experiment is confounded — report broken and stop.
     let valid_included = poll_included(&client, valid_h).await;
+    if !valid_included {
+        verdict(
+            "broken",
+            &format!(
+                "CONTROL FAILED: the valid typed transfer {valid_hash} was accepted at submit but \
+                 never included within the poll window — the sequencer is not including transactions, \
+                 so the #640 experiment cannot be trusted. Not testing the malformed tx."
+            ),
+        );
+    }
     let valid_effect = args.funded && poll_balance_at_least(&client, recipient_valid, args.amount, 30).await;
+    if args.funded && !valid_effect {
+        verdict(
+            "broken",
+            &format!(
+                "CONTROL FAILED: the valid typed transfer {valid_hash} was included but moved NO \
+                 balance to recipient_valid ({recipient_valid}) within the poll window — even a \
+                 well-formed transfer did not execute here, so a malformed-tx no-op would be \
+                 indistinguishable from a broken substrate. Not testing the malformed tx."
+            ),
+        );
+    }
     let effect_note = if args.funded {
         format!(
             "; CONTROL valid transfer moved {}→recipient (balance effect observed={valid_effect})",
@@ -297,16 +389,30 @@ async fn main() {
     let bad_tx = build_transfer(at_program, bad_id, &bad_sk, recipient_invalid, bn, bad_amount);
 
     match client.send_transaction(bad_tx).await {
-        // Loud rejection at submit == the sequencer rejected the malformed
-        // instruction. That is exactly what the canary asserts, so it PASSES —
-        // meaning #640 has been fixed upstream.
-        Err(e) => verdict(
-            "pass",
-            &format!(
-                "invalid bare-u128 transfer was LOUDLY REJECTED at submit: {e}. \
-                 #640 appears FIXED. (control valid tx {valid_hash} included={valid_included}{effect_note})"
+        // A rejection at submit. Only a genuine instruction-decoding/validation
+        // rejection (JSON-RPC InvalidParams from the sequencer's stateless
+        // check) proves the sequencer LOUDLY rejected the malformed instruction
+        // => #640 fixed => PASS. A transport/timeout/other error tells us
+        // nothing about #640 (and could even look like a "rejection") => BROKEN.
+        Err(e) => match classify_reject(&e) {
+            RejectKind::Validation => verdict(
+                "pass",
+                &format!(
+                    "invalid bare-u128 transfer was LOUDLY REJECTED at submit by the sequencer's \
+                     validation (JSON-RPC InvalidParams): {e}. #640 appears FIXED. \
+                     (control valid tx {valid_hash} included={valid_included}{effect_note})"
+                ),
             ),
-        ),
+            RejectKind::Infra => verdict(
+                "broken",
+                &format!(
+                    "malformed transfer submission failed with a NON-validation error \
+                     (transport/timeout/protocol, not the sequencer rejecting the instruction): {e}. \
+                     This is NOT evidence about #640 — the experiment could not be run cleanly. \
+                     (control valid tx {valid_hash} included={valid_included}{effect_note})"
+                ),
+            ),
+        },
         // Accepted silently: the canary's red light.
         Ok(h) => {
             let bad_hash = h.to_string();

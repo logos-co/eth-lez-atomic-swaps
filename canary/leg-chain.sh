@@ -43,11 +43,17 @@ DEFAULT_KEY1="7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb"
 DEFAULT_KEY2="f434f8741720014586ae43356d2aec6257da086222f604ddb75d69733b86fc4c"
 
 # 1. Build the probe (fast when the cargo cache is warm) --------------------
+# ALWAYS run the incremental build — never trust a pre-existing /tmp binary. The
+# probe binary lives in a shared CARGO_TARGET_DIR that persists across runs; if
+# the LEZ pin or the probe source changed since a prior run, a stale binary would
+# silently produce a verdict for the WRONG code. `cargo build` is a no-op when
+# nothing changed (cheap) and rebuilds exactly when it must (correct).
+canary_log "building chain-probe (incremental; first build resolves v0.2.0 deps — be patient)"
+if ! ( cd "$PROBE_DIR" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build 2>&1 | tail -5 ); then
+  emit_result "$LEG" broken "chain-probe failed to compile" ; exit $?
+fi
 if [ ! -x "$PROBE_BIN" ]; then
-  canary_log "building chain-probe (first build resolves v0.2.0 deps; be patient)"
-  if ! ( cd "$PROBE_DIR" && CARGO_TARGET_DIR="$TARGET_DIR" cargo build 2>&1 | tail -5 ); then
-    emit_result "$LEG" broken "chain-probe failed to compile" ; exit $?
-  fi
+  emit_result "$LEG" broken "chain-probe build reported success but $PROBE_BIN is missing"; exit $?
 fi
 
 # 2. Optionally boot a throwaway localnet ----------------------------------

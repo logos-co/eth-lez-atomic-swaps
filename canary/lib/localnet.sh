@@ -22,6 +22,21 @@ CANARY_LOCALNET_PID=""
 CANARY_LOCALNET_HOME=""
 CANARY_LOCALNET_MODE=""
 
+# Kill a spawned prebuilt sequencer and remove its throwaway home. Safe to call
+# on any path and more than once (it clears the vars it acts on). This is the
+# single cleanup primitive used by both the failure paths inside
+# canary_localnet_start and by canary_localnet_stop.
+_canary_localnet_cleanup() {
+  if [ -n "${CANARY_LOCALNET_PID:-}" ]; then
+    kill "$CANARY_LOCALNET_PID" 2>/dev/null || true
+    CANARY_LOCALNET_PID=""
+  fi
+  if [ -n "${CANARY_LOCALNET_HOME:-}" ]; then
+    rm -rf "$CANARY_LOCALNET_HOME" 2>/dev/null || true
+    CANARY_LOCALNET_HOME=""
+  fi
+}
+
 _canary_lez_pin() {
   local root; root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   sed -n '/^\[repos\.lez\]/,/^\[/p' "$root/scaffold.toml" \
@@ -82,6 +97,14 @@ PY
         "$bin" "$home/sequencer_config.json" --port "$port" > "$home/seq.log" 2>&1 & echo $! > "$home/pid" )
     CANARY_LOCALNET_PID="$(cat "$home/pid")"
     CANARY_LOCALNET_MODE="prebuilt"
+    # Install cleanup NOW, immediately after spawn — BEFORE the readiness wait
+    # can time out or the caller has had a chance to set its own EXIT trap. This
+    # closes the window where a timeout/early-exit path (or an interrupt during
+    # the wait) would otherwise leak a live sequencer process and its /tmp home,
+    # poisoning later runs. On success the caller (leg-chain.sh) overwrites this
+    # with `trap 'canary_localnet_stop' EXIT INT TERM`, which cleans up the same
+    # way; if it forgets, this trap is still the safety net.
+    trap '_canary_localnet_cleanup' EXIT INT TERM
     # wait for readiness
     local i
     for i in $(seq 1 30); do
@@ -91,11 +114,16 @@ PY
         return 0
       fi
       if ! kill -0 "$CANARY_LOCALNET_PID" 2>/dev/null; then
-        echo "[localnet] sequencer exited early; log:" >&2; tail -20 "$home/seq.log" >&2; return 1
+        echo "[localnet] sequencer exited early; log:" >&2
+        tail -20 "$home/seq.log" >&2 || true
+        _canary_localnet_cleanup   # process already dead; still rm the home
+        return 1
       fi
       sleep 1
     done
-    echo "[localnet] timed out waiting for sequencer readiness" >&2
+    echo "[localnet] timed out waiting for sequencer readiness; killing + cleaning up" >&2
+    tail -20 "$home/seq.log" >&2 2>/dev/null || true
+    _canary_localnet_cleanup
     return 1
   fi
 
@@ -114,8 +142,9 @@ PY
 canary_localnet_stop() {
   case "$CANARY_LOCALNET_MODE" in
     prebuilt)
-      [ -n "$CANARY_LOCALNET_PID" ] && kill "$CANARY_LOCALNET_PID" 2>/dev/null
-      echo "[localnet] stopped prebuilt sequencer (pid $CANARY_LOCALNET_PID)" >&2 ;;
+      local pid="$CANARY_LOCALNET_PID"
+      _canary_localnet_cleanup   # kill the sequencer AND rm its throwaway home
+      echo "[localnet] stopped prebuilt sequencer (pid ${pid:-none}) and removed its home" >&2 ;;
     scaffold)
       logos-scaffold localnet stop >&2 2>/dev/null || true ;;
   esac

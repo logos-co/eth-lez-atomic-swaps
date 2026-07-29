@@ -30,9 +30,15 @@ canary_log "traversing catalog chain from $REPO_JSON"
 # The whole traversal + validation runs in python3 (JSON + urllib, no jq/curl
 # dependency). It prints exactly one line to stdout: STATUS|EVIDENCE.
 OUT="$(ROOT="$ROOT" python3 - <<'PY'
-import json, os, sys, urllib.request, urllib.error
+import json, os, re, sys, urllib.request, urllib.error
 
 root = os.environ["ROOT"]
+
+def ver_key(v):
+    """Loose semver sort key: the run of integers in the version string.
+    Good enough to pick the LATEST release among a package's versions."""
+    nums = re.findall(r"\d+", v or "")
+    return tuple(int(x) for x in nums) if nums else (0,)
 
 def die(status, evidence):
     print(f"{status}|{evidence}")
@@ -89,22 +95,46 @@ pkgs = index.get("packages", [])
 if not pkgs:
     die("fail", "index.json has zero packages")
 
+index_names = {pkg.get("name") for pkg in pkgs if pkg.get("name")}
+
+# Every module the repo actually ships (its metadata.json is the source of
+# truth) MUST appear in the index. A PARTIAL index — e.g. `swap` present but
+# `swap_ui` dropped — is a real catalog regression, so require the full expected
+# set derived from the repo's metadata.json files, not just "at least one".
+missing = sorted(set(truth) - index_names)
+if missing:
+    die("fail",
+        f"index.json is missing expected module(s) {missing} "
+        f"(expected={sorted(truth)}, present={sorted(n for n in index_names if n)})")
+
 checked = []
 problems = []
 for pkg in pkgs:
     name = pkg.get("name")
-    for ver in pkg.get("versions", []):
+    versions = pkg.get("versions", [])
+
+    # metadata.json describes only the LATEST release, so historical versions
+    # must NOT be compared against it (a 2nd release would false-fail the 1st).
+    # Determine the latest version entry for the eventual metadata cross-check.
+    latest_v = None
+    for ver in versions:
+        v = ver.get("version") or ver.get("manifest", {}).get("version")
+        if latest_v is None or ver_key(v) > ver_key(latest_v):
+            latest_v = v
+
+    for ver in versions:
         v = ver.get("version") or ver.get("manifest", {}).get("version")
         url = ver.get("url")
         size = ver.get("size")
         man = ver.get("manifest", {})
-        # manifest name/version must agree with the package + metadata.json
+        # INTERNAL consistency — holds for EVERY historical version:
+        #   manifest.name matches the package, manifest.version matches the
+        #   version entry, and the .lgx asset is reachable with the right size.
         if man.get("name") and man.get("name") != name:
             problems.append(f"{name}: manifest.name={man.get('name')} != package {name}")
-        if name in truth and v and truth[name] != v:
-            problems.append(f"{name}: index version {v} != metadata.json {truth[name]}")
-        elif name not in truth:
-            problems.append(f"{name}: no in-repo metadata.json to validate against")
+        if man.get("version") and v and man.get("version") != v:
+            problems.append(
+                f"{name} {v}: manifest.version={man.get('version')} != version entry {v}")
         # HEAD the .lgx asset (follow GitHub's redirect to the CDN)
         if not url:
             problems.append(f"{name} {v}: version entry has no url")
@@ -119,6 +149,16 @@ for pkg in pkgs:
                 checked.append(f"{name}@{v}({(int(clen)//1024) if clen else '?'}KiB ok)")
         except Exception as e:
             problems.append(f"{name} {v}: asset unreachable {url} ({e})")
+
+    # Cross-check ONLY the latest version per package against metadata.json.
+    if name in truth:
+        if latest_v != truth[name]:
+            problems.append(
+                f"{name}: latest index version {latest_v} != metadata.json {truth[name]}")
+    else:
+        # An extra package with no in-repo metadata.json — can't validate its
+        # version against the source of truth; note it, don't false-fail.
+        checked.append(f"{name}(no in-repo metadata; latest={latest_v} unverified)")
 
 if problems:
     die("fail", "; ".join(problems))

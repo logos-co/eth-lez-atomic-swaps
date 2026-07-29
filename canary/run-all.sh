@@ -20,7 +20,11 @@ source "$HERE/lib/common.sh"
 LEGS=("$@")
 [ ${#LEGS[@]} -eq 0 ] && LEGS=(catalog modules chain swap)
 
-RESULTS="$(mktemp /tmp/canary-results.XXXXXX.jsonl)"
+# BSD/macOS mktemp requires the X's to be TRAILING (a suffix after them is taken
+# literally, breaking a second/concurrent run). Use a trailing-X template and a
+# cleanup trap so we never leak the intermediate JSONL.
+RESULTS="$(mktemp "${TMPDIR:-/tmp}/canary-results.XXXXXX")"
+trap 'rm -f "$RESULTS"' EXIT
 export CANARY_RESULT_FILE="$RESULTS"
 : > "$RESULTS"
 
@@ -34,7 +38,25 @@ for leg in "${LEGS[@]}"; do
   echo "==================== leg: $leg ====================" >&2
   bash "$script"
   rc=$?
-  [ "$rc" -gt "$worst" ] && worst="$rc"
+  # Normalize the leg's exit to the documented canary vocabulary {0,10,20,30}.
+  # A leg that exits with ANYTHING else (a raw `1`, 127, a signal like 130/143,
+  # an uncaught shell error) crashed before/instead of emitting a verdict: treat
+  # it as BROKEN(30) and synthesize a result row so the summary reflects it.
+  # Aggregating on the RAW code would let such an exit hide behind a red — e.g.
+  # a leg dying with `1` after another reported `10` would be masked by numeric
+  # max. Normalizing first guarantees broken/fail can never be masked by red.
+  case "$rc" in
+    0|10|20|30) norm="$rc" ;;
+    *)
+      echo "[canary] leg '$leg' exited with undocumented code $rc; recording BROKEN" >&2
+      emit_result "$leg" broken \
+        "leg exited $rc without a documented canary verdict (crash/signal/uncaught error)" 0 >/dev/null
+      norm=30
+      ;;
+  esac
+  # Priority broken(30) > fail(20) > red(10) > pass(0): a plain numeric max, but
+  # ONLY on the normalized set, so broken/fail is never masked by a red.
+  [ "$norm" -gt "$worst" ] && worst="$norm"
 done
 
 STATUS_JSON="${CANARY_STATUS_JSON:-/tmp/canary-status.json}"

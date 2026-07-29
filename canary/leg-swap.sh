@@ -24,7 +24,10 @@ for tool in make cargo logos-scaffold; do
 done
 
 canary_log "running full two-peer swap via 'make demo' (this boots localnet + anvil)"
-LOG="$(mktemp /tmp/canary-swap.XXXXXX.log)"
+# BSD/macOS mktemp requires TRAILING X's (a `.log` suffix after them is taken
+# literally, so a second/concurrent run collides). This log is deliberately
+# retained (not trap-removed): the result evidence points to it for post-mortem.
+LOG="$(mktemp "${TMPDIR:-/tmp}/canary-swap.XXXXXX")"
 ( cd "$ROOT" && make demo ) > "$LOG" 2>&1
 RC=$?
 tail -30 "$LOG" >&2
@@ -43,7 +46,13 @@ fi
 # Both peers must have completed with the same preimage.
 maker_done=$(grep -c "Maker completed" "$LOG")
 taker_done=$(grep -c "Taker completed" "$LOG")
-mapfile -t preimages < <(grep -oE "preimage: [0-9a-f]+" "$LOG" | awk '{print $2}' | sort -u)
+# NOTE: `mapfile`/`readarray` is bash 4+; macOS ships bash 3.2, where it would
+# error out AFTER the expensive demo already ran. Use a bash-3-compatible
+# while-read loop instead.
+preimages=()
+while IFS= read -r _pre; do
+  [ -n "$_pre" ] && preimages+=("$_pre")
+done < <(grep -oE "preimage: [0-9a-f]+" "$LOG" | awk '{print $2}' | sort -u)
 
 if [ "$maker_done" -ge 1 ] && [ "$taker_done" -ge 1 ] && [ "${#preimages[@]}" -eq 1 ]; then
   emit_result "$LEG" pass "two-peer swap Completed; both peers share preimage ${preimages[0]:0:16}…"
