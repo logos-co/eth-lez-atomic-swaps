@@ -13,13 +13,13 @@ pin = "3d639076ec0946a6a6db799dd5a4648007f362ee"
 
 [repos.basecamp]
 source = "https://github.com/logos-co/logos-basecamp.git"
-pin = "a746cdbc521f72ee22c5a4856fd17a9802bb9d69"
+pin = "8a36a83966b6913072ba211d70056a4181a3f4fb" # tag 0.2.1
 build = "nix-flake"
 attr = { aarch64-darwin = "bin-macos-app", aarch64-linux = "bin-appimage", x86_64-darwin = "bin-macos-app", x86_64-linux = "bin-appimage" }
 
 [repos.lgpm]
 source = "github:logos-co/logos-package-manager"
-pin = "e5c25989861f4487c3dc8c7b3bc0062bcbc3221f"
+pin = "205d6bb295c43e9432aef367dd32dac82e39bddf" # must match the basecamp pin's lgpm rev — see tracker TR-21
 build = "nix-flake"
 attr = "cli-portable"
 

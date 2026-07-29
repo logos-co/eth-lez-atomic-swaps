@@ -81,7 +81,32 @@ infra: contracts localnet-start
 # the `#lgx-portable` packages into each profile via `lgpm cli-portable` with zero
 # variant errors (TR-03 resolved). Their launch path (unpinned Basecamp flake +
 # `--user-dir`) never matched the pinned portable stack, so no minimal launch-only
-# subset was worth keeping. Launch is `lgs basecamp launch <profile>` on every
-# platform: since scaffold PR #238 (adopted at the pinned scaffold commit),
-# `launch` sets an absolute LOGOS_DATA_DIR for the macOS portable stack itself,
-# so the former scripts/basecamp-launch.sh macOS bridge is gone as well.
+# subset was worth keeping.
+#
+# Launch goes through `make basecamp-launch-<profile>` rather than a bare
+# `lgs basecamp launch <profile>`: Basecamp 0.2.x renamed the data-dir override
+# and scaffold has not caught up yet. Basecamp resolves its data tree from
+# LOGOS_USER_DIR (app/utils/LogosBasecampPaths.h `baseDirectory()`), while
+# scaffold's launch still sets only the 0.1.1-era LOGOS_DATA_DIR (scaffold
+# PR #238). On macOS Qt's AppDataLocation ignores XDG_DATA_HOME, so unbridged
+# every profile collapses onto the single shared
+# ~/Library/Application Support/Logos/LogosBasecamp: Basecamp then loads just
+# its 3 embedded modules and `swap` / `swap_ui` / `delivery_module` never
+# appear. Verified against basecamp 0.2.1 — see docs/scaffold-upstream-tracker.md
+# (TR-21). Drop this target once scaffold sets LOGOS_USER_DIR itself.
+#
+# The value MUST be absolute: Basecamp absolutizes the `--user-dir` *flag* but
+# consumes the LOGOS_USER_DIR *env var* verbatim, so a relative value would
+# scatter state under Basecamp's cwd instead of failing loudly. `lgs basecamp
+# launch` inherits ambient env, which is what lets this bridge work at all.
+BASECAMP_USER_DIR = $(CURDIR)/.scaffold/basecamp/profiles/$*/xdg-data/Logos/LogosBasecamp
+
+# The grep guard turns a scaffold-side layout change into a hard error instead
+# of a silently-wrong-directory launch (which looks like "the app opened but my
+# module vanished"). It reuses scaffold's own resolved manifest, so the two
+# cannot drift apart unnoticed.
+basecamp-launch-%:
+	@lgs basecamp paths $* --json | grep -q '"modules_dir": "$(BASECAMP_USER_DIR)/modules"' \
+	  || { echo "basecamp layout drift: scaffold's modules_dir for profile '$*' is not $(BASECAMP_USER_DIR)/modules"; \
+	       echo "compare 'lgs basecamp paths $* --json' with BASECAMP_USER_DIR in the Makefile"; exit 1; }
+	LOGOS_USER_DIR=$(BASECAMP_USER_DIR) lgs basecamp launch $*

@@ -139,6 +139,7 @@ Terms used throughout this doc:
 | [TR-17](#tr-17) | Configurable basecamp profile names (`maker`/`taker` instead of `alice`/`bob`) | P1 |
 | [TR-19](#tr-19) | `lgs run` `stop_on_exit` + `pre_localnet` hook stages | P1 |
 | [TR-20](#tr-20) | `lgs basecamp develop <module>` for verb-set symmetry | P2 |
+| [TR-21](#tr-21) | `launch` must set `LOGOS_USER_DIR` (basecamp 0.2.x dropped `LOGOS_DATA_DIR`), and the lgpm pin must move with the basecamp pin | P0 |
 
 (TR-18 was retired — see [Retired entries](#retired-entries) at the bottom.)
 
@@ -669,6 +670,45 @@ Compose order:
 
 ---
 
+## TR-21
+
+### `launch` must set `LOGOS_USER_DIR`, and the lgpm pin must move with the basecamp pin — P0
+
+**Status.** Open — filed downstream 2026-07-28 while bumping `[repos.basecamp]` from `a746cdbc` (tag `v0.1.1`) to `8a36a839` (tag `0.2.1`). Not yet filed upstream. Supersedes the documentation-only ask in [TR-13](#tr-13).
+
+**TL;DR.** Two scaffold-side defaults are pinned to basecamp `v0.1.1` semantics and both break silently — not loudly — the moment a project adopts a basecamp 0.2.x pin:
+
+1. `launch` exports `LOGOS_DATA_DIR` ([PR #238](https://github.com/logos-co/scaffold/pull/238)). Basecamp 0.2.x resolves its entire data tree from `LOGOS_USER_DIR` / `--user-dir` and ignores `LOGOS_DATA_DIR` entirely.
+2. `DEFAULT_LGPM_PIN = e5c25989` installs packages through a manifest model that has no `view` field, so `lgpm install` drops `view` from every installed `manifest.json`. Basecamp 0.2.x hard-filters `ui_qml` plugins with an empty `view`, so the app installs "successfully" and is then invisible in the launcher.
+
+**Why this hurts us.** Neither failure produces an error. For (1), because Qt's `AppDataLocation` ignores `XDG_DATA_HOME` on macOS, every profile silently collapses onto the shared `~/Library/Application Support/Logos/LogosBasecamp`, so scaffold's per-profile installs are never seen, the two-peer flow loses its isolation, and any stale `v0.1.1`-era dylibs left in that shared tree get loaded into the new host "permissively" (a plausible crash source). For (2), `swap_ui` never appears at all — the exact "app installs but won't open" symptom this repo has been chasing. `scaffold.toml`'s own `BASECAMP_DEPENDENCIES` comment already says "when basecamp bumps, revisit these pins to stay ABI-compatible"; the lgpm pin needs the same treatment, and the manifest-field loss makes it P0 rather than hygiene.
+
+**Suggested fix.**
+
+- Set `LOGOS_USER_DIR` (absolute, per profile) in `launch_env`, keyed off the adopted basecamp pin — or pass `--user-dir`, which basecamp absolutizes itself. Note basecamp consumes the **env var verbatim**, so scaffold must absolutize it exactly as `set_absolute_logos_data_dir` already does. Keep emitting `LOGOS_DATA_DIR` for older pins.
+- Bump `DEFAULT_LGPM_PIN` to the `logos-package-manager` rev the adopted basecamp builds against (basecamp prints it in its startup banner; `0.2.1` → `205d6bb2`). The existing "newer lgpm rejects hashless `.lgx`" caveat in `constants.rs` is stale — `logos-module-builder` now emits a `hashes` block.
+- Refresh `BASECAMP_PREINSTALLED_MODULES`: `0.2.1` embeds `capability_module`, `package_downloader`, `package_manager` as modules and `main_ui`, `package_manager_ui` as plugins inside the bundle (`package_downloader` is new and absent from the current list).
+
+<details>
+<summary>Details</summary>
+
+Evidence, all from basecamp `0.2.1` (`8a36a839`) on `aarch64-darwin`:
+
+- `app/utils/LogosBasecampPaths.h:42-47` — `baseDirectory()` returns `LOGOS_USER_DIR` verbatim when set, else `AppDataLocation` (`+ "Dev"` for non-portable builds). No `LOGOS_DATA_DIR` reference survives anywhere in the tree.
+- `app/main.cpp:69-101` — `--user-dir` / `-u` is absolutized via `QFileInfo::absoluteFilePath()` and `qputenv`'d; the env-var path gets no such treatment.
+- Unbridged `lgs basecamp launch maker` logs `Base data directory: ~/Library/Application Support/Logos/LogosBasecamp` and loads only the 3 embedded modules; `swap` / `swap_ui` / `delivery_module` are absent. With `LOGOS_USER_DIR` exported it logs the profile path, `setUserUiPluginsDirectory` receives the profile's `plugins` dir, and `Module loaded: swap` follows.
+- `src/UIPluginManager.cpp:94-99` — `if (type == "ui_qml") { if (pluginInfo.value("view").toString().isEmpty()) continue; }`.
+- Manifest diff for the same `.lgx`: `tar -xzOf 02-swap_ui.lgx manifest.json` carries `"view": "qml/Main.qml"` plus `hashes`; the copy written by `lgpm e5c25989` carries neither. Cause is re-serialisation of a typed struct — the old `logos-package` `Manifest` has no `view` member, so `toJson()` cannot round-trip it. At `205d6bb2` the model gains `view` (`src/core/manifest.h:111`, parsed `manifest.cpp:226-231`, emitted `manifest.cpp:296-297`) and the installed manifest matches the source byte for byte.
+- Control case proving the loader itself is fine: `lez_explorer_ui` (same hybrid `main`=dylib + `view`=qml shape, installed by the newer lgpm embedded in basecamp) enumerates, loads, and spawns `ui-host` normally.
+
+Separate nuisance found in the same pass, worth a small upstream fix of its own: **`lgs basecamp setup` rewrites `scaffold.toml` and drops comments.** Every run stripped the `# tag v0.2.0` / `# tag 0.2.1` trailing comments and whole standalone comment blocks (the `deploy = false` rationale above `[run.profiles.demo]`, and a multi-line rationale above `[repos.lgpm]`). Trailing same-line comments on keys scaffold itself rewrites do survive. The write path should round-trip the document with `toml_edit` rather than re-serialise it, so hand-maintained rationale in a checked-in config is not silently deleted.
+
+Also worth noting for `basecamp modules` auto-discovery: basecamp `0.2.x` reads **`manifest.json`** only — three independent scanners (liblogos `plugin_manager.cpp`, `package_manager_lib.cpp`, and the standalone runner is the lone `metadata.json` consumer). A stale comment in basecamp's own `tests/sandbox/evil_app/README.md` still claims `metadata.json` makes a plugin hand-copyable.
+
+</details>
+
+---
+
 ## Retired entries
 
 ### TR-18 — `lgs build --vendor-ffi` for local non-Nix cdylib staging
@@ -764,3 +804,4 @@ program, so scaffold's deploy step is redundant here).
 - **2026-05-22** — TR-13 filed as doc PR [logos-co/scaffold#178](https://github.com/logos-co/scaffold/pull/178) noting that `bin-macos-app --user-dir` is orthogonal to scaffold's per-profile XDG isolation; now merged. **All 19 tracker entries are now tracked upstream, closed/merged, or retired (TR-18).** 7 GitHub issues + 2 doc PRs filed across logos-co/scaffold + logos-co/logos-package-manager + logos-co/logos-basecamp.
 - **2026-07-21 (Phase 2)** — Project migrated onto `logos-scaffold` `7c52211`, which lands the `[circuits]` schema (TR-07), `lgs basecamp build` (TR-14), and the `lgpm cli-portable` install path. **TR-03 marked RESOLVED** (portable install works via [scaffold#183](https://github.com/logos-co/scaffold/pull/183) + `lgpm cli-portable`; `extract_lgx_variant` obsolete; LGPM #14 to be closed as stale post-merge). Added a [Phase 2 addendum](#phase-2-addendum-2026-07-21) recording two new P1s, now filed with fixes up: the macOS `lgs basecamp launch` `LOGOS_DATA_DIR` gap ([#236](https://github.com/logos-co/scaffold/issues/236) / [PR #238](https://github.com/logos-co/scaffold/pull/238)) and `lgs run`'s hardcoded `methods/guest/src/bin` deployable-program directory ([#237](https://github.com/logos-co/scaffold/issues/237) / [PR #239](https://github.com/logos-co/scaffold/pull/239), which adds `deploy = false` on `[run]`/`[run.profiles.<name>]` to re-enable `lgs run` here once adopted). Until then `make demo-makefile` / `make test-makefile` remain the working paths.
 - **2026-07-27** — Pin bumped to `logos-scaffold` `6789ec04` (scaffold master), which adds [PR #238](https://github.com/logos-co/scaffold/pull/238) and [PR #239](https://github.com/logos-co/scaffold/pull/239) (both merged 2026-07-22, closing [#236](https://github.com/logos-co/scaffold/issues/236) / [#237](https://github.com/logos-co/scaffold/issues/237)). Adopted downstream: the launch bridge `scripts/basecamp-launch.sh` is deleted (`lgs basecamp launch <profile>` is the launch path on every platform); `deploy = false` set on both run profiles so `make demo` / `make test` run `lgs run --profile demo|test` (the trailing localnet stop stays app-owned until TR-19 / [#172](https://github.com/logos-co/scaffold/issues/172) lands); `make demo-makefile` / `make test-makefile` and the `check-circuits` Makefile guard deleted — the guard superseded by scaffold [PR #221](https://github.com/logos-co/scaffold/pull/221) (circuits auto-materialize + `lgs doctor` check; TR-07 / [#173](https://github.com/logos-co/scaffold/issues/173) functionally delivered but still open upstream). `scripts/scaffold-setup.sh` remains, now tracked upstream as [scaffold#240](https://github.com/logos-co/scaffold/issues/240) (LEZ v0.2.0 repo layout — wallet crate under `lez/` — in `lgs setup`; filed 2026-07-22), and grew a second v0.2.0 seeding bridge during this adoption: the v0.2.0 debug wallet config ships no `initial_accounts`, so scaffold's setup cannot seed the `default_address=` line in `.scaffold/state/wallet.state` that `lgs run`'s mandatory topup step requires — the bridge initializes the project wallet and runs `logos-scaffold wallet default set` itself. Relatedly, the Makefile now exports `LEE_WALLET_HOME_DIR` (the v0.2.0 wallet env name; scaffold subprocesses still export the older `NSSA_WALLET_HOME_DIR`, so without it wallet CLI children operate on `~/.lee/wallet` instead of the project wallet — both facets belong to [#240](https://github.com/logos-co/scaffold/issues/240)). Still no scaffold release tag (TR-01 / [#170](https://github.com/logos-co/scaffold/issues/170) still open), so the pin remains a raw master SHA.
+- **2026-07-28** — `[repos.basecamp]` bumped `a746cdbc` (tag `v0.1.1`, 2026-03-19) → `8a36a839` (tag **`0.2.1`**, 2026-07-03), and `[repos.lgpm]` bumped `e5c25989` → `205d6bb2` (the `logos-package-manager` rev that Basecamp pin builds against). The basecamp bump was needed because v0.1.1 could not load module-builder's hybrid `ui_qml` plugins (`main`=dylib + `view`=qml) — `swap_ui` rendered in the sidebar but clicking did nothing. The paired lgpm bump turned out to be equally necessary and was only visible *after* the basecamp bump: the old lgpm dropped `view` from every installed `manifest.json`, and Basecamp 0.2.x hard-filters `ui_qml` plugins with an empty `view`, so `swap_ui` went from "click-dead" to absent from the launcher entirely. Both verified against 0.2.1: the installed manifest now round-trips `view` + `hashes` byte-for-byte from the `.lgx`, and `swap` + `delivery_module` load. Filed **TR-21** for the two scaffold-side defaults this exposed (`launch` must export `LOGOS_USER_DIR`, since 0.2.x dropped `LOGOS_DATA_DIR`; and `DEFAULT_LGPM_PIN` must track the basecamp pin) — bridged downstream by the new `make basecamp-launch-<profile>` target until scaffold catches up. GUI click-through remains unverified by automation.
