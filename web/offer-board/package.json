@@ -1,0 +1,21 @@
+{
+  "name": "offer-board",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Public Waku offer board for LEZ<->ETH atomic swaps (logos.dev fleet, cluster 2) + maker offer-publisher sidecar",
+  "scripts": {
+    "build": "node build.mjs",
+    "smoke": "node smoke.mjs",
+    "publish-offer": "node publish-offer.mjs"
+  },
+  "dependencies": {
+    "@libp2p/tcp": "^10.1.19",
+    "@multiformats/multiaddr": "^12.5.1",
+    "@waku/sdk": "^0.0.36",
+    "@waku/utils": "^0.0.27"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}
