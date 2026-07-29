@@ -260,9 +260,7 @@ pub async fn run() -> Result<()> {
     let config = cli.config.into_swap_config()?;
 
     match cli.command {
-        Commands::Maker(args) => {
-            maker::cmd_maker(args, &config, timelock_minutes, cli.json).await
-        }
+        Commands::Maker(args) => maker::cmd_maker(args, &config, timelock_minutes, cli.json).await,
         Commands::Taker(args) => taker::cmd_taker(args, &config, cli.json).await,
         Commands::Refund(args) => refund::cmd_refund(args, &config, cli.json).await,
         Commands::Status(args) => status::cmd_status(args, &config, cli.json).await,

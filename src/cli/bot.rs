@@ -140,8 +140,7 @@ impl StateStore {
             }
         };
         let tmp = self.path.with_extension("json.tmp");
-        if let Err(e) =
-            std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &self.path))
+        if let Err(e) = std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &self.path))
         {
             error!("maker state write failed ({}): {e}", self.path.display());
         }
@@ -222,7 +221,10 @@ async fn resume_swap(
     let watcher_client = match LezClient::new(&config) {
         Ok(c) => c,
         Err(e) => {
-            error!("resume: LEZ watcher init failed for {}: {e}", entry.hashlock);
+            error!(
+                "resume: LEZ watcher init failed for {}: {e}",
+                entry.hashlock
+            );
             return;
         }
     };
@@ -295,7 +297,10 @@ pub async fn reconcile(config: &SwapConfig, store: &Arc<StateStore>, json: bool)
 
     for entry in entries {
         let Some(hashlock) = parse_hashlock_hex(&entry.hashlock) else {
-            warn!("reconcile: dropping unparseable hashlock '{}'", entry.hashlock);
+            warn!(
+                "reconcile: dropping unparseable hashlock '{}'",
+                entry.hashlock
+            );
             store.remove(&entry.hashlock);
             continue;
         };
@@ -395,9 +400,18 @@ impl OfferPublisherEnv {
     fn to_env(&self, heartbeat_secs: u64) -> Vec<(String, String)> {
         vec![
             ("OFFER_LEZ_AMOUNT".into(), self.lez_amount.to_string()),
-            ("OFFER_ETH_AMOUNT_WEI".into(), self.eth_amount_wei.to_string()),
-            ("OFFER_MAKER_ETH_ADDRESS".into(), self.maker_eth_address.clone()),
-            ("OFFER_MAKER_LEZ_ACCOUNT".into(), self.maker_lez_account.clone()),
+            (
+                "OFFER_ETH_AMOUNT_WEI".into(),
+                self.eth_amount_wei.to_string(),
+            ),
+            (
+                "OFFER_MAKER_ETH_ADDRESS".into(),
+                self.maker_eth_address.clone(),
+            ),
+            (
+                "OFFER_MAKER_LEZ_ACCOUNT".into(),
+                self.maker_lez_account.clone(),
+            ),
             (
                 "OFFER_LEZ_TIMELOCK_MINUTES".into(),
                 self.lez_timelock_minutes.to_string(),
@@ -410,7 +424,10 @@ impl OfferPublisherEnv {
                 "OFFER_LEZ_HTLC_PROGRAM_ID".into(),
                 self.lez_htlc_program_id_hex.clone(),
             ),
-            ("OFFER_ETH_HTLC_ADDRESS".into(), self.eth_htlc_address.clone()),
+            (
+                "OFFER_ETH_HTLC_ADDRESS".into(),
+                self.eth_htlc_address.clone(),
+            ),
             ("OFFER_HEARTBEAT_SECS".into(), heartbeat_secs.to_string()),
         ]
     }
@@ -433,9 +450,14 @@ pub fn spawn_offer_publisher(
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            info!("offer publisher: starting {} (heartbeat {heartbeat_secs}s)", script.display());
+            info!(
+                "offer publisher: starting {} (heartbeat {heartbeat_secs}s)",
+                script.display()
+            );
             let mut cmd = tokio::process::Command::new("node");
-            cmd.arg(&script).envs(env_vars.iter().cloned()).kill_on_drop(true);
+            cmd.arg(&script)
+                .envs(env_vars.iter().cloned())
+                .kill_on_drop(true);
             match cmd.spawn() {
                 Ok(mut child) => match child.wait().await {
                     Ok(status) => {
@@ -492,7 +514,9 @@ pub async fn fund_to_target(
         let balance = lez_client.get_balance(&account_id).await?;
         if balance >= target {
             if !json {
-                println!("Funding target reached: balance {balance} >= {target} ({claims} claim(s))");
+                println!(
+                    "Funding target reached: balance {balance} >= {target} ({claims} claim(s))"
+                );
             }
             return Ok(balance);
         }
@@ -569,10 +593,8 @@ mod tests {
 
     #[test]
     fn state_store_roundtrips_and_persists() {
-        let path = std::env::temp_dir().join(format!(
-            "maker-state-test-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("maker-state-test-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         let store = StateStore::load(&path).unwrap();
@@ -606,10 +628,8 @@ mod tests {
 
     #[test]
     fn corrupt_state_file_is_an_error_not_a_wipe() {
-        let path = std::env::temp_dir().join(format!(
-            "maker-state-corrupt-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("maker-state-corrupt-{}.json", std::process::id()));
         std::fs::write(&path, "{not json").unwrap();
         assert!(StateStore::load(&path).is_err());
         let _ = std::fs::remove_file(&path);

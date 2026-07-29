@@ -166,7 +166,9 @@ async fn cmd_maker_loop(
 
     // Heartbeat offer publisher (best-effort sidecar).
     let publisher_handle = if args.heartbeat_secs == 0 {
-        warn!("offer heartbeat disabled (--heartbeat-secs 0) — board viewers will not see this offer");
+        warn!(
+            "offer heartbeat disabled (--heartbeat-secs 0) — board viewers will not see this offer"
+        );
         None
     } else {
         let script = args
@@ -179,8 +181,7 @@ async fn cmd_maker_loop(
             });
         match script {
             Some(script) if script.exists() => {
-                let mut env =
-                    bot::OfferPublisherEnv::from_config(config, lez_minutes, eth_minutes);
+                let mut env = bot::OfferPublisherEnv::from_config(config, lez_minutes, eth_minutes);
                 env.maker_lez_account = account_id_to_base58(&maker_account);
                 Some(bot::spawn_offer_publisher(
                     script,
