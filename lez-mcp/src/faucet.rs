@@ -25,6 +25,18 @@ use sequencer_service_rpc::{RpcClient as _, SequencerClient};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 
+/// Sets a shared cancel flag when dropped. Held on the async side across the
+/// `spawn_blocking` join: if the awaiting future is cancelled (the MCP request
+/// is dropped), this guard's `Drop` fires and flips the flag, so the detached
+/// blocking solver stops promptly at its next check instead of hashing on.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Prize per claim, hardcoded in the pinata guest program.
 pub const PRIZE_PER_CLAIM: u128 = 150;
 
@@ -132,48 +144,86 @@ pub struct ClaimSubmission {
     pub tx_hash: String,
 }
 
-/// Solve the current challenge and submit one claim transaction crediting
-/// `winner`. Returns the tx hash; the caller is responsible for waiting until
-/// the claim commits (winner balance +150 / seed rotation) before re-claiming.
+/// A solved-but-not-yet-submitted claim: the PoW answer for the challenge that
+/// was current when [`solve_claim`] ran, plus the winner it credits.
+pub struct SolvedClaim {
+    pub solution: u128,
+    pub winner: AccountId,
+}
+
+/// Fetch the current challenge and brute-force its PoW, crediting `winner`.
 ///
-/// `pow_permits` is a process-global concurrency guard: only a small number of
-/// PoW solves run at once, so concurrent/multi-claim callers can never occupy
-/// every blocking worker. Each solve is additionally bounded by
-/// [`MAX_POW_ITERATIONS`] and [`POW_SOLVE_TIMEOUT`].
-pub async fn submit_claim(
+/// This is the CPU-bound half of a claim, kept separate from submission so the
+/// caller can re-verify the write gate in the gap between the (possibly
+/// 45-second) solve and the actual `send_transaction`.
+///
+/// Concurrency/cancellation correctness:
+/// - `pow_permits` (an `Arc<Semaphore>`) caps concurrent solves. The permit is
+///   acquired *owned* and **moved into the blocking closure**, so it is held
+///   for exactly as long as the solve actually runs — even if the awaiting
+///   future is cancelled and the `JoinHandle` is dropped (which detaches, but
+///   does not stop, the blocking task). This keeps the permit count honest and
+///   prevents unbounded concurrent solves under MCP cancellation.
+/// - A [`CancelOnDrop`] guard is held across the join; if the future is
+///   cancelled it flips the shared flag so the detached solver stops promptly.
+///
+/// Each solve is additionally bounded by [`MAX_POW_ITERATIONS`] and
+/// [`POW_SOLVE_TIMEOUT`].
+pub async fn solve_claim(
     sequencer: &SequencerClient,
     winner: AccountId,
-    pow_permits: &Semaphore,
-) -> Result<ClaimSubmission, String> {
+    pow_permits: Arc<Semaphore>,
+) -> Result<SolvedClaim, String> {
     let challenge = pinata_challenge(sequencer).await?;
 
-    // Serialize CPU-bound solves behind the global guard, and give the
-    // uncancellable blocking task a deadline + cancel flag so it self-limits.
-    let _permit = pow_permits
-        .acquire()
+    let permit = pow_permits
+        .acquire_owned()
         .await
         .map_err(|e| format!("PoW concurrency guard closed: {e}"))?;
     let deadline = Instant::now() + POW_SOLVE_TIMEOUT;
     let cancel = Arc::new(AtomicBool::new(false));
+    // Drop-guard: if THIS future is cancelled while awaiting the join below,
+    // its Drop sets the flag and the detached solver stops at its next check.
+    let cancel_guard = CancelOnDrop(cancel.clone());
     let cancel_task = cancel.clone();
     let solution = tokio::task::spawn_blocking(move || {
+        // The permit lives here — released only when the solve genuinely ends,
+        // not when the async side's future is dropped.
+        let _permit = permit;
         compute_solution_bounded(&challenge, MAX_POW_ITERATIONS, Some(deadline), &cancel_task)
     })
     .await
     .map_err(|e| {
-        // The blocking task was dropped/panicked — signal it to stop hashing.
+        // The blocking task panicked — signal it (redundantly) to stop.
         cancel.store(true, Ordering::Relaxed);
         format!("PoW task panicked: {e}")
     })??;
 
-    let instruction_data = Program::serialize_instruction(solution)
+    // Solve completed normally; the guard has done its job. Defuse it so it does
+    // not set the (now meaningless) flag on scope exit.
+    std::mem::forget(cancel_guard);
+
+    Ok(SolvedClaim { solution, winner })
+}
+
+/// Build and broadcast the unsigned claim transaction for an already-solved
+/// challenge. Returns the tx hash; the caller must wait for on-chain commitment
+/// (winner balance +150 / seed rotation) before re-claiming.
+///
+/// Call this immediately after a fresh write-gate check: the send happens here,
+/// so the gate is re-verified after the PoW solve and after any semaphore wait.
+pub async fn submit_solved_claim(
+    sequencer: &SequencerClient,
+    solved: &SolvedClaim,
+) -> Result<ClaimSubmission, String> {
+    let instruction_data = Program::serialize_instruction(solved.solution)
         .map_err(|e| format!("failed to serialize pinata instruction: {e}"))?;
 
     // Unsigned public transaction: accounts [pinata, winner], no nonces, no
     // witnesses — matches the wallet's PublicNoSign claim path exactly.
     let message = Message::new_preserialized(
         programs::pinata().id(),
-        vec![system_accounts::pinata_account_id(), winner],
+        vec![system_accounts::pinata_account_id(), solved.winner],
         vec![],
         instruction_data,
     );
@@ -185,7 +235,7 @@ pub async fn submit_claim(
         .map_err(|e| format!("pinata claim submission failed: {e}"))?;
 
     Ok(ClaimSubmission {
-        solution,
+        solution: solved.solution,
         tx_hash: tx_hash.to_string(),
     })
 }
@@ -273,6 +323,55 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let bounded = compute_solution_bounded(&data, MAX_POW_ITERATIONS, None, &cancel).unwrap();
         assert_eq!(bounded, compute_solution(&data).unwrap());
+    }
+
+    #[test]
+    fn cancel_on_drop_sets_the_flag() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _g = CancelOnDrop(flag.clone());
+            assert!(!flag.load(Ordering::Relaxed), "flag stays clear while guard is live");
+        }
+        assert!(flag.load(Ordering::Relaxed), "dropping the guard cancels");
+    }
+
+    // The permit must live INSIDE the blocking solve, releasing only when the
+    // solve actually ends — not when the async side's future is dropped. Model
+    // that here: hold an owned permit inside a blocking task, confirm no second
+    // permit is available while it runs, then cancel and confirm the permit is
+    // released only after the (detached-style) task finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permit_is_held_through_the_solve_and_released_on_cancel() {
+        let sem = Arc::new(Semaphore::new(1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_task = cancel.clone();
+
+        // An effectively unsolvable challenge so the solve only ends on cancel.
+        let mut data = [0x11u8; 33];
+        data[0] = 32;
+
+        let permit = sem.clone().acquire_owned().await.unwrap();
+        let handle = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            compute_solution_bounded(&data, MAX_POW_ITERATIONS, None, &cancel_task)
+        });
+
+        // While the solve runs, the sole permit is held: no second solve admitted.
+        assert!(
+            sem.clone().try_acquire_owned().is_err(),
+            "permit must stay held for the duration of the solve"
+        );
+
+        // Cancel (as CancelOnDrop would on future-drop) and let the task finish.
+        cancel.store(true, Ordering::Relaxed);
+        let res = handle.await.expect("join");
+        assert!(res.is_err(), "cancelled solve returns an error");
+
+        // Only now — after the solve genuinely ended — is the permit free.
+        assert!(
+            sem.try_acquire().is_ok(),
+            "permit released once the blocking solve ends"
+        );
     }
 
     #[test]

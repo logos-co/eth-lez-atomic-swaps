@@ -73,6 +73,37 @@ fn gate_is_fresh(gs: &GateState, ttl: Duration, now: Instant) -> bool {
     gs.gate.writes_enabled() && now.saturating_duration_since(gs.checked_at) < ttl
 }
 
+/// Single-flight, double-checked gate refresh. Holds `lock` so only one
+/// verification runs at a time; re-checks freshness *after* acquiring the lock
+/// so a caller that queued behind an in-flight refresh reuses its result rather
+/// than launching a second one. Because run + store happen serially under the
+/// lock, a slower/older response can never overwrite a newer verdict (no
+/// completion-order resurrection of stale states). Returns the effective gate.
+async fn refresh_gate_single_flight<F, Fut>(
+    gate: &RwLock<GateState>,
+    lock: &tokio::sync::Mutex<()>,
+    ttl: Duration,
+    refresh: F,
+) -> Gate
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Gate>,
+{
+    let _flight = lock.lock().await;
+    // Double-check: another refresh may have completed while we waited.
+    {
+        let gs = gate.read().await;
+        if gate_is_fresh(&gs, ttl, Instant::now()) {
+            return gs.gate.clone();
+        }
+    }
+    let new_gate = refresh().await;
+    let mut gs = gate.write().await;
+    gs.gate = new_gate.clone();
+    gs.checked_at = Instant::now();
+    new_gate
+}
+
 /// A server-issued transfer preview, bound to the exact parameters it previewed
 /// and consumed on first use. A caller cannot broadcast a transfer that was
 /// never previewed (or previewed with different parameters).
@@ -148,10 +179,21 @@ pub struct Ctx {
     pub lez: Option<LezClient>,
     pub signer: Option<Signer>,
     gate: RwLock<GateState>,
+    /// Serializes write-gate refreshes so only one live fingerprint runs at a
+    /// time (single-flight). Without it, two concurrent refreshes race and a
+    /// slower/older response can overwrite a newer verdict with a fresh stamp.
+    refresh_lock: tokio::sync::Mutex<()>,
+    /// Serializes the full faucet claim cycle (fetch challenge → solve → submit
+    /// → confirm) across ALL invocations. The pinata seed rotates on every
+    /// committed claim, so two concurrent claims could otherwise solve the same
+    /// seed and have the loser's solution silently dropped/misattributed.
+    claim_lock: tokio::sync::Mutex<()>,
     /// Live transfer preview tokens, keyed by token string.
     preview_tokens: Mutex<HashMap<String, PreviewToken>>,
-    /// Global guard limiting concurrent faucet PoW solves.
-    pow_permits: Semaphore,
+    /// Global guard limiting concurrent faucet PoW solves (CPU bound). With the
+    /// per-target `claim_lock` above serializing whole cycles this is largely a
+    /// secondary safety cap, but it keeps the solve-permit accounting honest.
+    pow_permits: Arc<Semaphore>,
     eth: OnceCell<EthReader>,
 }
 
@@ -172,8 +214,10 @@ impl Ctx {
                 gate,
                 checked_at: Instant::now(),
             }),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            claim_lock: tokio::sync::Mutex::new(()),
             preview_tokens: Mutex::new(HashMap::new()),
-            pow_permits: Semaphore::new(POW_CONCURRENCY),
+            pow_permits: Arc::new(Semaphore::new(POW_CONCURRENCY)),
             eth: OnceCell::new(),
         }
     }
@@ -349,18 +393,22 @@ impl LezMcpServer {
             }
         }
 
-        // Refresh against the configured sequencer.
-        let outcome = run_fingerprint(&self.ctx.sequencer, &self.ctx.cfg.sequencer_url).await;
-        let gate = {
-            let mut gs = self.ctx.gate.write().await;
-            gs.gate = match &outcome {
-                Ok(report) if report.matched => Gate::Verified(report.clone()),
-                Ok(report) => Gate::Mismatch(report.clone()),
-                Err(e) => Gate::Unverified { error: e.clone() },
-            };
-            gs.checked_at = Instant::now();
-            gs.gate.clone()
-        };
+        // Refresh against the configured sequencer — single-flight + double
+        // checked so concurrent writers share one verification and cannot let
+        // an older response resurrect a stale verdict.
+        let gate = refresh_gate_single_flight(
+            &self.ctx.gate,
+            &self.ctx.refresh_lock,
+            FINGERPRINT_TTL,
+            || async {
+                match run_fingerprint(&self.ctx.sequencer, &self.ctx.cfg.sequencer_url).await {
+                    Ok(report) if report.matched => Gate::Verified(report),
+                    Ok(report) => Gate::Mismatch(report),
+                    Err(e) => Gate::Unverified { error: e },
+                }
+            },
+        )
+        .await;
 
         if gate.writes_enabled() {
             Ok(())
@@ -580,9 +628,13 @@ impl LezMcpServer {
             ),
         };
 
-        let outcome = run_fingerprint(&client, &url).await;
-
-        if updates_gate {
+        // When this re-check targets the configured sequencer it updates the
+        // gate. Serialize that run+store under the same lock the write-gate
+        // refresh uses, so an explicit re-check and a concurrent write-path
+        // refresh cannot interleave and resurrect a stale verdict.
+        let outcome = if updates_gate {
+            let _flight = self.ctx.refresh_lock.lock().await;
+            let outcome = run_fingerprint(&client, &url).await;
             let mut gs = self.ctx.gate.write().await;
             gs.gate = match &outcome {
                 Ok(report) if report.matched => Gate::Verified(report.clone()),
@@ -590,7 +642,10 @@ impl LezMcpServer {
                 Err(e) => Gate::Unverified { error: e.clone() },
             };
             gs.checked_at = Instant::now();
-        }
+            outcome
+        } else {
+            run_fingerprint(&client, &url).await
+        };
 
         match outcome {
             Ok(report) => {
@@ -692,17 +747,39 @@ impl LezMcpServer {
                 break;
             }
 
-            // Re-verify the write gate before EACH claim (TTL-cached, so a
-            // multi-claim loop re-checks each ~minute-long iteration without
-            // hammering getProgramIds).
+            // Serialize the ENTIRE claim cycle (fetch challenge → solve → submit
+            // → confirm) across all invocations: the pinata seed rotates on each
+            // committed claim, so overlapping cycles could otherwise solve the
+            // same seed and have the loser silently dropped. Held until this
+            // iteration's confirm completes (seed has rotated by then).
+            let _claim_guard = self.ctx.claim_lock.lock().await;
+
+            // Solve first (fetch challenge + PoW; may take up to ~45s and may
+            // wait on the PoW semaphore). The gate is (re)checked AFTER this,
+            // immediately before the send, so a long solve/wait cannot let the
+            // submission ride a fingerprint that has since gone stale.
+            let solved = match faucet::solve_claim(
+                &self.ctx.sequencer,
+                account_id,
+                self.ctx.pow_permits.clone(),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    incomplete = Some(e);
+                    break;
+                }
+            };
+
+            // Fresh write gate immediately before the send (post-PoW,
+            // post-semaphore). A failed recheck aborts THIS submission.
             if let Err(refusal) = self.ensure_fresh_write_gate().await {
                 return Ok(refusal);
             }
 
             let submission =
-                match faucet::submit_claim(&self.ctx.sequencer, account_id, &self.ctx.pow_permits)
-                    .await
-                {
+                match faucet::submit_solved_claim(&self.ctx.sequencer, &solved).await {
                     Ok(s) => s,
                     Err(e) => {
                         incomplete = Some(e);
@@ -1273,6 +1350,56 @@ mod tests {
             checked_at: now,
         };
         assert!(!gate_is_fresh(&unverified, FINGERPRINT_TTL, now));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn single_flight_refresh_runs_once_under_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let embedded = crate::fingerprint::embedded_program_ids();
+        let verified = Gate::Verified(crate::fingerprint::build_report(
+            "http://x",
+            &embedded,
+            &embedded.clone(),
+        ));
+
+        // Start stale so the first caller must refresh.
+        let gate = Arc::new(RwLock::new(GateState {
+            gate: Gate::Unverified { error: "stale".into() },
+            checked_at: Instant::now() - FINGERPRINT_TTL - Duration::from_secs(1),
+        }));
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let runs = Arc::new(AtomicUsize::new(0));
+
+        // Fire many concurrent refreshers; the "verification" is deliberately
+        // slow so they all pile up behind the single-flight lock.
+        let mut handles = Vec::new();
+        for _ in 0..12 {
+            let gate = gate.clone();
+            let lock = lock.clone();
+            let runs = runs.clone();
+            let verified = verified.clone();
+            handles.push(tokio::spawn(async move {
+                refresh_gate_single_flight(&gate, &lock, FINGERPRINT_TTL, || async {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    verified.clone()
+                })
+                .await
+            }));
+        }
+
+        for h in handles {
+            assert!(
+                h.await.unwrap().writes_enabled(),
+                "every caller observes the verified verdict"
+            );
+        }
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "double-checked single-flight runs the verification exactly once"
+        );
     }
 
     #[test]

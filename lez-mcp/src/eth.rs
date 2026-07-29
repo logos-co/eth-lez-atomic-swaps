@@ -21,12 +21,46 @@ const LOG_SCAN_CHUNK: u64 = 40_000;
 /// longer be replayed to exhaust the provider's rate/window limits.
 const MAX_CHUNKS_PER_CALL: u64 = 16;
 
+/// On each scan we rewind the resume point by this many blocks and re-read the
+/// tail, so a chain reorg near the previous head cannot leave orphaned events
+/// cached (nor permanently skip a canonical block that a reorg introduced).
+/// Sepolia reorgs are shallow; 64 blocks is a comfortable safety margin.
+const REORG_SAFETY_WINDOW: u64 = 64;
+
 /// A `Locked` event we have already seen, remembered across calls so repeated
-/// scans never re-read the same range.
+/// scans never re-read the same range. Identity for deduplication is
+/// `(tx_hash, log_index)`; `block` places it for reorg-window replacement.
 #[derive(Clone, Copy)]
 struct SeenLock {
     swap_id: [u8; 32],
     hashlock: [u8; 32],
+    block: u64,
+    tx_hash: [u8; 32],
+    log_index: u64,
+}
+
+/// Lowest block to re-scan this call: rewind `next_block` by `window`, but never
+/// below `from_block` (the deployment block / configured floor).
+fn rewind_start(next_block: u64, from_block: u64, window: u64) -> u64 {
+    next_block.saturating_sub(window).max(from_block)
+}
+
+/// Replace every cached event in the (re-scanned) range `[start, end]` with the
+/// `fresh` reads for that range. Cached events in the range that are absent from
+/// `fresh` are dropped (reorg orphans); `fresh` events are added, deduped
+/// against survivors by `(tx_hash, log_index)` so overlapping windows across
+/// calls never double-count.
+fn reconcile_range(locked: &mut Vec<SeenLock>, start: u64, end: u64, fresh: Vec<SeenLock>) {
+    // Drop everything in the rescanned range — orphans included.
+    locked.retain(|l| l.block < start || l.block > end);
+    for f in fresh {
+        let dup = locked
+            .iter()
+            .any(|l| l.tx_hash == f.tx_hash && l.log_index == f.log_index);
+        if !dup {
+            locked.push(f);
+        }
+    }
 }
 
 /// Incremental scan state. `next_block` is the lowest block not yet scanned;
@@ -92,13 +126,18 @@ impl EthReader {
             .map_err(|e| format!("getHTLC call failed: {e}"))
     }
 
-    /// Resolve a hashlock to its HTLC(s) by scanning `Locked` events. Bounded
-    /// and incremental:
-    /// - First serve any already-cached matches, then scan only the delta
-    ///   `[next_block, head]` this process has not seen yet.
+    /// Resolve a hashlock to its HTLC(s) by scanning `Locked` events. Bounded,
+    /// incremental, and reorg-safe:
+    /// - Each call rewinds the resume point by [`REORG_SAFETY_WINDOW`] blocks
+    ///   and re-reads that tail, replacing the cached events in the rewound
+    ///   range with fresh reads (deduped by `(tx_hash, log_index)`). A reorg can
+    ///   therefore neither strand an orphaned event in the cache nor permanently
+    ///   skip a canonical block introduced by the reorg.
     /// - Scan at most `MAX_CHUNKS_PER_CALL` chunks per call (the request
-    ///   budget); cache the progress so a follow-up call resumes rather than
+    ///   budget); progress is cached so a follow-up call resumes rather than
     ///   restarts. When the budget is hit before head, `reached_head` is false.
+    /// - Matches are recomputed from the reconciled cache after scanning, so a
+    ///   reorged-away match is not reported from stale cache.
     pub async fn find_by_hashlock(&self, hashlock: [u8; 32]) -> Result<ScanOutcome, String> {
         let provider = self.contract.provider();
         let latest = provider
@@ -106,16 +145,11 @@ impl EthReader {
             .await
             .map_err(|e| format!("eth_blockNumber failed: {e}"))?;
 
-        // Resume point + any already-known matching swap ids from prior scans.
-        let (mut start, mut matched_ids) = {
+        // Rewind the resume point by the safety window to re-scan a possibly
+        // reorged tail (clamped to the deployment/floor block).
+        let mut start = {
             let cache = self.cache.lock().expect("scan cache poisoned");
-            let matched: Vec<[u8; 32]> = cache
-                .locked
-                .iter()
-                .filter(|l| l.hashlock == hashlock)
-                .map(|l| l.swap_id)
-                .collect();
-            (cache.next_block, matched)
+            rewind_start(cache.next_block, self.from_block, REORG_SAFETY_WINDOW)
         };
 
         let mut chunks_used = 0u64;
@@ -134,24 +168,29 @@ impl EthReader {
 
             let mut fresh = Vec::new();
             for log in logs {
+                // Positional metadata for reorg reconciliation / dedup. Present
+                // on any confirmed getLogs result; fall back defensively.
+                let block = log.block_number.unwrap_or(start);
+                let tx_hash = log.transaction_hash.map(|h| h.0).unwrap_or([0u8; 32]);
+                let log_index = log.log_index.unwrap_or(0);
                 if let Ok(decoded) = log.log_decode::<EthHTLC::Locked>() {
                     let event = &decoded.inner.data;
-                    let seen = SeenLock {
+                    fresh.push(SeenLock {
                         swap_id: event.swapId.0,
                         hashlock: event.hashlock.0,
-                    };
-                    if seen.hashlock == hashlock && !matched_ids.contains(&seen.swap_id) {
-                        matched_ids.push(seen.swap_id);
-                    }
-                    fresh.push(seen);
+                        block,
+                        tx_hash,
+                        log_index,
+                    });
                 }
             }
 
-            // Commit this chunk's discoveries + advance the resume point.
+            // Replace this chunk's cached events with the fresh reads (drops
+            // reorg orphans) and advance the resume point.
             {
                 let mut cache = self.cache.lock().expect("scan cache poisoned");
+                reconcile_range(&mut cache.locked, start, end, fresh);
                 if end + 1 > cache.next_block {
-                    cache.locked.extend(fresh);
                     cache.next_block = end + 1;
                 }
             }
@@ -160,10 +199,18 @@ impl EthReader {
             start = end + 1;
         }
 
-        let coverage_to = {
-            // next_block - 1 is the highest block fully scanned across all calls.
+        // Recompute matches from the reconciled cache (so a reorged-away match
+        // is not resurrected) and the coverage high-water mark.
+        let (matched_ids, coverage_to) = {
             let cache = self.cache.lock().expect("scan cache poisoned");
-            cache.next_block.saturating_sub(1)
+            let mut matched: Vec<[u8; 32]> = Vec::new();
+            for l in &cache.locked {
+                if l.hashlock == hashlock && !matched.contains(&l.swap_id) {
+                    matched.push(l.swap_id);
+                }
+            }
+            // next_block - 1 is the highest block fully scanned across all calls.
+            (matched, cache.next_block.saturating_sub(1))
         };
         let reached_head = coverage_to >= latest;
 
@@ -221,5 +268,78 @@ mod tests {
         assert!(parse_bytes32("0x1234").is_err());
         assert!(parse_bytes32("zz").is_err());
         assert!(parse_bytes32("").is_err());
+    }
+
+    fn lock(swap: u8, hash: u8, block: u64, tx: u8, idx: u64) -> SeenLock {
+        SeenLock {
+            swap_id: [swap; 32],
+            hashlock: [hash; 32],
+            block,
+            tx_hash: [tx; 32],
+            log_index: idx,
+        }
+    }
+
+    #[test]
+    fn rewind_start_clamps_to_from_block() {
+        // Normal rewind by the window.
+        assert_eq!(rewind_start(1000, 500, 64), 936);
+        // Rewinding past the floor clamps to from_block.
+        assert_eq!(rewind_start(520, 500, 64), 500);
+        assert_eq!(rewind_start(500, 500, 64), 500);
+        // Saturating: never underflows.
+        assert_eq!(rewind_start(10, 0, 64), 0);
+    }
+
+    #[test]
+    fn reconcile_drops_reorg_orphans_and_reads_canonical() {
+        // Cache: a stable event below the rewound range, and one inside it that
+        // a reorg has since orphaned (no longer on-chain).
+        let mut cache = vec![
+            lock(1, 1, 900, 0xAA, 0),  // stable, below the rescanned range
+            lock(2, 2, 1000, 0xBB, 0), // orphaned by the reorg
+        ];
+        // Fresh reads for [950, 1010]: the canonical chain now has a different
+        // event at 1000 (a block a reorg introduced / replaced).
+        let fresh = vec![lock(3, 3, 1000, 0xCC, 0)];
+        reconcile_range(&mut cache, 950, 1010, fresh);
+
+        assert!(
+            cache.iter().any(|l| l.block == 900 && l.tx_hash == [0xAA; 32]),
+            "event below the rewound range is untouched"
+        );
+        assert!(
+            !cache.iter().any(|l| l.tx_hash == [0xBB; 32]),
+            "reorg orphan inside the rewound range is dropped"
+        );
+        assert!(
+            cache.iter().any(|l| l.tx_hash == [0xCC; 32]),
+            "canonical replacement is read in"
+        );
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn reconcile_is_idempotent_and_dedupes_by_tx_and_index() {
+        let mut cache = vec![lock(1, 1, 1000, 0xAA, 0)];
+        let fresh = vec![lock(1, 1, 1000, 0xAA, 0)];
+        // Re-scanning the same window twice must not duplicate the event.
+        reconcile_range(&mut cache, 950, 1010, fresh.clone());
+        reconcile_range(&mut cache, 950, 1010, fresh);
+        assert_eq!(
+            cache.len(),
+            1,
+            "same (tx_hash, log_index) must not be double-counted across re-scans"
+        );
+
+        // Two logs in the same tx are distinct by log_index.
+        let mut multi = Vec::new();
+        reconcile_range(
+            &mut multi,
+            950,
+            1010,
+            vec![lock(4, 4, 1000, 0xDD, 0), lock(5, 5, 1000, 0xDD, 1)],
+        );
+        assert_eq!(multi.len(), 2, "distinct log_index in one tx are separate events");
     }
 }
