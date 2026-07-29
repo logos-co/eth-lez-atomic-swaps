@@ -81,10 +81,27 @@ async fn sepolia_htlc_readable_by_swap_id_and_hashlock() {
     assert_eq!(state_str(&htlc.state), "CLAIMED");
     assert_eq!(hex::encode(htlc.hashlock.0), KNOWN_HASHLOCK);
 
-    // By hashlock: the Locked-event scan resolves to the same swap id.
+    // By hashlock: the bounded, incremental Locked-event scan resolves to the
+    // same swap id. May take more than one call if the budget is hit first.
     let hashlock = parse_bytes32(KNOWN_HASHLOCK).unwrap();
-    let (found, from, to) = eth.find_by_hashlock(hashlock).await.expect("scan");
-    println!("hashlock scan over blocks {from}..{to}: {} match(es)", found.len());
+    let mut found = Vec::new();
+    for _ in 0..64 {
+        let scan = eth.find_by_hashlock(hashlock).await.expect("scan");
+        println!(
+            "hashlock scan coverage {}..{} (reached_head={}): {} match(es)",
+            scan.coverage_from,
+            scan.coverage_to,
+            scan.reached_head,
+            scan.found.len()
+        );
+        if !scan.found.is_empty() {
+            found = scan.found;
+            break;
+        }
+        if scan.reached_head {
+            break;
+        }
+    }
     assert!(
         found.iter().any(|f| hex::encode(f.swap_id) == KNOWN_SWAP_ID),
         "expected swap id {KNOWN_SWAP_ID} in scan results"

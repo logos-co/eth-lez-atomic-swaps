@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use lez_mcp::{
     config::McpConfig,
-    fingerprint::run_fingerprint,
+    fingerprint::{redact_url, run_fingerprint},
     server::{Ctx, Gate, LezMcpServer, Signer},
     swap_config_for,
 };
@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = McpConfig::from_env().map_err(|e| format!("config error: {e}"))?;
-    info!(sequencer = %cfg.sequencer_url, "starting lez-mcp");
+    // Redacted: the raw URL may carry basic-auth/query credentials.
+    info!(sequencer = %redact_url(&cfg.sequencer_url), "starting lez-mcp");
 
     let sequencer_url = url::Url::parse(&cfg.sequencer_url)
         .map_err(|e| format!("invalid LEZ_SEQUENCER_URL: {e}"))?;

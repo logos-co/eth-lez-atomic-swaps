@@ -1,8 +1,9 @@
 //! The MCP server: five typed tools over the LEZ public testnet and the
 //! Sepolia EthHTLC, with a version-fingerprint write gate.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use lee::{AccountId, PrivateKey, PublicKey, PublicTransaction, public_transaction::WitnessSet};
 use rmcp::{
@@ -11,7 +12,7 @@ use rmcp::{
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
-use sequencer_service_protocol::LeeTransaction;
+use sequencer_service_protocol::{HashType, LeeTransaction};
 use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,19 +20,33 @@ use swap_orchestrator::{
     config::{LezAuth, account_id_to_base58, parse_base58_account_id},
     lez::client::LezClient,
 };
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{OnceCell, RwLock, Semaphore};
 
 use crate::{
     config::McpConfig,
     eth::{EthReader, parse_bytes32, state_str},
     faucet,
-    fingerprint::{FingerprintReport, run_fingerprint},
+    fingerprint::{FingerprintReport, redact_url, run_fingerprint},
 };
 
 /// How long to wait for a submitted LEZ effect to commit (public-testnet
 /// blocks are ~30–60 s apart).
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(240);
 const COMMIT_POLL: Duration = Duration::from_secs(5);
+
+/// The write gate re-verifies the sequencer fingerprint before a submission if
+/// the cached verification is older than this. Bounds getProgramIds load on
+/// multi-claim loops while still catching a mid-session testnet upgrade.
+const FINGERPRINT_TTL: Duration = Duration::from_secs(60);
+
+/// Lifetime of a transfer preview token (server-issued, single-use).
+const PREVIEW_TTL: Duration = Duration::from_secs(180);
+
+/// Process-global cap on concurrent faucet PoW solves.
+const POW_CONCURRENCY: usize = 2;
+
+/// Hard cap on faucet claim iterations per call.
+const MAX_FAUCET_CLAIMS: u32 = 20;
 
 // ── Write gate ──────────────────────────────────────────────────────────
 
@@ -43,6 +58,29 @@ pub enum Gate {
     Mismatch(FingerprintReport),
     /// Fingerprint could not run (sequencer unreachable) — writes refused.
     Unverified { error: String },
+}
+
+/// The gate plus the instant it was last (re)verified against the configured
+/// sequencer. Held under one lock so freshness and verdict move together.
+struct GateState {
+    gate: Gate,
+    checked_at: Instant,
+}
+
+/// A write may ride the cached gate only if it is currently verified AND the
+/// verification is younger than `ttl`. Anything else forces a refresh.
+fn gate_is_fresh(gs: &GateState, ttl: Duration, now: Instant) -> bool {
+    gs.gate.writes_enabled() && now.saturating_duration_since(gs.checked_at) < ttl
+}
+
+/// A server-issued transfer preview, bound to the exact parameters it previewed
+/// and consumed on first use. A caller cannot broadcast a transfer that was
+/// never previewed (or previewed with different parameters).
+struct PreviewToken {
+    from: AccountId,
+    to: AccountId,
+    amount: u128,
+    expires: Instant,
 }
 
 impl Gate {
@@ -109,7 +147,11 @@ pub struct Ctx {
     /// Present when a signing key is configured; wraps the app's LezClient.
     pub lez: Option<LezClient>,
     pub signer: Option<Signer>,
-    pub gate: RwLock<Gate>,
+    gate: RwLock<GateState>,
+    /// Live transfer preview tokens, keyed by token string.
+    preview_tokens: Mutex<HashMap<String, PreviewToken>>,
+    /// Global guard limiting concurrent faucet PoW solves.
+    pow_permits: Semaphore,
     eth: OnceCell<EthReader>,
 }
 
@@ -126,7 +168,12 @@ impl Ctx {
             sequencer,
             lez,
             signer,
-            gate: RwLock::new(gate),
+            gate: RwLock::new(GateState {
+                gate,
+                checked_at: Instant::now(),
+            }),
+            preview_tokens: Mutex::new(HashMap::new()),
+            pow_permits: Semaphore::new(POW_CONCURRENCY),
             eth: OnceCell::new(),
         }
     }
@@ -166,6 +213,60 @@ fn tool_fail(message: impl Into<String>) -> CallToolResult {
     err_json(json!({"ok": false, "error": message.into()}))
 }
 
+/// A fresh, unguessable preview token (256 bits from the system CSPRNG).
+fn new_preview_token() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).expect("system CSPRNG unavailable");
+    hex::encode(buf)
+}
+
+/// Drop preview tokens expired as of `now` so the store cannot grow unbounded.
+fn prune_preview_tokens_at(store: &mut HashMap<String, PreviewToken>, now: Instant) {
+    store.retain(|_, t| t.expires > now);
+}
+
+/// Drop expired preview tokens (relative to the current instant).
+fn prune_preview_tokens(store: &mut HashMap<String, PreviewToken>) {
+    prune_preview_tokens_at(store, Instant::now());
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TokenCheck {
+    Ok,
+    /// Unknown, already-consumed, or pruned-as-expired token.
+    Missing,
+    /// Present but past its expiry.
+    Expired,
+    /// Present and live, but bound to different (from, to, amount).
+    Mismatch,
+}
+
+/// Validate a preview token against the intended transfer parameters and
+/// consume it (single-use — removed whether or not it validates). Prunes
+/// expired tokens first so the store cannot accumulate stale entries.
+fn check_and_consume_token(
+    store: &mut HashMap<String, PreviewToken>,
+    token: &str,
+    from: &AccountId,
+    to: &AccountId,
+    amount: u128,
+    now: Instant,
+) -> TokenCheck {
+    prune_preview_tokens_at(store, now);
+    match store.remove(token) {
+        None => TokenCheck::Missing,
+        Some(pt) => {
+            if pt.expires <= now {
+                TokenCheck::Expired
+            } else if &pt.from != from || &pt.to != to || pt.amount != amount {
+                TokenCheck::Mismatch
+            } else {
+                TokenCheck::Ok
+            }
+        }
+    }
+}
+
 // ── Tool parameters ─────────────────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -189,7 +290,7 @@ pub struct FaucetParams {
     /// Claim repeatedly until the balance reaches this value (u128, as a
     /// string). Omit for a single claim.
     pub target_balance: Option<String>,
-    /// Safety cap on claim iterations (default 10, max 50).
+    /// Safety cap on claim iterations (default 10, max 20).
     pub max_claims: Option<u32>,
 }
 
@@ -202,6 +303,10 @@ pub struct TransferParams {
     /// false (default) returns a dry-run preview; true broadcasts.
     #[serde(default)]
     pub confirm: bool,
+    /// Server-issued token from a prior confirm=false preview. REQUIRED when
+    /// confirm=true: it binds this broadcast to the exact previewed
+    /// (from, to, amount), is single-use, and expires after a few minutes.
+    pub preview_token: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -222,21 +327,90 @@ impl LezMcpServer {
         Self { ctx }
     }
 
-    /// Refuse writes unless the last fingerprint against the configured
-    /// sequencer matched. Returns the structured diff on refusal.
-    async fn check_writes_allowed(&self) -> Result<(), CallToolResult> {
-        let gate = self.ctx.gate.read().await;
-        if gate.writes_enabled() {
-            return Ok(());
+    /// Current cached write-gate verdict (no refresh).
+    async fn writes_enabled(&self) -> bool {
+        self.ctx.gate.read().await.gate.writes_enabled()
+    }
+
+    /// Gate a write. Any submission must be covered by a *fresh-enough* verified
+    /// fingerprint: if the cached verification is stale (older than
+    /// [`FINGERPRINT_TTL`]) or not currently verified, re-run getProgramIds
+    /// against the configured sequencer before proceeding. A refresh failure —
+    /// or a mismatch surfaced by the refresh — blocks the write. Called before
+    /// EACH submission (every claim iteration, every transfer/initialize) so a
+    /// mid-session testnet upgrade cannot let writes ride an obsolete
+    /// fingerprint.
+    async fn ensure_fresh_write_gate(&self) -> Result<(), CallToolResult> {
+        // Fast path: currently verified and still fresh.
+        {
+            let gs = self.ctx.gate.read().await;
+            if gate_is_fresh(&gs, FINGERPRINT_TTL, Instant::now()) {
+                return Ok(());
+            }
         }
-        Err(err_json(json!({
-            "ok": false,
-            "error": "writes_disabled",
-            "reason": "version fingerprint against the configured sequencer did not verify; \
-                       a mismatched client's transactions are silently dropped, so write tools \
-                       are refused. Run lez_fingerprint (no arguments) to re-check.",
-            "fingerprint": gate.to_json(),
-        })))
+
+        // Refresh against the configured sequencer.
+        let outcome = run_fingerprint(&self.ctx.sequencer, &self.ctx.cfg.sequencer_url).await;
+        let gate = {
+            let mut gs = self.ctx.gate.write().await;
+            gs.gate = match &outcome {
+                Ok(report) if report.matched => Gate::Verified(report.clone()),
+                Ok(report) => Gate::Mismatch(report.clone()),
+                Err(e) => Gate::Unverified { error: e.clone() },
+            };
+            gs.checked_at = Instant::now();
+            gs.gate.clone()
+        };
+
+        if gate.writes_enabled() {
+            Ok(())
+        } else {
+            Err(err_json(json!({
+                "ok": false,
+                "error": "writes_disabled",
+                "reason": "the live version fingerprint against the configured sequencer did not \
+                           verify (re-checked immediately before this write); a mismatched \
+                           client's transactions are silently dropped, so write tools are \
+                           refused. Run lez_fingerprint (no arguments) for the full diff.",
+                "fingerprint": gate.to_json(),
+            })))
+        }
+    }
+
+    /// Confirm a *specific* submitted transaction rather than trusting any
+    /// balance credit (which concurrent transfers/claims or duplicate
+    /// submissions can forge). Polls `getTransaction(tx_hash)`: the sequencer
+    /// silently drops what it will not execute, so the tx appearing by hash is
+    /// a tx-specific commitment signal. Falls back to a balance-delta check —
+    /// explicitly marked weak — only if `getTransaction` is unavailable.
+    /// Returns `(confirmed, strength)`.
+    async fn confirm_submitted_tx(
+        &self,
+        tx_hash: &str,
+        account: &AccountId,
+        expected_min_balance: u128,
+    ) -> (bool, &'static str) {
+        if let Ok(hash) = tx_hash.parse::<HashType>() {
+            let bytes = hash.0;
+            let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+            loop {
+                match self.ctx.sequencer.get_transaction(HashType(bytes)).await {
+                    Ok(Some(_)) => return (true, "tx_committed"),
+                    Ok(None) => {}
+                    // RPC lacks/refused getTransaction — drop to the weak path.
+                    Err(_) => break,
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    // Strong *negative*: the tx is not committed within the window.
+                    return (false, "tx_committed");
+                }
+                tokio::time::sleep(COMMIT_POLL).await;
+            }
+        }
+
+        // Weak fallback: any credit reaching the threshold (cross-confirmable).
+        let (_bal, ok) = self.wait_balance_at_least(account, expected_min_balance).await;
+        (ok, "balance_delta_weak")
     }
 
     async fn balance_of(&self, account_id: &AccountId) -> Result<u128, String> {
@@ -368,7 +542,7 @@ impl LezMcpServer {
                 "ok": true,
                 "account_id": account_id_to_base58(&account_id),
                 "balance": balance.to_string(),
-                "sequencer_url": self.ctx.cfg.sequencer_url,
+                "sequencer_url": redact_url(&self.ctx.cfg.sequencer_url),
             }))),
             Err(e) => Ok(tool_fail(e)),
         }
@@ -409,12 +583,13 @@ impl LezMcpServer {
         let outcome = run_fingerprint(&client, &url).await;
 
         if updates_gate {
-            let mut gate = self.ctx.gate.write().await;
-            *gate = match &outcome {
+            let mut gs = self.ctx.gate.write().await;
+            gs.gate = match &outcome {
                 Ok(report) if report.matched => Gate::Verified(report.clone()),
                 Ok(report) => Gate::Mismatch(report.clone()),
                 Err(e) => Gate::Unverified { error: e.clone() },
             };
+            gs.checked_at = Instant::now();
         }
 
         match outcome {
@@ -424,13 +599,13 @@ impl LezMcpServer {
                     "ok": true,
                     "verdict": verdict,
                     "report": report,
-                    "writes_enabled": self.ctx.gate.read().await.writes_enabled(),
+                    "writes_enabled": self.writes_enabled().await,
                 })))
             }
             Err(e) => Ok(err_json(json!({
                 "ok": false,
                 "error": e,
-                "writes_enabled": self.ctx.gate.read().await.writes_enabled(),
+                "writes_enabled": self.writes_enabled().await,
             }))),
         }
     }
@@ -447,7 +622,9 @@ impl LezMcpServer {
         &self,
         Parameters(p): Parameters<FaucetParams>,
     ) -> Result<CallToolResult, McpError> {
-        if let Err(refusal) = self.check_writes_allowed().await {
+        // Fresh write gate before any submission (init included); re-checked
+        // per claim inside the loop below.
+        if let Err(refusal) = self.ensure_fresh_write_gate().await {
             return Ok(refusal);
         }
 
@@ -462,7 +639,7 @@ impl LezMcpServer {
             },
             None => None,
         };
-        let max_claims = p.max_claims.unwrap_or(10).clamp(1, 50);
+        let max_claims = p.max_claims.unwrap_or(10).clamp(1, MAX_FAUCET_CLAIMS);
 
         // The sequencer silently drops claims to never-initialized accounts.
         // Auto-initialize when we hold the account's signing key; otherwise
@@ -515,21 +692,37 @@ impl LezMcpServer {
                 break;
             }
 
-            let submission = match faucet::submit_claim(&self.ctx.sequencer, account_id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    incomplete = Some(e);
-                    break;
-                }
-            };
+            // Re-verify the write gate before EACH claim (TTL-cached, so a
+            // multi-claim loop re-checks each ~minute-long iteration without
+            // hammering getProgramIds).
+            if let Err(refusal) = self.ensure_fresh_write_gate().await {
+                return Ok(refusal);
+            }
 
-            let (new_balance, confirmed) = self
-                .wait_balance_at_least(&account_id, balance + faucet::PRIZE_PER_CLAIM)
+            let submission =
+                match faucet::submit_claim(&self.ctx.sequencer, account_id, &self.ctx.pow_permits)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        incomplete = Some(e);
+                        break;
+                    }
+                };
+
+            let (confirmed, confirmation) = self
+                .confirm_submitted_tx(
+                    &submission.tx_hash,
+                    &account_id,
+                    balance + faucet::PRIZE_PER_CLAIM,
+                )
                 .await;
+            let new_balance = self.balance_of(&account_id).await.unwrap_or(balance);
             claims.push(json!({
                 "tx_hash": submission.tx_hash,
                 "pow_solution": submission.solution.to_string(),
                 "confirmed": confirmed,
+                "confirmation": confirmation,
                 "balance_after": new_balance.to_string(),
             }));
             balance = new_balance;
@@ -613,6 +806,23 @@ impl LezMcpServer {
         );
 
         if !p.confirm {
+            // Issue a single-use preview token bound to these exact parameters;
+            // confirm=true will require it. Prevents a caller-flipped
+            // confirm=true from broadcasting anything never previewed.
+            let token = new_preview_token();
+            {
+                let mut store = self.ctx.preview_tokens.lock().unwrap();
+                prune_preview_tokens(&mut store);
+                store.insert(
+                    token.clone(),
+                    PreviewToken {
+                        from,
+                        to,
+                        amount,
+                        expires: Instant::now() + PREVIEW_TTL,
+                    },
+                );
+            }
             return Ok(ok_json(json!({
                 "ok": true,
                 "dry_run": true,
@@ -629,15 +839,93 @@ impl LezMcpServer {
                 "recipient_initialized": recipient_initialized,
                 "recipient_warning": recipient_warning,
                 "sufficient_balance": sufficient,
-                "writes_enabled": self.ctx.gate.read().await.writes_enabled(),
-                "note": "nothing was sent — call again with confirm=true to broadcast",
+                "writes_enabled": self.writes_enabled().await,
+                "preview_token": token,
+                "preview_expires_in_secs": PREVIEW_TTL.as_secs(),
+                "note": "nothing was sent — call again with confirm=true AND preview_token to \
+                         broadcast (the token binds to this exact from/to/amount, is single-use, \
+                         and expires)",
             })));
         }
 
         // confirm=true — the write path.
-        if let Err(refusal) = self.check_writes_allowed().await {
+
+        // 1) Require and consume a matching, unexpired preview token. Single-use:
+        //    removed on lookup so it cannot be replayed.
+        let token = match &p.preview_token {
+            Some(t) => t.clone(),
+            None => {
+                return Ok(tool_fail(
+                    "confirm=true requires preview_token — call lez_transfer with confirm=false \
+                     first to preview and obtain a token",
+                ));
+            }
+        };
+        let check = {
+            let mut store = self.ctx.preview_tokens.lock().unwrap();
+            check_and_consume_token(&mut store, &token, &from, &to, amount, Instant::now())
+        };
+        match check {
+            TokenCheck::Ok => {}
+            TokenCheck::Missing => {
+                return Ok(tool_fail(
+                    "preview_token is unknown, already used, or expired — run a fresh \
+                     confirm=false preview",
+                ));
+            }
+            TokenCheck::Expired => {
+                return Ok(tool_fail(
+                    "preview_token expired — run a fresh confirm=false preview",
+                ));
+            }
+            TokenCheck::Mismatch => {
+                return Ok(tool_fail(
+                    "preview_token does not match this (from, to, amount) — run a fresh \
+                     confirm=false preview for these exact parameters",
+                ));
+            }
+        }
+
+        // 2) Fresh write gate (re-verified immediately before the write).
+        if let Err(refusal) = self.ensure_fresh_write_gate().await {
             return Ok(refusal);
         }
+
+        // 3) Refuse a transfer to a never-initialized recipient — the sequencer
+        //    silently drops it (a known silent-drop), so do not broadcast + poll.
+        if !recipient_initialized {
+            return Ok(err_json(json!({
+                "ok": false,
+                "error": "recipient_uninitialized",
+                "reason": format!(
+                    "recipient {} has never been initialized on-chain; the sequencer silently \
+                     drops authenticated transfers to such accounts, so this write is refused. \
+                     The recipient must initialize first (`wallet auth-transfer init`) or receive \
+                     a faucet claim via a lez-mcp server holding their key.",
+                    account_id_to_base58(&to)
+                ),
+            })));
+        }
+
+        // 4) Only auto-initialize a genuinely-default (unowned) sender. An
+        //    account owned by another program cannot be Initialized and its
+        //    Transfer is guaranteed to fail — report that immediately instead
+        //    of a doomed Initialize + 4-minute poll.
+        let sender_default_owned = from_account.program_owner == [0u32; 8];
+        if !sender_initialized && !sender_default_owned {
+            return Ok(err_json(json!({
+                "ok": false,
+                "error": "sender_incompatible_ownership",
+                "reason": format!(
+                    "sender {} is owned by program {} — not the authenticated-transfer program \
+                     and not an uninitialized account. It cannot be auto-initialized and its \
+                     Transfer would be rejected. Use an authenticated-transfer account.",
+                    account_id_to_base58(&from),
+                    crate::fingerprint::program_id_hex(&from_account.program_owner)
+                ),
+            })));
+        }
+
         if !sufficient {
             return Ok(tool_fail(format!(
                 "insufficient balance: from has {} < amount {}",
@@ -657,15 +945,23 @@ impl LezMcpServer {
             }
         };
 
+        // Initialize can take minutes; re-verify the gate is still fresh before
+        // the actual Transfer submission.
+        if let Err(refusal) = self.ensure_fresh_write_gate().await {
+            return Ok(refusal);
+        }
+
         let tx_hash = match lez.transfer(to, amount).await {
             Ok(h) => h,
             Err(e) => return Ok(tool_fail(format!("transfer failed: {e}"))),
         };
 
-        // The sequencer accepts eagerly but can reject during execution;
-        // confirm the recipient balance actually moved.
-        let (final_to_balance, confirmed) =
-            self.wait_balance_at_least(&to, to_balance + amount).await;
+        // Confirm THIS transaction committed (tx-specific), not merely that the
+        // recipient balance moved (which concurrent activity could forge).
+        let (confirmed, confirmation) = self
+            .confirm_submitted_tx(&tx_hash, &to, to_balance + amount)
+            .await;
+        let final_to_balance = self.balance_of(&to).await.unwrap_or(to_balance);
 
         Ok(ok_json(json!({
             "ok": true,
@@ -676,11 +972,11 @@ impl LezMcpServer {
             "to": account_id_to_base58(&to),
             "amount": amount.to_string(),
             "confirmed": confirmed,
+            "confirmation": confirmation,
             "to_balance_after": final_to_balance.to_string(),
-            "recipient_warning": recipient_warning,
             "warning": (!confirmed).then(|| format!(
-                "recipient balance did not increase within {}s — the transfer may still land \
-                 or may have been rejected at execution; re-check with lez_balance",
+                "transaction {tx_hash} was not confirmed committed within {}s — it may still land \
+                 or may have been rejected at execution; re-check with sepolia/lez tools",
                 COMMIT_TIMEOUT.as_secs()
             )),
         })))
@@ -744,21 +1040,43 @@ impl LezMcpServer {
             Err(e) => return Ok(tool_fail(e)),
         }
 
-        // Fallback: treat it as a hashlock and scan Locked events.
+        // Fallback: treat it as a hashlock and scan Locked events (bounded +
+        // incremental; a repeated call resumes rather than rescans).
         match eth.find_by_hashlock(input).await {
-            Ok((found, from_block, to_block)) => {
-                let htlcs: Vec<Value> = found
+            Ok(scan) => {
+                let htlcs: Vec<Value> = scan
+                    .found
                     .iter()
                     .map(|f| htlc_json(&f.swap_id, &f.htlc))
                     .collect();
-                Ok(ok_json(json!({
+                let resolved_as = if !htlcs.is_empty() {
+                    "hashlock"
+                } else if scan.reached_head {
+                    "not_found"
+                } else {
+                    "not_found_within_budget"
+                };
+                let mut out = json!({
                     "ok": true,
                     "found": !htlcs.is_empty(),
-                    "resolved_as": if htlcs.is_empty() { "not_found" } else { "hashlock" },
+                    "resolved_as": resolved_as,
                     "contract": eth.address().to_string(),
-                    "scanned_blocks": {"from": from_block, "to": to_block},
+                    "scanned_blocks": {
+                        "from": scan.coverage_from,
+                        "to": scan.coverage_to,
+                        "reached_head": scan.reached_head,
+                    },
                     "htlcs": htlcs,
-                })))
+                });
+                if htlcs.is_empty() && !scan.reached_head {
+                    out["note"] = json!(format!(
+                        "not found within the {} blocks scanned so far (up to block {}); the scan \
+                         budget was reached before chain head — call again to continue from there",
+                        scan.coverage_to.saturating_sub(scan.coverage_from),
+                        scan.coverage_to
+                    ));
+                }
+                Ok(ok_json(out))
             }
             Err(e) => Ok(tool_fail(e)),
         }
@@ -782,7 +1100,7 @@ impl ServerHandler for LezMcpServer {
                  matched; run lez_fingerprint to re-check. lez_transfer is two-phase: \
                  confirm=false previews, confirm=true broadcasts. All amounts are LEZ base \
                  units (u128) passed as strings.",
-                self.ctx.cfg.sequencer_url,
+                redact_url(&self.ctx.cfg.sequencer_url),
                 self.ctx.cfg.eth_htlc_address,
                 crate::fingerprint::CLIENT_TAG,
         ));
@@ -823,6 +1141,140 @@ mod tests {
         );
     }
 
+    fn acct(byte: u8) -> AccountId {
+        AccountId::new([byte; 32])
+    }
+
+    fn insert_token(
+        store: &mut HashMap<String, PreviewToken>,
+        token: &str,
+        from: AccountId,
+        to: AccountId,
+        amount: u128,
+        expires: Instant,
+    ) {
+        store.insert(
+            token.to_string(),
+            PreviewToken {
+                from,
+                to,
+                amount,
+                expires,
+            },
+        );
+    }
+
+    #[test]
+    fn preview_token_is_random_and_32_bytes() {
+        let a = new_preview_token();
+        let b = new_preview_token();
+        assert_eq!(a.len(), 64, "256-bit hex");
+        assert!(hex::decode(&a).is_ok());
+        assert_ne!(a, b, "tokens must not repeat");
+    }
+
+    #[test]
+    fn token_flow_happy_then_replay_is_rejected() {
+        let mut store = HashMap::new();
+        let (from, to, amount) = (acct(1), acct(2), 500u128);
+        let now = Instant::now();
+        insert_token(&mut store, "tok", from, to, amount, now + PREVIEW_TTL);
+
+        // Happy path consumes the token.
+        assert_eq!(
+            check_and_consume_token(&mut store, "tok", &from, &to, amount, now),
+            TokenCheck::Ok
+        );
+        // Replay: single-use, now gone.
+        assert_eq!(
+            check_and_consume_token(&mut store, "tok", &from, &to, amount, now),
+            TokenCheck::Missing
+        );
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn token_flow_rejects_mismatched_params() {
+        let mut store = HashMap::new();
+        let (from, to, amount) = (acct(1), acct(2), 500u128);
+        let now = Instant::now();
+
+        insert_token(&mut store, "amt", from, to, amount, now + PREVIEW_TTL);
+        assert_eq!(
+            check_and_consume_token(&mut store, "amt", &from, &to, 501, now),
+            TokenCheck::Mismatch
+        );
+
+        insert_token(&mut store, "rcp", from, to, amount, now + PREVIEW_TTL);
+        assert_eq!(
+            check_and_consume_token(&mut store, "rcp", &from, &acct(9), amount, now),
+            TokenCheck::Mismatch
+        );
+
+        insert_token(&mut store, "snd", from, to, amount, now + PREVIEW_TTL);
+        assert_eq!(
+            check_and_consume_token(&mut store, "snd", &acct(9), &to, amount, now),
+            TokenCheck::Mismatch
+        );
+    }
+
+    #[test]
+    fn token_flow_rejects_expired_and_prunes() {
+        let mut store = HashMap::new();
+        let (from, to, amount) = (acct(1), acct(2), 500u128);
+        let now = Instant::now();
+        // Expired 1s ago.
+        insert_token(&mut store, "old", from, to, amount, now - Duration::from_secs(1));
+        // check_and_consume prunes expired first, so an expired token reads as
+        // Missing (pruned) rather than lingering.
+        assert_eq!(
+            check_and_consume_token(&mut store, "old", &from, &to, amount, now),
+            TokenCheck::Missing
+        );
+        assert!(store.is_empty(), "expired token must be pruned");
+    }
+
+    #[test]
+    fn token_flow_unknown_token_is_missing() {
+        let mut store = HashMap::new();
+        assert_eq!(
+            check_and_consume_token(&mut store, "nope", &acct(1), &acct(2), 1, Instant::now()),
+            TokenCheck::Missing
+        );
+    }
+
+    #[test]
+    fn fingerprint_ttl_gate_freshness() {
+        let embedded = crate::fingerprint::embedded_program_ids();
+        let verified = Gate::Verified(crate::fingerprint::build_report(
+            "http://x",
+            &embedded,
+            &embedded.clone(),
+        ));
+        let now = Instant::now();
+
+        // Verified + fresh → may ride the cache.
+        let fresh = GateState {
+            gate: verified.clone(),
+            checked_at: now,
+        };
+        assert!(gate_is_fresh(&fresh, FINGERPRINT_TTL, now));
+
+        // Verified but stale → must refresh.
+        let stale = GateState {
+            gate: verified,
+            checked_at: now - FINGERPRINT_TTL - Duration::from_secs(1),
+        };
+        assert!(!gate_is_fresh(&stale, FINGERPRINT_TTL, now));
+
+        // Unverified, even if just checked → never fresh.
+        let unverified = GateState {
+            gate: Gate::Unverified { error: "down".into() },
+            checked_at: now,
+        };
+        assert!(!gate_is_fresh(&unverified, FINGERPRINT_TTL, now));
+    }
+
     #[test]
     fn transfer_schema_requires_to_and_amount_and_has_confirm() {
         let schema = schema_of("lez_transfer");
@@ -830,6 +1282,7 @@ mod tests {
         assert!(props.contains_key("to"));
         assert!(props.contains_key("amount"));
         assert!(props.contains_key("confirm"));
+        assert!(props.contains_key("preview_token"));
         let required: Vec<&str> = schema["required"]
             .as_array()
             .expect("required")

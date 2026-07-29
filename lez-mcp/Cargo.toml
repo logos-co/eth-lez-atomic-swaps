@@ -44,5 +44,7 @@ sha2 = "0.10"
 hex = "0.4"
 base58 = "0.2"
 url = "2"
+# CSPRNG for unforgeable, server-issued transfer preview tokens.
+getrandom = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

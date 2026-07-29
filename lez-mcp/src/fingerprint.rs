@@ -18,6 +18,25 @@ pub const CLIENT_TAG: &str = "v0.2.0";
 /// Commit of the v0.2.0 tag.
 pub const CLIENT_COMMIT: &str = "a58fbce2";
 
+/// Redact a sequencer URL down to `scheme://host[:port]` for anything that is
+/// logged or serialized into a tool result. Strips userinfo (basic-auth
+/// credentials), path, and query — which may carry access tokens — while
+/// keeping enough to identify the endpoint. The raw URL is only ever used to
+/// open the connection, never surfaced.
+pub fn redact_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(u) => {
+            let scheme = u.scheme();
+            match (u.host_str(), u.port()) {
+                (Some(host), Some(port)) => format!("{scheme}://{host}:{port}"),
+                (Some(host), None) => format!("{scheme}://{host}"),
+                (None, _) => format!("{scheme}://<redacted>"),
+            }
+        }
+        Err(_) => "<unparseable-url>".to_string(),
+    }
+}
+
 /// Canonical hex rendering of a ProgramId: each u32 word little-endian,
 /// concatenated, hex-encoded (64 lowercase chars, no 0x) — same scheme as
 /// `swap-ffi/src/lez_htlc_program_id.rs` and `parse_program_id`.
@@ -100,7 +119,8 @@ pub fn build_report(
         .collect();
 
     FingerprintReport {
-        sequencer_url: sequencer_url.to_string(),
+        // Redacted: this field is serialized into tool results and logs.
+        sequencer_url: redact_url(sequencer_url),
         client_tag: CLIENT_TAG,
         client_commit: CLIENT_COMMIT,
         matched: mismatches.is_empty(),
@@ -128,6 +148,34 @@ pub async fn run_fingerprint(
 mod tests {
     use super::*;
     use swap_orchestrator::config::parse_program_id;
+
+    #[test]
+    fn redact_url_strips_credentials_path_and_query() {
+        // Basic-auth userinfo and query token must not survive.
+        assert_eq!(
+            redact_url("https://user:s3cret@testnet.lez.logos.co/rpc?token=abc123"),
+            "https://testnet.lez.logos.co"
+        );
+        assert_eq!(
+            redact_url("http://localhost:3040/path"),
+            "http://localhost:3040"
+        );
+        assert_eq!(redact_url("https://x"), "https://x");
+        assert_eq!(redact_url("not a url"), "<unparseable-url>");
+    }
+
+    #[test]
+    fn report_sequencer_url_is_redacted() {
+        let embedded = embedded_program_ids();
+        let report = build_report(
+            "https://user:pw@seq.example.com:8443/v1?apikey=deadbeef",
+            &embedded,
+            &embedded.clone(),
+        );
+        assert_eq!(report.sequencer_url, "https://seq.example.com:8443");
+        assert!(!report.sequencer_url.contains("pw"));
+        assert!(!report.sequencer_url.contains("apikey"));
+    }
 
     #[test]
     fn program_id_hex_round_trips_canonical_htlc_id() {

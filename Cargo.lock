@@ -4528,6 +4528,7 @@ dependencies = [
  "alloy",
  "authenticated_transfer_core",
  "base58",
+ "getrandom 0.2.17",
  "hex",
  "lee",
  "lee_core",
