@@ -128,6 +128,13 @@ function escapeHtml(value) {
 
 setInterval(render, 1000);
 
+// Debug/test hook: inject an offer as if it arrived via filter.
+// Usage from the console: __offerBoard.injectOffer({...})
+window.__offerBoard = {
+  injectOffer: (offer) => onOfferPayload(new TextEncoder().encode(JSON.stringify(offer))),
+  offers,
+};
+
 // --- Waku ---
 async function main() {
   if (bootstrapPeers.length === 0) {
