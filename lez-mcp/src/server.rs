@@ -269,6 +269,21 @@ impl LezMcpServer {
         }
     }
 
+    /// True when the account exists on-chain (has ever been initialized /
+    /// claimed by a program). The sequencer SILENTLY DROPS pinata claims and
+    /// transfers that reference never-initialized accounts, so tools must
+    /// check this up front (mirrors the wallet CLI's
+    /// `ensure_public_recipient_initialized`).
+    async fn account_exists(&self, account_id: &AccountId) -> Result<bool, String> {
+        let account = self
+            .ctx
+            .sequencer
+            .get_account(*account_id)
+            .await
+            .map_err(|e| format!("get_account failed: {e}"))?;
+        Ok(account != lee_core::account::Account::default())
+    }
+
     /// Send `authenticated_transfer::Initialize` for the signer's account and
     /// wait until the account is owned by the auth-transfer program.
     async fn initialize_signer_account(&self, signer: &Signer) -> Result<String, String> {
@@ -449,6 +464,41 @@ impl LezMcpServer {
         };
         let max_claims = p.max_claims.unwrap_or(10).clamp(1, 50);
 
+        // The sequencer silently drops claims to never-initialized accounts.
+        // Auto-initialize when we hold the account's signing key; otherwise
+        // explain what is needed (mirrors `wallet auth-transfer init`).
+        let mut init_tx_hash = None;
+        match self.account_exists(&account_id).await {
+            Err(e) => return Ok(tool_fail(e)),
+            Ok(true) => {}
+            Ok(false) => match &self.ctx.signer {
+                Some(signer) if signer.account_id == account_id => {
+                    match self.initialize_signer_account(signer).await {
+                        Ok(h) => init_tx_hash = Some(h),
+                        Err(e) => {
+                            return Ok(tool_fail(format!(
+                                "account initialization failed: {e}"
+                            )));
+                        }
+                    }
+                }
+                _ => {
+                    return Ok(err_json(json!({
+                        "ok": false,
+                        "error": "account_uninitialized",
+                        "reason": format!(
+                            "account {} has never been initialized on-chain; the sequencer \
+                             silently drops faucet claims to such accounts. Initialize it \
+                             first (`wallet auth-transfer init`), or configure this server \
+                             with the account's signing key (LEZ_SIGNING_KEY) so it can \
+                             initialize automatically.",
+                            account_id_to_base58(&account_id)
+                        ),
+                    })));
+                }
+            },
+        }
+
         let start_balance = match self.balance_of(&account_id).await {
             Ok(b) => b,
             Err(e) => return Ok(tool_fail(e)),
@@ -500,6 +550,7 @@ impl LezMcpServer {
         let target_reached = target.map(|t| balance >= t);
         Ok(ok_json(json!({
             "ok": incomplete.is_none(),
+            "init_tx_hash": init_tx_hash,
             "account_id": account_id_to_base58(&account_id),
             "prize_per_claim": faucet::PRIZE_PER_CLAIM.to_string(),
             "claims_made": claims.len(),
@@ -545,14 +596,21 @@ impl LezMcpServer {
             Ok(a) => a,
             Err(e) => return Ok(tool_fail(format!("get_account(from) failed: {e}"))),
         };
-        let to_balance = match self.balance_of(&to).await {
-            Ok(b) => b,
-            Err(e) => return Ok(tool_fail(format!("balance(to) failed: {e}"))),
+        let to_account = match self.ctx.sequencer.get_account(to).await {
+            Ok(a) => a,
+            Err(e) => return Ok(tool_fail(format!("get_account(to) failed: {e}"))),
         };
+        let to_balance = to_account.balance;
+        let recipient_initialized = to_account != lee_core::account::Account::default();
 
         let auth_transfer_id = programs::authenticated_transfer().id();
         let sender_initialized = from_account.program_owner == auth_transfer_id;
         let sufficient = from_account.balance >= amount;
+        let recipient_warning = (!recipient_initialized).then_some(
+            "recipient account has never been initialized on-chain — the sequencer may \
+             silently drop this transfer; the recipient should run `wallet auth-transfer \
+             init` (or claim from the faucet via a lez-mcp server holding their key) first",
+        );
 
         if !p.confirm {
             return Ok(ok_json(json!({
@@ -568,6 +626,8 @@ impl LezMcpServer {
                 "from_nonce": serde_json::to_value(from_account.nonce).unwrap_or(Value::Null),
                 "sender_initialized": sender_initialized,
                 "will_initialize_first": !sender_initialized,
+                "recipient_initialized": recipient_initialized,
+                "recipient_warning": recipient_warning,
                 "sufficient_balance": sufficient,
                 "writes_enabled": self.ctx.gate.read().await.writes_enabled(),
                 "note": "nothing was sent — call again with confirm=true to broadcast",
@@ -617,6 +677,7 @@ impl LezMcpServer {
             "amount": amount.to_string(),
             "confirmed": confirmed,
             "to_balance_after": final_to_balance.to_string(),
+            "recipient_warning": recipient_warning,
             "warning": (!confirmed).then(|| format!(
                 "recipient balance did not increase within {}s — the transfer may still land \
                  or may have been rejected at execution; re-check with lez_balance",
