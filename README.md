@@ -49,11 +49,13 @@ make infra
 In two more terminals, launch the Basecamp peers:
 
 ```bash
-lgs basecamp launch maker
-lgs basecamp launch taker
+make basecamp-launch-maker
+make basecamp-launch-taker
 ```
 
-This works the same on macOS and Linux. On macOS the pinned `bin-macos-app` Basecamp ignores XDG isolation and loads its modules from `LOGOS_DATA_DIR`, which must be absolute; since [Scaffold PR #238](https://github.com/logos-co/scaffold/pull/238) (adopted at the pinned scaffold commit) `lgs basecamp launch` computes and sets that absolute per-profile path itself, so the former committed `scripts/basecamp-launch.sh` bridge is gone.
+This works the same on macOS and Linux. The Make targets wrap `lgs basecamp launch <profile>` with one env var, `LOGOS_USER_DIR`, and exist because Basecamp 0.2.x renamed the data-dir override that scaffold still sets. Basecamp now resolves its whole data tree (`plugins`, `modules`, `module_data`, `logs`) from `LOGOS_USER_DIR` / `--user-dir`, and ignores the 0.1.1-era `LOGOS_DATA_DIR` that `lgs basecamp launch` sets ([Scaffold PR #238](https://github.com/logos-co/scaffold/pull/238)). Because Qt's `AppDataLocation` ignores `XDG_DATA_HOME` on macOS, an unbridged `lgs basecamp launch` sends every profile to the single shared `~/Library/Application Support/Logos/LogosBasecamp`, where Basecamp loads only its three embedded modules — `swap`, `swap_ui`, and `delivery_module` silently never appear and both peers share one state tree. See [`docs/scaffold-upstream-tracker.md`](docs/scaffold-upstream-tracker.md) (TR-21); these targets go away once scaffold sets `LOGOS_USER_DIR` itself.
+
+Call `lgs basecamp launch <profile>` directly only if you export an **absolute** `LOGOS_USER_DIR` yourself. Basecamp absolutizes the `--user-dir` flag but consumes the env var verbatim, so a relative value scatters state under Basecamp's working directory instead of failing loudly.
 
 What each phase does:
 
@@ -61,10 +63,10 @@ What each phase does:
 |---|---|
 | `make setup` | Runs `lgs setup` through the [v0.2.0 bridge](scripts/scaffold-setup.sh): fetches `logos-blockchain-circuits` into `.scaffold/lez-cache/circuits` (driven by the `[circuits]` block in [`scaffold.toml`](scaffold.toml)), creates the local LEZ checkout and wallet under `.scaffold/`, and seeds the default wallet address. |
 | `lgs basecamp build` | Runs the aggregate module build, producing the `swap`, `swap_ui`, and `delivery_module` LGX artifacts under `.scaffold/basecamp/{lgx,portable}/`. |
-| `lgs basecamp setup` | Builds the portable `bin-macos-app` Basecamp (`a746cdbc` / v0.1.1) and the `cli-portable` LGPM (`e5c25989`), then seeds the two Basecamp profiles. |
+| `lgs basecamp setup` | Builds the portable `bin-macos-app` Basecamp (`8a36a839` / tag `0.2.1`) and the `cli-portable` LGPM (`205d6bb2`, the rev that Basecamp pin builds against), then seeds the two Basecamp profiles. |
 | `lgs basecamp install` | Installs the three `#lgx-portable` packages (`delivery_module` + `swap` as modules, `swap_ui` as a plugin) via `lgpm cli-portable` into scaffold's default profiles as a stack check; the `maker` / `taker` profiles are provisioned the same way automatically on their first `lgs basecamp launch`. The portable Basecamp and `lgpm cli-portable` agree on the bare `darwin-arm64` variant, so the install completes with zero variant errors. |
 | `make infra` | Starts Anvil and the LEZ localnet, deploys the ETH HTLC contract, and writes `.env` / `.env.taker`. Keep this running. |
-| `lgs basecamp launch maker` / `lgs basecamp launch taker` | Launches the two Basecamp windows with the correct role, env file, and (on macOS) an absolute per-profile `LOGOS_DATA_DIR`. |
+| `make basecamp-launch-maker` / `make basecamp-launch-taker` | Launches the two Basecamp windows with the correct role, env file, and an absolute per-profile `LOGOS_USER_DIR` so each peer sees its own installed modules. |
 
 Re-run `lgs basecamp build` and `lgs basecamp install` after changing the module, UI, or Delivery package inputs so each profile gets the updated LGX packages.
 
@@ -159,6 +161,9 @@ Read this before filing an issue — these are the current known rough spots for
 - **First `lgs basecamp launch <profile>` is slower** — `lgs basecamp install` provisions scaffold's default profiles; `maker`/`taker` provision themselves on first launch.
 - **Dev keys only.** The generated `.env` files use Anvil dev keys and local wallets; logs may contain key material — redact before sharing, and never reuse these keys elsewhere.
 - **`lgs doctor` shows one expected warning** — a `delivery_module` pin-drift warn (v0.1.1 vs scaffold's default rev) keeps the status at "Needs attention"; it is benign.
+- **Launch through `make basecamp-launch-<profile>`, not bare `lgs basecamp launch`.** Basecamp 0.2.x reads `LOGOS_USER_DIR`, not the `LOGOS_DATA_DIR` scaffold sets. Unbridged, the app still opens — it just silently uses the shared `~/Library/Application Support/Logos/LogosBasecamp` and shows none of this project's modules. See [Manual Basecamp Run](#manual-basecamp-run) and tracker TR-21.
+- **A pre-0.2.x Basecamp may have left artifacts in the shared dir.** If you ran an older pin before, `~/Library/Application Support/Logos/LogosBasecamp/{modules,plugins}` can hold old-SDK dylibs. Basecamp 0.2.x logs `carries no usable logos_protocol_version (pre-protocol build) — loading permissively` and loads them anyway, which can destabilise the app. Move that directory aside if you hit odd crashes; the bridged per-profile launch does not touch it.
+- **The `lgpm` pin is paired with the basecamp pin.** `[repos.lgpm]` must stay on the `logos-package-manager` rev the pinned Basecamp builds against (currently `205d6bb2` for `0.2.1`). On the older `e5c25989` pin, `lgpm install` silently dropped `view` from the installed `manifest.json` and Basecamp 0.2.x then filtered `swap_ui` out of the launcher entirely — it installed fine and never appeared. Bump both pins together.
 
 Found something else? File it with the [Feedback template](https://github.com/logos-co/eth-lez-atomic-swaps/issues/new?template=feedback.yml) so we get your environment and logs.
 
