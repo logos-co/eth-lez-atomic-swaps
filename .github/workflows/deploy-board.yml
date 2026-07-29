@@ -8,10 +8,11 @@ on:
       - ".github/workflows/deploy-board.yml"
   workflow_dispatch:
 
+# Least privilege at the workflow level: the build job runs `npm ci` on
+# third-party code and must not hold Pages/OIDC deploy credentials. Pages
+# write + id-token are granted only to the deploy job below (P2-4).
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -20,6 +21,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: web/offer-board
@@ -39,6 +42,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -49,21 +49,56 @@ const REQUIRED_FIELDS = [
   "eth_htlc_address",
 ];
 
+// Abuse limits — the offers topic is public and unauthenticated, so a flood of
+// oversized or numerous offers must not freeze the tab. Reject payloads/fields
+// beyond these bounds and evict the oldest once the retained map is full.
+const MAX_PAYLOAD_BYTES = 4096;
+const MAX_FIELD_CHARS = 256;
+const MAX_OFFERS = 200;
+
 function offerKey(o) {
   return [o.maker_lez_account, o.maker_eth_address, o.lez_amount, o.eth_amount].join("|");
 }
 
 function onOfferPayload(payload) {
+  // Bound the raw payload before doing any work (P2-3).
+  if (!payload || payload.length > MAX_PAYLOAD_BYTES) return;
   let offer;
   try {
     offer = JSON.parse(bytesToUtf8(payload));
   } catch {
     return; // non-JSON payload on the topic — ignore
   }
-  if (!REQUIRED_FIELDS.every((f) => offer[f] !== undefined && offer[f] !== "")) return;
+  // JSON.parse("null"), "42", "[...]" all parse but are not offer objects;
+  // field access on them throws or is meaningless (P2-2).
+  if (offer === null || typeof offer !== "object" || Array.isArray(offer)) return;
+  // Every required field must be present, non-empty, and within the size cap
+  // (a scalar we can render — reject nested objects/arrays and huge strings).
+  const fieldOk = (v) =>
+    v !== undefined &&
+    v !== null &&
+    v !== "" &&
+    (typeof v !== "object") &&
+    String(v).length <= MAX_FIELD_CHARS;
+  if (!REQUIRED_FIELDS.every((f) => fieldOk(offer[f]))) return;
   seenCount += 1;
   seenCountEl.textContent = String(seenCount);
-  offers.set(offerKey(offer), { offer, lastSeen: Date.now() });
+  const key = offerKey(offer);
+  // Cap the retained map: if this is a new key and we are at the limit, evict
+  // the oldest entry so a flood of distinct offers cannot grow the DOM without
+  // bound (P2-3).
+  if (!offers.has(key) && offers.size >= MAX_OFFERS) {
+    let oldestKey;
+    let oldest = Infinity;
+    for (const [k, entry] of offers) {
+      if (entry.lastSeen < oldest) {
+        oldest = entry.lastSeen;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey !== undefined) offers.delete(oldestKey);
+  }
+  offers.set(key, { offer, lastSeen: Date.now() });
   render();
 }
 
