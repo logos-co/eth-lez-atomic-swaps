@@ -39,6 +39,11 @@ pub trait SwapJournal: Send + Sync {
     /// by startup reconciliation / a resume watcher, so a replayed still-OPEN
     /// lock is never re-locked and double-funded (P1-A belt).
     fn contains(&self, hashlock_hex: &str) -> bool;
+    /// Whether the journal currently holds ANY in-flight (non-quarantined) entry.
+    /// The loop calls this after each `run_maker` return to decide — from the
+    /// JOURNAL state, not the error variant — whether funds are unresolved and
+    /// the loop must STOP for a supervised restart → reconciliation (P1-3).
+    fn has_in_flight(&self) -> bool;
 }
 
 /// Extra guards/plumbing that are active only in `--loop` (liquidity-bot) mode.
@@ -48,8 +53,36 @@ pub struct LoopGuards<'a> {
     /// a hostile taker locking ETH at the contract minimum while the maker locks
     /// LEZ for far longer (the taker could then claim LEZ *and* refund ETH).
     pub timelock_margin_secs: u64,
+    /// The maker's LEZ timelock *duration* in seconds (not an absolute expiry).
+    /// A FRESH absolute LEZ expiry is computed from this at the moment an ETH
+    /// lock matches — the per-iteration `config.lez_timelock` is fixed at
+    /// iteration start and goes stale while the maker waits for a taker, so a
+    /// late-arriving minimum-duration ETH lock would otherwise pass the margin
+    /// check against an already-past LEZ expiry (P1-1).
+    pub lez_timelock_secs: u64,
     /// Durable in-flight journal for crash recovery.
     pub journal: &'a dyn SwapJournal,
+}
+
+/// Compute the absolute LEZ expiry (unix seconds) to lock with, evaluated FRESH
+/// at match time: `now` + the configured LEZ timelock duration. Using a value
+/// computed at iteration start would go stale while the maker waits for an ETH
+/// lock, letting a late minimum-duration lock pass the margin gate against a
+/// near-past expiry and then be locked with that stale timelock (P1-1).
+pub(crate) fn fresh_lez_expiry_secs(now_secs: u64, lez_timelock_secs: u64) -> u64 {
+    now_secs.saturating_add(lez_timelock_secs)
+}
+
+/// Whether the maker loop must STOP after an iteration. The decider is the
+/// JOURNAL state, not the `run_maker` outcome variant: `run_maker` durably
+/// records an entry before locking LEZ and clears it only on a confirmed
+/// terminal state, and startup guarantees the journal is empty before the loop
+/// begins (reconcile drains all prior entries). So any entry present after an
+/// iteration belongs to the swap that just ran and means funds are
+/// in-flight/unresolved — STOP for a supervised restart → reconciliation rather
+/// than spin a fresh watcher that could rematch the still-OPEN ETH lock (P1-3).
+pub(crate) fn loop_must_stop_after_iteration(journal_has_in_flight: bool) -> bool {
+    journal_has_in_flight
 }
 
 /// The maker-safety timelock invariant, evaluated against the *actual* on-chain
@@ -82,15 +115,22 @@ pub(crate) enum CandidateDisposition {
 /// single-shot maker (no loop-mode timelock gate). Kept side-effect-free so the
 /// P1-A journal-skip belt and the P1-E rejected-set / timelock gate are
 /// unit-testable without a live watcher or sequencer.
+///
+/// The rejected-set is keyed by the ETH **swap id** (the escrow identifier),
+/// NOT the hashlock: a taker who locks too-tight and then re-locks correctly
+/// under a NEW swap id (same secret) must not be suppressed by a stale
+/// hashlock-keyed rejection (P2-5). The journal-skip belt (`in_journal`) stays
+/// hashlock-scoped — a hashlock already in flight must never be re-locked
+/// regardless of swap id (P1-A).
 pub(crate) fn classify_candidate(
-    hashlock: &[u8; 32],
+    swap_id: &[u8; 32],
     rejected: &HashSet<[u8; 32]>,
     in_journal: bool,
     eth_timelock_secs: u64,
     lez_timelock_secs: u64,
     margin: Option<u64>,
 ) -> CandidateDisposition {
-    if rejected.contains(hashlock) || in_journal {
+    if rejected.contains(swap_id) || in_journal {
         return CandidateDisposition::Skip;
     }
     if let Some(margin_secs) = margin
@@ -187,16 +227,18 @@ pub async fn run_maker(
         let _ = watcher::watch_events(&watcher_eth_client, tx).await;
     });
 
-    // Bounded set of hashlocks this run has already rejected (e.g. a lock whose
-    // ETH timelock does not clear the maker's LEZ timelock by the margin). The
-    // 256-block replay watcher re-delivers historical locks on every restart;
-    // rejecting *within* this event loop and continuing to wait — instead of
-    // returning Err and letting the outer loop restart over the same lock —
-    // prevents a permanent hot-loop / DoS on one hostile candidate (P1-E).
+    // Bounded set of ETH swap ids this run has already rejected (e.g. a lock
+    // whose ETH timelock does not clear the maker's LEZ timelock by the margin).
+    // The 256-block replay watcher re-delivers historical locks on every
+    // restart; rejecting *within* this event loop and continuing to wait —
+    // instead of returning Err and letting the outer loop restart over the same
+    // lock — prevents a permanent hot-loop / DoS on one hostile candidate
+    // (P1-E). Keyed by swap id (not hashlock) so a corrected same-secret re-lock
+    // under a fresh escrow is still acceptable (P2-5).
     const MAX_REJECTED: usize = 1024;
     let mut rejected: HashSet<[u8; 32]> = HashSet::new();
 
-    let (swap_id, discovered_hashlock, eth_timelock_secs) = loop {
+    let (swap_id, discovered_hashlock, lez_expiry_secs) = loop {
         tokio::select! {
             Some(event) = rx.recv() => {
                 if let EthHtlcEvent::Locked {
@@ -219,22 +261,36 @@ pub async fn run_maker(
                         // gives the maker *more* headroom) into u64.
                         let eth_timelock_secs = event_timelock.saturating_to::<u64>();
 
+                        // P1-1: compute the LEZ expiry we will ACTUALLY lock with
+                        // FRESH, right now at match time — not the stale
+                        // `config.lez_timelock` fixed at iteration start. The
+                        // maker may have waited a long time for this lock; a stale
+                        // (near-past) expiry would let a late minimum-duration ETH
+                        // lock pass the margin gate and then be locked against an
+                        // already-expired LEZ timelock. Single-shot maker (no
+                        // guards) keeps the config's absolute value.
+                        let lez_expiry_secs = guards
+                            .map(|g| fresh_lez_expiry_secs(now_unix(), g.lez_timelock_secs))
+                            .unwrap_or(config.lez_timelock);
+
                         // Combined decision (pure, unit-tested): already
                         // rejected/journaled ⇒ Skip; ETH timelock too tight vs
-                        // LEZ + margin ⇒ Reject (record + keep waiting, never Err
-                        // — that would restart the outer loop and replay this
-                        // same lock forever, P1-E); otherwise Accept. The journal
-                        // check is the P1-A belt against re-locking an in-flight
-                        // hashlock. `None` guards ⇒ single-shot maker (no gate).
+                        // the FRESH LEZ expiry + margin ⇒ Reject (record + keep
+                        // waiting, never Err — that would restart the outer loop
+                        // and replay this same lock forever, P1-E); otherwise
+                        // Accept. The journal check is the P1-A belt against
+                        // re-locking an in-flight hashlock. `None` guards ⇒
+                        // single-shot maker (no gate). Rejection is keyed by swap
+                        // id (P2-5).
                         let in_journal = guards
                             .map(|g| g.journal.contains(&hex::encode(hl)))
                             .unwrap_or(false);
                         match classify_candidate(
-                            &hl,
+                            &swap_id.0,
                             &rejected,
                             in_journal,
                             eth_timelock_secs,
-                            config.lez_timelock,
+                            lez_expiry_secs,
                             guards.map(|g| g.timelock_margin_secs),
                         ) {
                             CandidateDisposition::Skip => {
@@ -245,12 +301,12 @@ pub async fn run_maker(
                                 warn!(
                                     %swap_id,
                                     eth_timelock_secs,
-                                    lez_timelock = config.lez_timelock,
-                                    "maker: rejecting ETH lock — timelock too tight vs LEZ + \
-                                     margin; waiting for other locks"
+                                    lez_expiry_secs,
+                                    "maker: rejecting ETH lock — timelock too tight vs fresh LEZ \
+                                     expiry + margin; waiting for other locks"
                                 );
                                 if rejected.len() < MAX_REJECTED {
-                                    rejected.insert(hl);
+                                    rejected.insert(swap_id.0);
                                 }
                                 continue;
                             }
@@ -269,7 +325,7 @@ pub async fn run_maker(
                             swap_id: format!("{swap_id}"),
                             hashlock: hex::encode(hl),
                         });
-                        break (swap_id, hl, eth_timelock_secs);
+                        break (swap_id, hl, lez_expiry_secs);
                     }
                 }
             }
@@ -297,11 +353,13 @@ pub async fn run_maker(
 
     watcher_handle.abort();
 
-    // The taker's ETH timelock has already been checked against the maker's LEZ
-    // timelock + margin inside the event loop above (a too-tight lock is
+    // The taker's ETH timelock has already been checked against the maker's
+    // FRESH LEZ expiry + margin inside the event loop above (a too-tight lock is
     // rejected-and-skipped there, never reaching this point) — so all that
     // remains before moving any LEZ is to durably journal the swap.
-    let _ = eth_timelock_secs; // consumed by the in-loop margin gate
+    // `lez_expiry_secs` is the fresh absolute expiry computed at match time; it
+    // is the value we validated the margin against AND the value we lock with,
+    // so the two can never disagree (P1-1).
     if let Some(guards) = guards {
         // P1-4: durably journal this swap BEFORE locking LEZ. If the write is not
         // durable we refuse to lock — a crash after locking with no journal entry
@@ -318,7 +376,7 @@ pub async fn run_maker(
             hashlock,
             config.lez_taker_account_id,
             config.lez_amount,
-            config.lez_timelock,
+            lez_expiry_secs,
         )
         .await?;
     info!(tx_hash = %lez_lock_tx, "maker: LEZ locked");
@@ -372,7 +430,7 @@ pub async fn run_maker(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(
-                config.lez_timelock.saturating_sub(now_unix())
+                lez_expiry_secs.saturating_sub(now_unix())
             )) => {
                 // LEZ timelock expired — taker didn't claim. Refund LEZ, but wait
                 // for a CONFIRMED terminal state before clearing the journal: a
@@ -485,6 +543,7 @@ pub async fn run_maker_loop(
 
     let guards = LoopGuards {
         timelock_margin_secs,
+        lez_timelock_secs: auto_config.lez_timelock_minutes * 60,
         journal,
     };
 
@@ -603,23 +662,6 @@ pub async fn run_maker_loop(
                 progress::report(&progress, SwapProgress::AutoAcceptCancelled);
                 break;
             }
-            Err(e @ SwapError::EthClaimUnresolved(_)) => {
-                // P1-B: the taker took the LEZ but we could not claim the ETH
-                // after bounded retries. Do NOT continue the loop (a fresh
-                // watcher would replay and could rematch this still-OPEN lock);
-                // STOP so the supervisor restarts into reconciliation, which
-                // retries the claim. The journal entry was retained (the Err
-                // propagated before any clear).
-                failed += 1;
-                progress::report(
-                    &progress,
-                    SwapProgress::AutoAcceptSwapFailed {
-                        iteration,
-                        error: format!("{e} — stopping loop for supervised restart"),
-                    },
-                );
-                break;
-            }
             Err(e) => {
                 failed += 1;
                 progress::report(
@@ -629,8 +671,34 @@ pub async fn run_maker_loop(
                         error: e.to_string(),
                     },
                 );
-                // R1: log error and continue to next iteration
+                // Whether the loop may continue is decided BELOW by the journal
+                // state, not this error variant (P1-3).
             }
+        }
+
+        // P1-3 (principle ii): the JOURNAL — not the outcome variant — decides
+        // whether the loop may continue. run_maker durably records an entry
+        // before locking LEZ and clears it only on a confirmed terminal state;
+        // startup guarantees the journal is empty before the loop begins, so any
+        // entry present here belongs to the swap that just ran and means funds
+        // are in-flight/unresolved. STOP for a supervised restart →
+        // reconciliation (which retries the claim/refund and, for an unfundable
+        // partial lock, quarantines it) rather than spin a fresh watcher that
+        // could rematch the still-OPEN ETH lock. This subsumes the old
+        // EthClaimUnresolved special-case AND catches EscrowStateUnknown / LEZ
+        // funding-confirmation failures that previously fell through to another
+        // iteration with a retained entry.
+        if loop_must_stop_after_iteration(journal.has_in_flight()) {
+            progress::report(
+                &progress,
+                SwapProgress::AutoAcceptSwapFailed {
+                    iteration,
+                    error: "in-flight journal entry unresolved after swap — stopping loop for \
+                            supervised restart"
+                        .into(),
+                },
+            );
+            break;
         }
     }
 
@@ -752,5 +820,109 @@ mod tests {
             classify_candidate(&hl, &rejected, false, 1, 1_000_000, None),
             CandidateDisposition::Accept
         );
+    }
+
+    // P1-1: the LEZ expiry the margin is checked against must be computed FRESH
+    // at match time. A `config.lez_timelock` fixed at iteration start goes stale
+    // while the maker waits for a taker; a late minimum-duration ETH lock then
+    // clears the margin against the near-past stale expiry but NOT against the
+    // fresh expiry it would actually be locked with.
+    #[test]
+    fn stale_expiry_rejected_at_match_time() {
+        let margin = 300u64; // 5 min
+        let lez_duration = 1_200u64; // 20 min
+        let iteration_start = 1_000_000u64;
+        // Maker waited 25 min: the iteration-start expiry is now 5 min in the past.
+        let now = iteration_start + 1_500;
+        let stale_lez_expiry = iteration_start + lez_duration;
+        // Taker locks ETH at the contract 5-min minimum.
+        let eth_lock = now + 300;
+
+        // Against the STALE expiry the tight lock wrongly passes the margin gate.
+        assert!(eth_timelock_covers_lez(eth_lock, stale_lez_expiry, margin));
+
+        // Against the FRESH expiry computed at match time it is correctly
+        // rejected — and that same fresh value is what the LEZ lock uses, so the
+        // gate and the lock can never disagree.
+        let fresh = fresh_lez_expiry_secs(now, lez_duration);
+        assert!(!eth_timelock_covers_lez(eth_lock, fresh, margin));
+    }
+
+    // P2-5: the rejected-set is keyed by ETH swap id, not hashlock. A taker who
+    // locks too-tight (rejected) and then re-locks CORRECTLY under a fresh escrow
+    // id with the SAME secret must NOT be suppressed by the stale rejection.
+    #[test]
+    fn rejected_set_is_keyed_by_swap_id_not_hashlock() {
+        let swap_a = [0xA1u8; 32]; // first (too-tight) escrow id
+        let swap_b = [0xB2u8; 32]; // corrected re-lock, same secret, NEW escrow id
+        let lez = 1_000_000u64;
+        let margin = 300u64;
+        let mut rejected: HashSet<[u8; 32]> = HashSet::new();
+
+        // First escrow too tight → Reject; the caller records the swap id.
+        assert_eq!(
+            classify_candidate(&swap_a, &rejected, false, lez, lez, Some(margin)),
+            CandidateDisposition::Reject
+        );
+        rejected.insert(swap_a);
+        // Replay of the SAME escrow id → Skip.
+        assert_eq!(
+            classify_candidate(&swap_a, &rejected, false, lez + 10_000, lez, Some(margin)),
+            CandidateDisposition::Skip
+        );
+        // A corrected re-lock under a NEW escrow id (same secret) with a safe
+        // timelock is a fresh, acceptable candidate — not suppressed.
+        assert_eq!(
+            classify_candidate(&swap_b, &rejected, false, lez + 10_000, lez, Some(margin)),
+            CandidateDisposition::Accept
+        );
+    }
+
+    // A minimal in-memory journal to exercise the P1-3 stop decision without a
+    // live watcher/sequencer: `record`/`clear` mutate the set; the loop consults
+    // `has_in_flight` after each iteration.
+    #[derive(Default)]
+    struct MockJournal {
+        entries: std::sync::Mutex<HashSet<String>>,
+    }
+    impl SwapJournal for MockJournal {
+        fn record(&self, hashlock_hex: &str, _swap_id: &str) -> Result<()> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(hashlock_hex.to_string());
+            Ok(())
+        }
+        fn clear(&self, hashlock_hex: &str) {
+            self.entries.lock().unwrap().remove(hashlock_hex);
+        }
+        fn contains(&self, hashlock_hex: &str) -> bool {
+            self.entries.lock().unwrap().contains(hashlock_hex)
+        }
+        fn has_in_flight(&self) -> bool {
+            !self.entries.lock().unwrap().is_empty()
+        }
+    }
+
+    // P1-3 (principle ii): the loop stops iff the journal still holds an
+    // in-flight entry after run_maker returns — regardless of the error variant.
+    #[test]
+    fn loop_stops_when_journal_nonempty_on_any_error() {
+        let journal = MockJournal::default();
+
+        // Clean journal (e.g. a pre-lock transient failure that stranded nothing)
+        // ⇒ the loop may continue.
+        assert!(!loop_must_stop_after_iteration(journal.has_in_flight()));
+
+        // run_maker recorded an entry before locking LEZ and returned an error
+        // WITHOUT clearing it (EthClaimUnresolved / EscrowStateUnknown / a LEZ
+        // funding-confirmation failure — the variant is irrelevant). The entry is
+        // retained ⇒ the loop MUST stop for a supervised restart.
+        journal.record(&"ab".repeat(32), "0xdead").unwrap();
+        assert!(loop_must_stop_after_iteration(journal.has_in_flight()));
+
+        // A confirmed terminal state clears the entry ⇒ the loop may continue.
+        journal.clear(&"ab".repeat(32));
+        assert!(!loop_must_stop_after_iteration(journal.has_in_flight()));
     }
 }

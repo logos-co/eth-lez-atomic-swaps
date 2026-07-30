@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Args;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
@@ -187,6 +187,31 @@ async fn cmd_maker_loop(
     }
     if resumed > 0 && !json {
         println!("Resolved {resumed} resumed in-flight swap(s) before accepting new swaps.");
+    }
+
+    // P1-4: quarantined entries are partial-lock wedges (a committed lock whose
+    // funding never landed) that can never terminalize. They do NOT block startup
+    // (they live in a separate section of the state file, excluded from
+    // `snapshot()`), but each is permanently stranded LEZ whose hashlock/secret
+    // must never be reused — surface them loudly on EVERY startup.
+    let quarantined = store.quarantined_snapshot();
+    if !quarantined.is_empty() {
+        for q in &quarantined {
+            error!(
+                hashlock = %q.hashlock,
+                swap_id = %q.swap_id,
+                quarantined_at = q.quarantined_at,
+                reason = %q.reason,
+                "QUARANTINED partial-lock escrow — permanently unusable; do NOT reuse this secret"
+            );
+        }
+        if !json {
+            println!(
+                "WARNING: {} quarantined partial-lock hashlock(s) in the state file — permanently \
+                 unusable (funding never landed; see logs). Startup proceeds; these are never retried.",
+                quarantined.len()
+            );
+        }
     }
 
     // If the journal STILL holds unresolved fund-bearing entries (reconcile

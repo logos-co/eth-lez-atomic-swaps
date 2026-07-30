@@ -171,3 +171,47 @@ Taker-locks-first makes griefing costly to the attacker and ~free to the maker:
 - **State file**: a non-empty `.maker-state.json` after a crash is normal —
   reconciliation clears it on the next start. Alert if entries persist
   across restarts (RPC/sequencer trouble).
+
+## Quarantined swaps (partial-lock wedges)
+
+The LEZ lock is two transactions: the `Lock` instruction (creates the escrow
+PDA in state `Locked`) and a funding transfer. If the process dies between the
+two — or the sequencer commits the lock but rejects the transfer — the escrow
+is left `Locked` **with zero balance**. That escrow can never be terminalized:
+the HTLC program's `Refund` requires `balance >= amount`, so a refund can never
+confirm, and a resume watcher would wait until expiry and then retry forever.
+Left in the active journal, such an entry would wedge sequential startup into a
+restart-forever loop.
+
+Startup reconciliation therefore detects this state (an **expired** `Locked`
+escrow whose balance is confirmed below the locked amount across several
+re-reads — an unexpired underfunded escrow is given the benefit of the doubt
+and resumed, since its funding transfer may still be in flight after a fast
+restart) and **quarantines** the entry:
+
+- It is moved from `in_flight` to a separate `quarantined` section of the
+  state file, with a reason and timestamp.
+- Quarantined entries **never block startup** and are **never retried** — the
+  bot proceeds to accept new swaps.
+- Every startup logs an `ERROR` line per quarantined entry so the condition
+  stays visible.
+
+**Operationally, a quarantined entry means:**
+
+- **No LEZ is sitting in the escrow** in the common case (the funding never
+  landed, so the PDA holds 0), but the *hashlock is burned*: the PDA for that
+  hashlock exists forever in `Locked` state and can never be locked, claimed,
+  or refunded.
+- **The secret behind that hashlock is permanently unusable — never reuse
+  it.** A new swap keyed by the same hashlock would collide with the dead PDA:
+  the maker's lock refuses to fund it, and anything transferred to that PDA is
+  unrecoverable. Takers generate fresh secrets per swap, so this only matters
+  if someone replays an old secret by hand.
+- The entries are kept purely for audit. After verifying the escrow balance is
+  0 (`swap-cli status --hashlock <hex>`), you may prune the `quarantined`
+  array from the state file for a clean file; keeping them costs nothing.
+
+Alert on the startup warning (`quarantined partial-lock hashlock(s)`): each
+occurrence indicates a crash inside the lock sequence or a sequencer that
+accepted a lock but dropped its funding — worth investigating even though the
+bot keeps running.

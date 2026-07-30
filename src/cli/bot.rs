@@ -22,11 +22,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::FixedBytes;
+use lee::AccountId;
 use lee_core::program::ProgramId;
-use lez_htlc_program::HTLCState;
+use lez_htlc_program::{HTLCEscrow, HTLCState};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
@@ -93,9 +94,32 @@ pub struct InFlightSwap {
     pub recorded_at: u64,
 }
 
+/// A swap moved out of the active journal because it can never terminalize and
+/// would otherwise wedge sequential startup forever. See [`is_partial_lock_wedge`].
+/// Quarantined entries are NEVER retried and NEVER block startup — they are kept
+/// only so operators can see the permanently-stranded hashlock and know the
+/// secret must not be reused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantinedSwap {
+    /// 64-char lowercase hex, no 0x prefix.
+    pub hashlock: String,
+    /// 0x-prefixed 32-byte hex (EthHTLC swap id), if known.
+    pub swap_id: String,
+    /// Why the entry was quarantined.
+    pub reason: String,
+    /// Unix seconds when the entry was quarantined.
+    pub quarantined_at: u64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct BotState {
     in_flight: Vec<InFlightSwap>,
+    /// Entries that can never reach a terminal state (e.g. a committed lock whose
+    /// funding transfer never landed). Separate from `in_flight` so they do not
+    /// block startup or get retried (P1-4). `#[serde(default)]` keeps older
+    /// state files (without this field) loadable.
+    #[serde(default)]
+    quarantined: Vec<QuarantinedSwap>,
 }
 
 /// Small JSON journal of in-flight swaps, persisted on every mutation.
@@ -201,6 +225,32 @@ impl StateStore {
         self.state.lock().expect("state lock").in_flight.clone()
     }
 
+    /// Snapshot of quarantined (permanently-unusable) entries.
+    pub fn quarantined_snapshot(&self) -> Vec<QuarantinedSwap> {
+        self.state.lock().expect("state lock").quarantined.clone()
+    }
+
+    /// Move an in-flight entry to quarantine with a reason (idempotent on
+    /// hashlock). Used for the partial-lock wedge that can never terminalize
+    /// (P1-4): it is removed from `in_flight` (so it stops blocking startup and
+    /// is never retried) and recorded under `quarantined` for operator
+    /// visibility. Best-effort persist.
+    pub fn quarantine(&self, hashlock: &str, reason: String) {
+        let mut state = self.state.lock().expect("state lock");
+        let entry = state.in_flight.iter().find(|s| s.hashlock == hashlock);
+        let swap_id = entry.map(|s| s.swap_id.clone()).unwrap_or_default();
+        state.in_flight.retain(|s| s.hashlock != hashlock);
+        if !state.quarantined.iter().any(|q| q.hashlock == hashlock) {
+            state.quarantined.push(QuarantinedSwap {
+                hashlock: hashlock.to_string(),
+                swap_id,
+                reason,
+                quarantined_at: now_unix(),
+            });
+        }
+        self.persist_logged(&state);
+    }
+
     /// Whether a hashlock is currently journaled as in-flight.
     pub fn contains(&self, hashlock: &str) -> bool {
         self.state
@@ -209,6 +259,11 @@ impl StateStore {
             .in_flight
             .iter()
             .any(|s| s.hashlock == hashlock)
+    }
+
+    /// Whether any (non-quarantined) in-flight entry remains.
+    pub fn has_in_flight(&self) -> bool {
+        !self.state.lock().expect("state lock").in_flight.is_empty()
     }
 }
 
@@ -233,6 +288,10 @@ impl crate::swap::maker::SwapJournal for StateStore {
     fn contains(&self, hashlock_hex: &str) -> bool {
         StateStore::contains(self, hashlock_hex)
     }
+
+    fn has_in_flight(&self) -> bool {
+        StateStore::has_in_flight(self)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +301,105 @@ impl crate::swap::maker::SwapJournal for StateStore {
 fn parse_hashlock_hex(s: &str) -> Option<[u8; 32]> {
     let bytes = hex::decode(s.trim_start_matches("0x")).ok()?;
     bytes.try_into().ok()
+}
+
+/// Whether a reconciled escrow is the unrecoverable partial-lock wedge (P1-4):
+/// the `Lock` instruction committed (the PDA exists and is `Locked`) but the
+/// funding transfer never landed, leaving the escrow balance below the locked
+/// amount. The LEZ HTLC `Refund` requires `balance >= amount`, so such an escrow
+/// can NEVER be terminalized — a resume watcher would wait until expiry and then
+/// refund forever without confirming, and the retained entry would wedge
+/// sequential startup into a restart-forever loop. The funding transfer is a
+/// single feeless all-or-nothing move, so in practice `balance == 0` here.
+///
+/// Conclusiveness (principle i): the wedge verdict additionally requires the
+/// escrow to be EXPIRED. An unexpired underfunded escrow is ambiguous — the
+/// funding transfer may still be in flight after a crash-and-fast-restart, and
+/// quarantining it prematurely would strand LEZ that lands a block later. Such
+/// an escrow resumes as live instead; if the funding truly never lands, the
+/// refund cannot confirm, the entry is retained, and the next restart AFTER
+/// expiry reaches the conclusive wedge verdict here.
+fn is_partial_lock_wedge(
+    state: HTLCState,
+    now_ms: u64,
+    timelock_ms: u64,
+    balance: u128,
+    amount: u128,
+) -> bool {
+    matches!(state, HTLCState::Locked) && now_ms >= timelock_ms && balance < amount
+}
+
+/// Re-read an escrow up to a bounded number of times, tolerating ambiguous
+/// reads (P1-2, principle i). `get_escrow` returns `Ok(None)` for
+/// missing/short/phantom data — which is NOT conclusive absence (the LEZ HTLC
+/// program never deletes an account; refund leaves it `Refunded` with intact
+/// data). A transient sequencer error is equally ambiguous. Returns:
+/// - `Some(escrow)` on the first conclusive read of an existing escrow.
+/// - `None` only when EVERY read was absent/errored — the caller must RETAIN the
+///   journal entry, never drop it (a phantom/short read while the escrow exists
+///   would otherwise strand locked LEZ). A never-locked entry that reads `None`
+///   forever costs only a redundant idempotent reconcile each restart.
+async fn read_escrow_bounded(lez: &LezClient, hashlock: &[u8; 32]) -> Option<HTLCEscrow> {
+    let hl = *hashlock;
+    read_escrow_bounded_with(|| lez.get_escrow(&hl), lez.poll_interval(), hashlock).await
+}
+
+/// Generic core of [`read_escrow_bounded`], parameterized over the fetch so the
+/// bounded-retry / retain-on-ambiguity behaviour is unit-testable without a
+/// live sequencer.
+async fn read_escrow_bounded_with<F, Fut>(
+    mut fetch: F,
+    poll: std::time::Duration,
+    hashlock: &[u8; 32],
+) -> Option<HTLCEscrow>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<HTLCEscrow>>>,
+{
+    const MAX_READS: u32 = 5;
+    for attempt in 1..=MAX_READS {
+        match fetch().await {
+            Ok(Some(escrow)) => return Some(escrow),
+            Ok(None) => {
+                debug!(
+                    hashlock = %hex::encode(hashlock),
+                    "reconcile: escrow read absent ({attempt}/{MAX_READS}) — ambiguous, retrying"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    hashlock = %hex::encode(hashlock),
+                    "reconcile: escrow read error ({attempt}/{MAX_READS}): {e} — retrying"
+                );
+            }
+        }
+        if attempt < MAX_READS {
+            tokio::time::sleep(poll).await;
+        }
+    }
+    None
+}
+
+/// Highest escrow-PDA balance observed across bounded re-reads, short-circuiting
+/// as soon as `enough` is reached. Used to judge the partial-lock wedge robustly:
+/// a single phantom-zero balance read must never misclassify a funded escrow as
+/// unfunded (which would wrongly quarantine live LEZ), so we take the MAX over
+/// several reads — any read that reaches `enough` proves the escrow is funded.
+async fn max_escrow_balance(lez: &LezClient, pda: &AccountId, enough: u128) -> u128 {
+    const MAX_READS: u32 = 5;
+    let mut max = 0u128;
+    for attempt in 1..=MAX_READS {
+        if let Ok(balance) = lez.get_balance(pda).await {
+            max = max.max(balance);
+            if max >= enough {
+                return max;
+            }
+        }
+        if attempt < MAX_READS {
+            tokio::time::sleep(lez.poll_interval()).await;
+        }
+    }
+    max
 }
 
 fn parse_swap_id(s: &str) -> Option<FixedBytes<32>> {
@@ -451,12 +609,8 @@ pub async fn reconcile(
             continue;
         };
 
-        match lez_client.get_escrow(&hashlock).await {
-            Ok(None) => {
-                info!(hashlock = %entry.hashlock, "reconcile: no escrow on-chain, dropping");
-                store.remove(&entry.hashlock);
-            }
-            Ok(Some(escrow)) => match escrow.state {
+        match read_escrow_bounded(&lez_client, &hashlock).await {
+            Some(escrow) => match escrow.state {
                 HTLCState::Claimed => {
                     // Taker revealed the preimage while we were down — collect the ETH.
                     match escrow.preimage.and_then(|p| <[u8; 32]>::try_from(p).ok()) {
@@ -486,6 +640,48 @@ pub async fn reconcile(
                     store.remove(&entry.hashlock);
                 }
                 HTLCState::Locked => {
+                    // P1-4: detect the partial-lock wedge BEFORE the
+                    // refund-vs-resume decision. If the Lock committed but the
+                    // funding transfer never landed, the escrow is `Locked` with
+                    // balance < amount and can NEVER be refunded (the program
+                    // requires balance >= amount) — a resume/refund would loop
+                    // forever and the retained entry would wedge sequential
+                    // startup into a restart-forever cycle. Quarantine it: remove
+                    // from the active journal (so startup proceeds and it is
+                    // never retried) and record it for operator visibility. The
+                    // balance is confirmed across bounded re-reads so a transient
+                    // phantom-zero read can never misclassify a funded escrow,
+                    // and only an EXPIRED underfunded escrow is conclusive (an
+                    // unexpired one may still be waiting on an in-flight funding
+                    // transfer — it resumes as live below instead).
+                    let pda = lez_client.escrow_pda(&hashlock);
+                    let balance = max_escrow_balance(&lez_client, &pda, escrow.amount).await;
+                    if is_partial_lock_wedge(
+                        escrow.state,
+                        now_unix() * 1000,
+                        escrow.timelock,
+                        balance,
+                        escrow.amount,
+                    ) {
+                        error!(
+                            hashlock = %entry.hashlock,
+                            balance,
+                            amount = escrow.amount,
+                            "reconcile: partial-lock wedge (funding never landed) — QUARANTINING; \
+                             escrow can never be refunded, hashlock/secret is permanently unusable \
+                             and must NOT be reused"
+                        );
+                        store.quarantine(
+                            &entry.hashlock,
+                            format!(
+                                "partial lock: escrow Locked with balance {balance} < amount {} \
+                                 (funding transfer never landed); refund cannot terminalize it. \
+                                 Hashlock permanently unusable — do not reuse the secret.",
+                                escrow.amount
+                            ),
+                        );
+                        continue;
+                    }
                     // Escrow timelock is stored in milliseconds.
                     if now_unix() * 1000 >= escrow.timelock {
                         info!(hashlock = %entry.hashlock, "reconcile: escrow expired, refunding LEZ");
@@ -523,8 +719,17 @@ pub async fn reconcile(
                     }
                 }
             },
-            Err(e) => {
-                warn!(hashlock = %entry.hashlock, "reconcile: escrow query failed, keeping: {e}");
+            None => {
+                // Every read was absent/errored — ambiguous, NOT conclusive
+                // absence (P1-2 / principle i). `get_escrow` returns `None` for
+                // missing/short/phantom data, and the LEZ HTLC program never
+                // deletes an account. Dropping now would strand locked LEZ if the
+                // escrow exists but read phantom/short; a never-locked entry costs
+                // only a redundant idempotent reconcile next restart. Retain.
+                warn!(
+                    hashlock = %entry.hashlock,
+                    "reconcile: escrow read absent/ambiguous after retries — retaining for next reconcile"
+                );
             }
         }
     }
@@ -904,5 +1109,192 @@ mod tests {
         assert!(parse_hashlock_hex("abcd").is_none());
         assert!(parse_swap_id(&format!("0x{}", "cd".repeat(32))).is_some());
         assert!(parse_swap_id("nope").is_none());
+    }
+
+    fn test_escrow(state: HTLCState, amount: u128) -> HTLCEscrow {
+        use lee_core::program::PdaSeed;
+        let dummy = lee::AccountId::for_public_pda(&[1u32; 8], &PdaSeed::new([0u8; 32]));
+        HTLCEscrow {
+            hashlock: [0xABu8; 32],
+            maker_id: dummy,
+            taker_id: dummy,
+            amount,
+            state,
+            timelock: 1_000_000,
+            preimage: None,
+        }
+    }
+
+    // P1-2 (principle i): a single `Ok(None)` escrow read is ambiguous — the
+    // LEZ HTLC program never deletes accounts, so absence can be a
+    // phantom/short read. The bounded reader must retry, and if EVERY read is
+    // ambiguous return `None` so the caller RETAINS the journal entry.
+    #[tokio::test(start_paused = true)]
+    async fn ok_none_retries_then_retains() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // All reads ambiguous → None (caller retains), after exactly 5 attempts.
+        let calls = AtomicU32::new(0);
+        let result = read_escrow_bounded_with(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Ok(None) }
+            },
+            std::time::Duration::from_millis(10),
+            &[0xABu8; 32],
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "all-ambiguous reads must return None (retain)"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            5,
+            "must retry the bounded max"
+        );
+
+        // Two ambiguous reads (one None, one Err) then a conclusive escrow →
+        // the escrow is returned; a transient blip never masks a live escrow.
+        let calls = AtomicU32::new(0);
+        let result = read_escrow_bounded_with(
+            || {
+                let n = calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    match n {
+                        0 => Ok(None),
+                        1 => Err(SwapError::LezSequencer("transient".into())),
+                        _ => Ok(Some(test_escrow(HTLCState::Locked, 150))),
+                    }
+                }
+            },
+            std::time::Duration::from_millis(10),
+            &[0xABu8; 32],
+        )
+        .await;
+        assert!(result.is_some(), "a conclusive read after retries must win");
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    // P1-4: the partial-lock wedge predicate — an EXPIRED Locked escrow with
+    // balance below the locked amount can never be refunded (the program
+    // requires balance >= amount), so it is conclusively unrecoverable.
+    #[test]
+    fn partial_lock_wedge_predicate() {
+        let (before, expiry, after) = (999_999u64, 1_000_000u64, 1_000_001u64);
+        // The wedge: expired, Lock committed, funding never landed.
+        assert!(is_partial_lock_wedge(
+            HTLCState::Locked,
+            after,
+            expiry,
+            0,
+            150
+        ));
+        assert!(is_partial_lock_wedge(
+            HTLCState::Locked,
+            expiry,
+            expiry,
+            149,
+            150
+        ));
+        // Unexpired + underfunded is AMBIGUOUS (funding may still be in
+        // flight after a fast restart) — not the wedge; it resumes as live.
+        assert!(!is_partial_lock_wedge(
+            HTLCState::Locked,
+            before,
+            expiry,
+            0,
+            150
+        ));
+        // Fully funded — healthy escrow, never a wedge.
+        assert!(!is_partial_lock_wedge(
+            HTLCState::Locked,
+            after,
+            expiry,
+            150,
+            150
+        ));
+        assert!(!is_partial_lock_wedge(
+            HTLCState::Locked,
+            after,
+            expiry,
+            151,
+            150
+        ));
+        // Terminal states are never the wedge regardless of balance/expiry.
+        assert!(!is_partial_lock_wedge(
+            HTLCState::Claimed,
+            after,
+            expiry,
+            0,
+            150
+        ));
+        assert!(!is_partial_lock_wedge(
+            HTLCState::Refunded,
+            after,
+            expiry,
+            0,
+            150
+        ));
+    }
+
+    // P1-4: quarantining a partial-lock entry moves it OUT of the active
+    // journal (so startup no longer blocks on it and it is never retried) and
+    // INTO the quarantined section with a reason — durably, across reload.
+    #[test]
+    fn partial_lock_quarantined_and_startup_proceeds() {
+        let path =
+            std::env::temp_dir().join(format!("maker-quarantine-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let store = StateStore::load(&path).unwrap();
+        let hl = "ab".repeat(32);
+        store
+            .record(InFlightSwap {
+                hashlock: hl.clone(),
+                swap_id: format!("0x{}", "cd".repeat(32)),
+                recorded_at: 1,
+            })
+            .unwrap();
+        assert!(store.has_in_flight(), "recorded entry is in-flight");
+
+        store.quarantine(&hl, "partial lock: funding never landed".into());
+
+        // The active journal is empty → the P1-3 stop gate and the startup
+        // "still unresolved" gate both see a clean journal and proceed.
+        assert!(!store.has_in_flight());
+        assert!(store.snapshot().is_empty());
+        assert!(!store.contains(&hl));
+        // ... but the entry is preserved in quarantine with its reason.
+        let q = store.quarantined_snapshot();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].hashlock, hl);
+        assert!(q[0].reason.contains("partial lock"));
+        assert!(q[0].quarantined_at > 0);
+        // Carried the swap id over from the in-flight entry.
+        assert_eq!(q[0].swap_id, format!("0x{}", "cd".repeat(32)));
+
+        // Survives a restart (reload from disk) and stays out of in_flight.
+        let reloaded = StateStore::load(&path).unwrap();
+        assert!(!reloaded.has_in_flight());
+        assert_eq!(reloaded.quarantined_snapshot().len(), 1);
+
+        // Idempotent: quarantining again does not duplicate.
+        reloaded.quarantine(&hl, "again".into());
+        assert_eq!(reloaded.quarantined_snapshot().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Older state files (no `quarantined` field) still load.
+    #[test]
+    fn state_file_without_quarantine_field_loads() {
+        let path =
+            std::env::temp_dir().join(format!("maker-oldstate-test-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"in_flight":[]}"#).unwrap();
+        let store = StateStore::load(&path).unwrap();
+        assert!(store.quarantined_snapshot().is_empty());
+        assert!(!store.has_in_flight());
+        let _ = std::fs::remove_file(&path);
     }
 }
