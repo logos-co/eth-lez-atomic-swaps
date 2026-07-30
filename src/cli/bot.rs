@@ -40,6 +40,17 @@ use crate::swap::refund::now_unix;
 // Timelock / inventory guards
 // ---------------------------------------------------------------------------
 
+/// Loop-mode timelock defaults (minutes), applied when the operator does not set
+/// `LEZ_TIMELOCK_MINUTES` / `ETH_TIMELOCK_MINUTES`. The standing bot uses LONGER
+/// defaults than the single-shot flow (5/10): on the public testnet, LEZ lock
+/// *confirmation alone* can take up to 300s, so a 5-minute LEZ timelock leaves
+/// almost no margin for the maker to observe the preimage and claim before the
+/// taker's ETH refund window opens. 20/40 (with the 5-minute safety margin)
+/// gives the standing bot a safe window; single-shot / demo runs keep 5/10 for
+/// fast local iteration. An explicit env/flag value always wins over both.
+pub const LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES: u64 = 20;
+pub const LOOP_DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 40;
+
 /// Validate the maker-safety timelock invariant before the first offer:
 /// the ETH (taker, long) timelock must exceed the LEZ (maker, short) timelock
 /// by at least `margin_minutes`. A margin below 5 minutes is rejected — the
@@ -329,6 +340,61 @@ fn is_partial_lock_wedge(
     matches!(state, HTLCState::Locked) && now_ms >= timelock_ms && balance < amount
 }
 
+/// Disposition of a suspected partial-lock wedge AFTER a fresh, paired re-read
+/// (P1-1). The initial reconcile observation `(Locked, balance < amount)` is a
+/// wedge *candidate* only — a taker `Claim` can land AFTER that read, revealing
+/// the preimage. Quarantine is IRREVERSIBLE (it strands the LEZ and marks the
+/// hashlock/secret permanently unusable), so it must never act on a single
+/// stale observation. We re-read the escrow state and balance and classify the
+/// fresh pair here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WedgeDisposition {
+    /// Fresh read still shows `Locked` AND the fresh balance is still below the
+    /// amount at/after expiry — the wedge is genuine and conclusive: quarantine.
+    Quarantine,
+    /// Fresh read shows the taker `Claimed` after our stale read — the preimage
+    /// is on-chain: recover the ETH side instead of quarantining.
+    RecoverClaimed,
+    /// Fresh read shows `Refunded` — already terminal, drop the entry.
+    Dropped,
+    /// Fresh read inconclusive: absent/phantom, all balance reads failed
+    /// (outage — P1-2), or no longer wedged. Retain the entry and retry on the
+    /// next reconcile; never quarantine on a non-conclusive read.
+    Retain,
+}
+
+/// Classify a suspected wedge from its FRESH paired re-read (P1-1 / P1-2). Pure
+/// so the decision is unit-testable without a live sequencer.
+///
+/// - `fresh_state`: escrow state from the re-read (`None` = absent/phantom).
+/// - `fresh_balance`: highest balance across the bounded re-read (`None` = every
+///   read failed; an outage must NOT be read as zero → no quarantine).
+fn classify_wedge_reread(
+    fresh_state: Option<HTLCState>,
+    fresh_balance: Option<u128>,
+    now_ms: u64,
+    timelock_ms: u64,
+    amount: u128,
+) -> WedgeDisposition {
+    match fresh_state {
+        // Taker revealed the preimage after our stale Locked read — recover ETH.
+        Some(HTLCState::Claimed) => WedgeDisposition::RecoverClaimed,
+        // Already terminal on the maker side.
+        Some(HTLCState::Refunded) => WedgeDisposition::Dropped,
+        // Still Locked: quarantine ONLY if the low balance is confirmed on the
+        // fresh paired read. All-reads-failed (`None`) or a now-sufficient
+        // balance → retain and retry.
+        Some(HTLCState::Locked) => match fresh_balance {
+            Some(b) if is_partial_lock_wedge(HTLCState::Locked, now_ms, timelock_ms, b, amount) => {
+                WedgeDisposition::Quarantine
+            }
+            _ => WedgeDisposition::Retain,
+        },
+        // Absent/phantom re-read — not conclusive, retain.
+        None => WedgeDisposition::Retain,
+    }
+}
+
 /// Re-read an escrow up to a bounded number of times, tolerating ambiguous
 /// reads (P1-2, principle i). `get_escrow` returns `Ok(None)` for
 /// missing/short/phantom data — which is NOT conclusive absence (the LEZ HTLC
@@ -385,18 +451,40 @@ where
 /// a single phantom-zero balance read must never misclassify a funded escrow as
 /// unfunded (which would wrongly quarantine live LEZ), so we take the MAX over
 /// several reads — any read that reaches `enough` proves the escrow is funded.
-async fn max_escrow_balance(lez: &LezClient, pda: &AccountId, enough: u128) -> u128 {
+///
+/// Returns `None` when EVERY read failed (P1-2): an all-failed outage is
+/// indistinguishable from an observed zero, so the caller must NOT treat it as
+/// "balance is zero" (which would falsely quarantine a recoverable escrow). A
+/// `None` result means "unknown — retain and retry"; `Some(b)` means at least
+/// one read succeeded and `b` is the highest balance observed.
+async fn max_escrow_balance(lez: &LezClient, pda: &AccountId, enough: u128) -> Option<u128> {
+    max_escrow_balance_with(|| lez.get_balance(pda), lez.poll_interval(), enough).await
+}
+
+/// Generic core of [`max_escrow_balance`], parameterized over the balance fetch
+/// so the max-over-reads / all-failed→`None` behaviour is unit-testable without
+/// a live sequencer.
+async fn max_escrow_balance_with<F, Fut>(
+    mut fetch: F,
+    poll: std::time::Duration,
+    enough: u128,
+) -> Option<u128>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<u128>>,
+{
     const MAX_READS: u32 = 5;
-    let mut max = 0u128;
+    let mut max: Option<u128> = None;
     for attempt in 1..=MAX_READS {
-        if let Ok(balance) = lez.get_balance(pda).await {
-            max = max.max(balance);
-            if max >= enough {
+        if let Ok(balance) = fetch().await {
+            let m = max.map_or(balance, |cur| cur.max(balance));
+            max = Some(m);
+            if m >= enough {
                 return max;
             }
         }
         if attempt < MAX_READS {
-            tokio::time::sleep(lez.poll_interval()).await;
+            tokio::time::sleep(poll).await;
         }
     }
     max
@@ -468,6 +556,42 @@ async fn claim_eth(config: &SwapConfig, swap_id_str: &str, preimage: [u8; 32]) -
             }
             warn!("reconcile: ETH claim failed for {swap_id_str}, keeping entry: {e}");
             EthClaimOutcome::Failed
+        }
+    }
+}
+
+/// Recover the ETH side of an escrow the taker has already CLAIMED on LEZ (the
+/// preimage is on-chain). Drops the journal entry once the ETH is claimed or is
+/// already terminal; RETAINS it on a transient ETH-claim failure so the next
+/// reconcile retries before the taker's ETH refund deadline (P1-6). Shared by
+/// the up-front `Claimed` branch and the wedge re-read's `RecoverClaimed` path
+/// (P1-1), so both recover identically.
+async fn recover_claimed_escrow(
+    config: &SwapConfig,
+    entry: &InFlightSwap,
+    escrow: &HTLCEscrow,
+    store: &Arc<StateStore>,
+) {
+    match escrow
+        .preimage
+        .as_ref()
+        .and_then(|p| <[u8; 32]>::try_from(p.as_slice()).ok())
+    {
+        Some(preimage) => {
+            info!(hashlock = %entry.hashlock, "reconcile: escrow claimed, claiming ETH");
+            let outcome = claim_eth(config, &entry.swap_id, preimage).await;
+            if !retain_after_eth_claim(outcome) {
+                store.remove(&entry.hashlock);
+            }
+        }
+        None => {
+            // LEZ is terminally claimed but the preimage is missing/invalid —
+            // the ETH is unrecoverable and there is nothing to retry, so drop.
+            error!(
+                hashlock = %entry.hashlock,
+                "reconcile: escrow claimed but preimage missing/invalid, dropping (ETH unrecoverable)"
+            );
+            store.remove(&entry.hashlock);
         }
     }
 }
@@ -613,27 +737,7 @@ pub async fn reconcile(
             Some(escrow) => match escrow.state {
                 HTLCState::Claimed => {
                     // Taker revealed the preimage while we were down — collect the ETH.
-                    match escrow.preimage.and_then(|p| <[u8; 32]>::try_from(p).ok()) {
-                        Some(preimage) => {
-                            info!(hashlock = %entry.hashlock, "reconcile: escrow claimed, claiming ETH");
-                            let outcome = claim_eth(config, &entry.swap_id, preimage).await;
-                            // Keep the entry on a transient ETH-claim failure so
-                            // the next reconcile retries (P1-6).
-                            if !retain_after_eth_claim(outcome) {
-                                store.remove(&entry.hashlock);
-                            }
-                        }
-                        None => {
-                            // LEZ is terminally claimed but the preimage is
-                            // missing/invalid — the ETH is unrecoverable and
-                            // there is nothing to retry, so drop the entry.
-                            error!(
-                                hashlock = %entry.hashlock,
-                                "reconcile: escrow claimed but preimage missing/invalid, dropping (ETH unrecoverable)"
-                            );
-                            store.remove(&entry.hashlock);
-                        }
-                    }
+                    recover_claimed_escrow(config, &entry, &escrow, store).await;
                 }
                 HTLCState::Refunded => {
                     info!(hashlock = %entry.hashlock, "reconcile: escrow already refunded, dropping");
@@ -655,7 +759,21 @@ pub async fn reconcile(
                     // unexpired one may still be waiting on an in-flight funding
                     // transfer — it resumes as live below instead).
                     let pda = lez_client.escrow_pda(&hashlock);
-                    let balance = max_escrow_balance(&lez_client, &pda, escrow.amount).await;
+                    // P1-2: distinguish "observed low balance" from "every
+                    // balance read failed" (an outage). `None` means unknown, not
+                    // zero — retain and retry rather than falsely quarantine a
+                    // recoverable escrow.
+                    let balance = match max_escrow_balance(&lez_client, &pda, escrow.amount).await {
+                        Some(b) => b,
+                        None => {
+                            warn!(
+                                hashlock = %entry.hashlock,
+                                "reconcile: every escrow-balance read failed (LEZ outage?) — cannot \
+                                 judge partial-lock wedge; retaining entry for next reconcile"
+                            );
+                            continue;
+                        }
+                    };
                     if is_partial_lock_wedge(
                         escrow.state,
                         now_unix() * 1000,
@@ -663,23 +781,70 @@ pub async fn reconcile(
                         balance,
                         escrow.amount,
                     ) {
-                        error!(
-                            hashlock = %entry.hashlock,
-                            balance,
-                            amount = escrow.amount,
-                            "reconcile: partial-lock wedge (funding never landed) — QUARANTINING; \
-                             escrow can never be refunded, hashlock/secret is permanently unusable \
-                             and must NOT be reused"
-                        );
-                        store.quarantine(
-                            &entry.hashlock,
-                            format!(
-                                "partial lock: escrow Locked with balance {balance} < amount {} \
-                                 (funding transfer never landed); refund cannot terminalize it. \
-                                 Hashlock permanently unusable — do not reuse the secret.",
-                                escrow.amount
-                            ),
-                        );
+                        // P1-1: the initial read is a wedge CANDIDATE only — a
+                        // taker `Claim` can land AFTER it. Quarantine is
+                        // irreversible (strands the LEZ, burns the secret), so
+                        // RE-READ the escrow and balance and act only on the fresh
+                        // paired observation. If the taker claimed, recover the
+                        // ETH; quarantine only if still Locked + still underfunded.
+                        let fresh = read_escrow_bounded(&lez_client, &hashlock).await;
+                        let fresh_amount = fresh.as_ref().map_or(escrow.amount, |e| e.amount);
+                        let fresh_timelock = fresh.as_ref().map_or(escrow.timelock, |e| e.timelock);
+                        let fresh_balance =
+                            max_escrow_balance(&lez_client, &pda, fresh_amount).await;
+                        match classify_wedge_reread(
+                            fresh.as_ref().map(|e| e.state),
+                            fresh_balance,
+                            now_unix() * 1000,
+                            fresh_timelock,
+                            fresh_amount,
+                        ) {
+                            WedgeDisposition::Quarantine => {
+                                let fresh_balance_val = fresh_balance.unwrap_or(balance);
+                                error!(
+                                    hashlock = %entry.hashlock,
+                                    balance = fresh_balance_val,
+                                    amount = fresh_amount,
+                                    "reconcile: partial-lock wedge (funding never landed) — QUARANTINING; \
+                                     escrow can never be refunded, hashlock/secret is permanently unusable \
+                                     and must NOT be reused"
+                                );
+                                store.quarantine(
+                                    &entry.hashlock,
+                                    format!(
+                                        "partial lock: escrow Locked with balance {fresh_balance_val} < \
+                                         amount {fresh_amount} (funding transfer never landed); refund \
+                                         cannot terminalize it. Hashlock permanently unusable — do not \
+                                         reuse the secret."
+                                    ),
+                                );
+                            }
+                            WedgeDisposition::RecoverClaimed => {
+                                // Taker claimed after our stale read — the preimage
+                                // is on-chain; recover the ETH instead of eating it.
+                                info!(
+                                    hashlock = %entry.hashlock,
+                                    "reconcile: taker claimed after the wedge candidate read — claiming ETH"
+                                );
+                                let fresh = fresh
+                                    .expect("RecoverClaimed implies a fresh escrow read was present");
+                                recover_claimed_escrow(config, &entry, &fresh, store).await;
+                            }
+                            WedgeDisposition::Dropped => {
+                                info!(
+                                    hashlock = %entry.hashlock,
+                                    "reconcile: escrow refunded on fresh re-read — dropping"
+                                );
+                                store.remove(&entry.hashlock);
+                            }
+                            WedgeDisposition::Retain => {
+                                warn!(
+                                    hashlock = %entry.hashlock,
+                                    "reconcile: partial-lock wedge NOT reconfirmed on fresh paired \
+                                     re-read — retaining entry for next reconcile"
+                                );
+                            }
+                        }
                         continue;
                     }
                     // Escrow timelock is stored in milliseconds.
@@ -1236,6 +1401,117 @@ mod tests {
             0,
             150
         ));
+    }
+
+    // P1-1: a suspected wedge (Locked + low balance at the initial read) must
+    // NOT be quarantined if a taker `Claim` landed AFTER that stale read. The
+    // fresh paired re-read decides: a `Claimed` state routes to the ETH-claim
+    // recovery path, NEVER to the irreversible quarantine.
+    #[test]
+    fn classify_wedge_reread_recovers_taker_claim_not_quarantine() {
+        let (expiry, after) = (1_000_000u64, 1_000_001u64);
+        // Fresh read shows the taker claimed after our stale Locked read, even
+        // though the balance still reads low → recover ETH, not quarantine.
+        assert_eq!(
+            classify_wedge_reread(Some(HTLCState::Claimed), Some(0), after, expiry, 150),
+            WedgeDisposition::RecoverClaimed,
+            "a taker claim after the stale read must route to ETH recovery, not quarantine"
+        );
+        // Still Locked + still underfunded + expired on the fresh paired read →
+        // genuine wedge, quarantine.
+        assert_eq!(
+            classify_wedge_reread(Some(HTLCState::Locked), Some(0), after, expiry, 150),
+            WedgeDisposition::Quarantine
+        );
+        // Fresh read shows a now-sufficient balance → not wedged, retain/retry.
+        assert_eq!(
+            classify_wedge_reread(Some(HTLCState::Locked), Some(150), after, expiry, 150),
+            WedgeDisposition::Retain
+        );
+        // Fresh read shows Refunded → already terminal, drop.
+        assert_eq!(
+            classify_wedge_reread(Some(HTLCState::Refunded), Some(0), after, expiry, 150),
+            WedgeDisposition::Dropped
+        );
+        // Fresh escrow read absent/phantom → not conclusive, retain.
+        assert_eq!(
+            classify_wedge_reread(None, Some(0), after, expiry, 150),
+            WedgeDisposition::Retain
+        );
+    }
+
+    // P1-2: when EVERY balance read on the fresh paired re-read failed (an
+    // outage, `None`), a still-Locked escrow must be RETAINED, not quarantined —
+    // all-failed is indistinguishable from observed-zero and quarantine is
+    // irreversible, so the recoverable escrow is kept for the next reconcile.
+    #[test]
+    fn classify_wedge_reread_all_balance_reads_failed_retains() {
+        let (expiry, after) = (1_000_000u64, 1_000_001u64);
+        assert_eq!(
+            classify_wedge_reread(Some(HTLCState::Locked), None, after, expiry, 150),
+            WedgeDisposition::Retain,
+            "all-balance-reads-failed must retain a Locked escrow, never quarantine"
+        );
+    }
+
+    // P1-2: the balance reader returns `None` only when EVERY read failed, and
+    // `Some(max)` as soon as at least one read succeeds — so the caller can tell
+    // an outage (unknown) apart from a genuinely observed zero balance.
+    #[tokio::test(start_paused = true)]
+    async fn max_escrow_balance_all_reads_failed_returns_none() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // Every read errors → None (unknown), after exactly 5 attempts.
+        let calls = AtomicU32::new(0);
+        let result = max_escrow_balance_with(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Err(SwapError::LezSequencer("outage".into())) }
+            },
+            std::time::Duration::from_millis(10),
+            150,
+        )
+        .await;
+        assert_eq!(result, None, "all-failed reads must return None (unknown)");
+        assert_eq!(calls.load(Ordering::Relaxed), 5, "must retry the bounded max");
+
+        // One successful zero read among failures → Some(0): a real observed
+        // zero is distinct from an outage.
+        let calls = AtomicU32::new(0);
+        let result = max_escrow_balance_with(
+            || {
+                let n = calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if n == 2 {
+                        Ok(0u128)
+                    } else {
+                        Err(SwapError::LezSequencer("transient".into()))
+                    }
+                }
+            },
+            std::time::Duration::from_millis(10),
+            150,
+        )
+        .await;
+        assert_eq!(result, Some(0), "one successful read yields Some, even if zero");
+
+        // Short-circuits as soon as `enough` is reached (max over reads).
+        let calls = AtomicU32::new(0);
+        let result = max_escrow_balance_with(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Ok(150u128) }
+            },
+            std::time::Duration::from_millis(10),
+            150,
+        )
+        .await;
+        assert_eq!(result, Some(150));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "reaching `enough` short-circuits further reads"
+        );
     }
 
     // P1-4: quarantining a partial-lock entry moves it OUT of the active

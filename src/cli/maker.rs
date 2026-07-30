@@ -77,7 +77,7 @@ pub struct MakerArgs {
 pub async fn cmd_maker(
     args: MakerArgs,
     config: &SwapConfig,
-    timelock_minutes: (u64, u64),
+    timelock_minutes: (Option<u64>, Option<u64>),
     json: bool,
 ) -> Result<()> {
     // Faucet-only sidecar mode: fund to target, then exit.
@@ -129,7 +129,7 @@ pub async fn cmd_maker(
 async fn cmd_maker_loop(
     args: MakerArgs,
     config: &SwapConfig,
-    (lez_minutes, eth_minutes): (u64, u64),
+    (lez_minutes_arg, eth_minutes_arg): (Option<u64>, Option<u64>),
     json: bool,
 ) -> Result<()> {
     if args.hashlock.is_some() {
@@ -138,6 +138,13 @@ async fn cmd_maker_loop(
                 .into(),
         ));
     }
+
+    // Loop-mode timelock defaults are LONGER than single-shot (20/40 vs 5/10):
+    // LEZ lock confirmation alone can take up to 300s on the public testnet, so
+    // the short single-shot defaults would leave the standing bot almost no
+    // margin. An explicit env/flag value (Some) always wins.
+    let lez_minutes = lez_minutes_arg.unwrap_or(bot::LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES);
+    let eth_minutes = eth_minutes_arg.unwrap_or(bot::LOOP_DEFAULT_ETH_TIMELOCK_MINUTES);
 
     // Startup guard 1: timelock safety invariant.
     bot::validate_timelocks(lez_minutes, eth_minutes, args.timelock_margin_minutes)?;

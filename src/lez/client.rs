@@ -88,16 +88,23 @@ fn existing_escrow_blocks_fresh_lock(existing: Option<HTLCState>) -> bool {
 
 /// Whether an escrow observed during [`LezClient::lock`]'s confirmation poll is
 /// conclusively OUR just-submitted lock (principle i): state `Locked` and
-/// taker/amount/timelock exactly as submitted. Any other escrow at this PDA is
-/// pre-existing (the single-read check-before-fund can be defeated by one
+/// maker/taker/amount/timelock exactly as submitted. Any other escrow at this
+/// PDA is pre-existing (the single-read check-before-fund can be defeated by one
 /// phantom `None`) and funding it would strand the transfer.
+///
+/// The `maker_id == self` check (P1-3) is load-bearing: a different maker's
+/// escrow sharing our hashlock/taker/amount/timelock would otherwise pass, and
+/// Step 2 would fund THEIR escrow — one only they can refund. Confirmation
+/// requires that WE are the recorded maker.
 fn escrow_confirms_our_lock(
     escrow: &HTLCEscrow,
+    maker_id: &AccountId,
     taker_id: &AccountId,
     amount: u128,
     timelock_ms: u64,
 ) -> bool {
     escrow.state == HTLCState::Locked
+        && escrow.maker_id == *maker_id
         && escrow.taker_id == *taker_id
         && escrow.amount == amount
         && escrow.timelock == timelock_ms
@@ -353,7 +360,13 @@ impl LezClient {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             if let Some(escrow) = self.get_escrow(&hashlock).await? {
-                if !escrow_confirms_our_lock(&escrow, &taker_id, amount, expected_timelock_ms) {
+                if !escrow_confirms_our_lock(
+                    &escrow,
+                    &self.account_id,
+                    &taker_id,
+                    amount,
+                    expected_timelock_ms,
+                ) {
                     return Err(SwapError::InvalidState {
                         expected: format!(
                             "our just-submitted Locked escrow (amount {amount}, timelock \
@@ -636,11 +649,13 @@ mod tests {
     #[test]
     fn lock_confirmation_requires_exact_match() {
         let program_id = test_program_id();
+        let me = AccountId::for_public_pda(&program_id, &PdaSeed::new([0x00u8; 32]));
         let taker = AccountId::for_public_pda(&program_id, &PdaSeed::new([0x01u8; 32]));
         let other = AccountId::for_public_pda(&program_id, &PdaSeed::new([0x02u8; 32]));
+        // Our escrow: WE are the maker.
         let make = |state: HTLCState| HTLCEscrow {
             hashlock: [0xAAu8; 32],
-            maker_id: other,
+            maker_id: me,
             taker_id: taker,
             amount: 150,
             state,
@@ -649,15 +664,27 @@ mod tests {
         };
         let escrow = make(HTLCState::Locked);
 
-        assert!(escrow_confirms_our_lock(&escrow, &taker, 150, 1_000_000));
+        assert!(escrow_confirms_our_lock(&escrow, &me, &taker, 150, 1_000_000));
         // Wrong taker / amount / timelock — someone else's escrow.
-        assert!(!escrow_confirms_our_lock(&escrow, &other, 150, 1_000_000));
-        assert!(!escrow_confirms_our_lock(&escrow, &taker, 151, 1_000_000));
-        assert!(!escrow_confirms_our_lock(&escrow, &taker, 150, 999_999));
+        assert!(!escrow_confirms_our_lock(&escrow, &me, &other, 150, 1_000_000));
+        assert!(!escrow_confirms_our_lock(&escrow, &me, &taker, 151, 1_000_000));
+        assert!(!escrow_confirms_our_lock(&escrow, &me, &taker, 150, 999_999));
+        // P1-3: a DIFFERENT maker's escrow with our exact hashlock/taker/amount/
+        // timelock must NOT confirm — funding it would land our transfer in an
+        // escrow only they can refund.
+        let foreign = HTLCEscrow {
+            maker_id: other,
+            ..make(HTLCState::Locked)
+        };
+        assert!(
+            !escrow_confirms_our_lock(&foreign, &me, &taker, 150, 1_000_000),
+            "foreign-maker escrow must never confirm our lock"
+        );
         // Terminal states never confirm a fresh lock.
         for state in [HTLCState::Claimed, HTLCState::Refunded] {
             assert!(!escrow_confirms_our_lock(
                 &make(state),
+                &me,
                 &taker,
                 150,
                 1_000_000
