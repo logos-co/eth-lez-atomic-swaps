@@ -169,6 +169,12 @@ pub struct ClaimSubmission {
 pub struct SolvedClaim {
     pub solution: u128,
     pub winner: AccountId,
+    /// The 32-byte pinata seed this solution was computed against (the challenge
+    /// minus its leading difficulty byte). The seed rotates on every committed
+    /// claim, so — when `getTransaction` is unavailable — the seed rotating away
+    /// from this value is a sound, tx-specific confirmation that THIS claim
+    /// committed (the claim cycle is serialized under `claim_lock`).
+    pub seed: [u8; 32],
 }
 
 /// Fetch the current challenge and brute-force its PoW, crediting `winner`.
@@ -195,6 +201,10 @@ pub async fn solve_claim(
     pow_permits: Arc<Semaphore>,
 ) -> Result<SolvedClaim, String> {
     let challenge = pinata_challenge(sequencer).await?;
+    // Capture the seed (challenge without its leading difficulty byte) so the
+    // caller can confirm this claim by seed rotation if getTransaction is
+    // unavailable.
+    let seed: [u8; 32] = challenge[1..].try_into().expect("33-byte challenge");
 
     let permit = pow_permits
         .acquire_owned()
@@ -224,7 +234,11 @@ pub async fn solve_claim(
     // clone — it is released on scope exit like any other value.
     cancel_guard.disarm();
 
-    Ok(SolvedClaim { solution, winner })
+    Ok(SolvedClaim {
+        solution,
+        winner,
+        seed,
+    })
 }
 
 /// Build and broadcast the unsigned claim transaction for an already-solved

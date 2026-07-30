@@ -12,7 +12,7 @@ use rmcp::{
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
 };
-use sequencer_service_protocol::{HashType, LeeTransaction};
+use sequencer_service_protocol::{HashType, LeeTransaction, Nonce};
 use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,6 +33,13 @@ use crate::{
 /// blocks are ~30–60 s apart).
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(240);
 const COMMIT_POLL: Duration = Duration::from_secs(5);
+
+/// How many consecutive `getTransaction` RPC *errors* to tolerate before
+/// concluding the endpoint does not support it and dropping to the sound
+/// per-tx-type fallback. A single transient error should not abandon the strong
+/// hash-based path, but a persistently unsupported method must not spin for the
+/// whole commit window.
+const GET_TX_MAX_RPC_ERRORS: u32 = 3;
 
 /// The write gate re-verifies the sequencer fingerprint before a submission if
 /// the cached verification is older than this. Bounds getProgramIds load on
@@ -209,6 +216,66 @@ pub struct Ctx {
     eth: OnceCell<EthReader>,
 }
 
+/// Sound, tx-specific confirmation fallback used when `getTransaction` is
+/// unavailable. Each variant replaces the old forgeable balance-threshold check
+/// ([P1-1]) with a signal that can only advance when THIS transaction commits,
+/// leaning on the write serialization the caller already holds.
+enum ConfirmFallback {
+    /// SIGNED write: `signed_write_lock` serializes all signed writes, so the
+    /// account nonce advancing past `submitted_nonce` confirms our tx.
+    SignerNonce {
+        account: AccountId,
+        submitted_nonce: Nonce,
+    },
+    /// UNSIGNED faucet claim: `claim_lock` serializes claim cycles, so the
+    /// pinata seed rotating away from `solved_seed` confirms our claim.
+    PinataSeed { solved_seed: [u8; 32] },
+}
+
+/// SIGNED-write confirmation predicate: the account nonce has advanced past the
+/// one our tx was submitted against. Because every signed write is serialized
+/// under `signed_write_lock`, this can only happen when OUR tx commits. `None` =
+/// nonce not readable on this poll (transient) — not a confirmation.
+fn nonce_advanced(current: Option<Nonce>, submitted: Nonce) -> bool {
+    matches!(current, Some(c) if c.0 > submitted.0)
+}
+
+/// Faucet-claim confirmation predicate: the pinata seed has rotated away from
+/// the one our claim solved. The seed rotates on every committed claim and the
+/// claim cycle is serialized under `claim_lock`, so this confirms OUR claim
+/// committed.
+fn seed_rotated(current_seed: &[u8], solved_seed: &[u8; 32]) -> bool {
+    current_seed != solved_seed.as_slice()
+}
+
+/// Generic bounded confirmation loop shared by the sound fallbacks. Polls
+/// `probe` (first immediately, then every `poll` interval) until it observes
+/// confirmation (`Ok(true)`); `Ok(false)` = observed-but-not-yet; `Err(())` =
+/// transient read error, ignored so a flaky RPC does not mis-report. A positive
+/// wins even at/after the deadline; if the window elapses with no confirmation
+/// the tx is treated as UNCONFIRMED and `on_timeout()` is returned as an error
+/// (the caller must not assume commit). Boxed future so the probe may borrow
+/// the caller's `&self`/args.
+async fn poll_for_confirmation<'a>(
+    deadline: tokio::time::Instant,
+    poll: Duration,
+    strength: &'static str,
+    mut probe: impl FnMut() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, ()>> + Send + 'a>,
+    >,
+    on_timeout: impl FnOnce() -> String,
+) -> Result<(bool, &'static str), String> {
+    loop {
+        if let Ok(true) = probe().await {
+            return Ok((true, strength));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(on_timeout());
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
 impl Ctx {
     pub fn new(
         cfg: McpConfig,
@@ -303,38 +370,145 @@ impl Ctx {
 
     /// Confirm a *specific* submitted transaction rather than trusting any
     /// balance credit (which concurrent transfers/claims or duplicate
-    /// submissions can forge). Polls `getTransaction(tx_hash)`: the sequencer
-    /// silently drops what it will not execute, so the tx appearing by hash is
-    /// a tx-specific commitment signal. Falls back to a balance-delta check —
-    /// explicitly marked weak — only if `getTransaction` is unavailable.
-    /// Returns `(confirmed, strength)`.
+    /// submissions can forge).
+    ///
+    /// Primary signal: `getTransaction(tx_hash)`. The sequencer silently drops
+    /// what it will not execute, so the tx appearing by hash is a tx-specific
+    /// commitment signal (and never appearing within the window is a strong
+    /// negative).
+    ///
+    /// When `getTransaction` is unavailable (unsupported / repeatedly errors)
+    /// we fall back to a signal that is STILL tx-specific — never a forgeable
+    /// balance threshold ([P1-1]):
+    ///   * [`ConfirmFallback::SignerNonce`] — signed writes are fully serialized
+    ///     under `signed_write_lock`, so the account nonce advancing past the
+    ///     submitted tx's nonce means THIS tx committed.
+    ///   * [`ConfirmFallback::PinataSeed`] — the claim cycle is serialized under
+    ///     `claim_lock`, so the pinata seed rotating away from the solved seed
+    ///     means THIS claim committed.
+    ///
+    /// Returns `Ok((confirmed, strength))` for a conclusive outcome (positive or
+    /// strong negative). Returns `Err` when the fallback could not conclude
+    /// within the window — the caller must stay conservative and NOT assume the
+    /// tx committed (the write lock is held across this wait either way, so it
+    /// is released only after a conclusive outcome or a surfaced failure).
     async fn confirm_submitted_tx(
         &self,
         tx_hash: &str,
-        account: &AccountId,
-        expected_min_balance: u128,
-    ) -> (bool, &'static str) {
+        fallback: ConfirmFallback,
+    ) -> Result<(bool, &'static str), String> {
         if let Ok(hash) = tx_hash.parse::<HashType>() {
             let bytes = hash.0;
             let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+            // Bounded retries of getTransaction first: a transient error must
+            // not abandon the strong hash path, but a persistently unsupported
+            // method must drop to the sound fallback rather than spin.
+            let mut rpc_errors = 0u32;
             loop {
                 match self.sequencer.get_transaction(HashType(bytes)).await {
-                    Ok(Some(_)) => return (true, "tx_committed"),
-                    Ok(None) => {}
-                    // RPC lacks/refused getTransaction — drop to the weak path.
-                    Err(_) => break,
+                    Ok(Some(_)) => return Ok((true, "tx_committed")),
+                    // Endpoint supports getTransaction; tx just not in yet.
+                    Ok(None) => rpc_errors = 0,
+                    Err(_) => {
+                        rpc_errors += 1;
+                        if rpc_errors >= GET_TX_MAX_RPC_ERRORS {
+                            break; // unavailable — drop to the sound fallback
+                        }
+                    }
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    // Strong *negative*: the tx is not committed within the window.
-                    return (false, "tx_committed");
+                    // Strong *negative*: getTransaction worked but the tx never
+                    // appeared within the window.
+                    return Ok((false, "tx_uncommitted"));
                 }
                 tokio::time::sleep(COMMIT_POLL).await;
             }
         }
 
-        // Weak fallback: any credit reaching the threshold (cross-confirmable).
-        let (_bal, ok) = self.wait_balance_at_least(account, expected_min_balance).await;
-        (ok, "balance_delta_weak")
+        // getTransaction unavailable — SOUND, tx-specific fallback per tx type.
+        match fallback {
+            ConfirmFallback::SignerNonce {
+                account,
+                submitted_nonce,
+            } => self.confirm_via_nonce_advance(&account, submitted_nonce).await,
+            ConfirmFallback::PinataSeed { solved_seed } => {
+                self.confirm_via_seed_rotation(&solved_seed).await
+            }
+        }
+    }
+
+    /// Sound fallback for SIGNED writes (Initialize / Transfer). Because every
+    /// signed write is serialized under `signed_write_lock`, ours is the only
+    /// in-flight signed tx for `account`; the account nonce only advances when a
+    /// tx commits, so a nonce strictly past `submitted_nonce` confirms THIS tx.
+    /// Unchanged after the window → UNCONFIRMED error (the caller must not
+    /// assume commit; nonce reuse is avoided because the lock is held across
+    /// this wait).
+    async fn confirm_via_nonce_advance(
+        &self,
+        account: &AccountId,
+        submitted_nonce: Nonce,
+    ) -> Result<(bool, &'static str), String> {
+        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+        poll_for_confirmation(
+            deadline,
+            COMMIT_POLL,
+            "nonce_advanced",
+            || {
+                Box::pin(async move {
+                    // Transient read errors → Err(()): keep polling within the
+                    // window rather than mis-reporting an unconfirmed tx.
+                    match self.sequencer.get_accounts_nonces(vec![*account]).await {
+                        Ok(nonces) => Ok(nonce_advanced(nonces.first().copied(), submitted_nonce)),
+                        Err(_) => Err(()),
+                    }
+                })
+            },
+            || {
+                format!(
+                    "tx unconfirmed: account {} nonce did not advance past {} within {}s \
+                     (getTransaction unavailable); not assuming commit",
+                    account_id_to_base58(account),
+                    submitted_nonce.0,
+                    COMMIT_TIMEOUT.as_secs()
+                )
+            },
+        )
+        .await
+    }
+
+    /// Sound fallback for the UNSIGNED faucet claim. The full claim cycle is
+    /// serialized under `claim_lock`, so ours is the only in-flight claim from
+    /// this server; the pinata seed rotates on every committed claim, so a seed
+    /// differing from `solved_seed` confirms a claim committed. Unchanged after
+    /// the window → UNCONFIRMED error (the seed is NOT assumed rotated).
+    async fn confirm_via_seed_rotation(
+        &self,
+        solved_seed: &[u8; 32],
+    ) -> Result<(bool, &'static str), String> {
+        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+        poll_for_confirmation(
+            deadline,
+            COMMIT_POLL,
+            "seed_rotated",
+            || {
+                Box::pin(async move {
+                    match faucet::pinata_challenge(&self.sequencer).await {
+                        // challenge = [difficulty, seed[0..32]]; compare the seed.
+                        Ok(challenge) => Ok(seed_rotated(&challenge[1..], solved_seed)),
+                        Err(_) => Err(()),
+                    }
+                })
+            },
+            || {
+                format!(
+                    "claim unconfirmed: pinata seed did not rotate within {}s \
+                     (getTransaction unavailable); not assuming the claim committed",
+                    COMMIT_TIMEOUT.as_secs()
+                )
+            },
+        )
+        .await
     }
 
     async fn balance_of(&self, account_id: &AccountId) -> Result<u128, String> {
@@ -347,22 +521,6 @@ impl Ctx {
                 .get_account_balance(*account_id)
                 .await
                 .map_err(|e| format!("get_account_balance failed: {e}")),
-        }
-    }
-
-    /// Wait until `account`'s balance reaches `min`. Returns the last
-    /// observed balance and whether the target was reached.
-    async fn wait_balance_at_least(&self, account: &AccountId, min: u128) -> (u128, bool) {
-        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
-        loop {
-            let balance = self.balance_of(account).await.unwrap_or(0);
-            if balance >= min {
-                return (balance, true);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return (balance, false);
-            }
-            tokio::time::sleep(COMMIT_POLL).await;
         }
     }
 
@@ -412,6 +570,9 @@ impl Ctx {
             .get_accounts_nonces(vec![signer.account_id])
             .await
             .map_err(|e| format!("get_accounts_nonces failed: {e}"))?;
+        // The nonce this Initialize is submitted against — the confirmation
+        // fallback watches for the account nonce advancing past it.
+        let submitted_nonce = nonces.first().copied().unwrap_or_default();
 
         let message = lee::public_transaction::Message::try_new(
             program_id,
@@ -435,10 +596,19 @@ impl Ctx {
         // could satisfy ownership without our tx landing). Consistent with the
         // transfer path's per-tx confirmation, and still inside the
         // signed-write lock so the nonce it advances is visible to the next
-        // signed write before the lock is released.
+        // signed write before the lock is released. If getTransaction is
+        // unavailable the fallback watches our own nonce advance (sound because
+        // signed writes are serialized) — never a balance threshold (an
+        // Initialize moves no funds, so a threshold would false-confirm at once).
         let (confirmed, _strength) = self
-            .confirm_submitted_tx(&tx_hash, &signer.account_id, existing.balance)
-            .await;
+            .confirm_submitted_tx(
+                &tx_hash,
+                ConfirmFallback::SignerNonce {
+                    account: signer.account_id,
+                    submitted_nonce,
+                },
+            )
+            .await?;
         if !confirmed {
             return Err(format!(
                 "account Initialize did not commit within {}s (tx {tx_hash})",
@@ -446,9 +616,10 @@ impl Ctx {
             ));
         }
 
-        // Ownership must actually be the auth-transfer program now. This also
-        // guards the weak balance-delta fallback inside `confirm_submitted_tx`,
-        // which cannot observe an ownership flip (an Initialize moves no funds).
+        // Ownership must actually be the auth-transfer program now — an
+        // independent belt confirming the Initialize's *effect* (the nonce/hash
+        // confirmation above proves our tx landed; this proves it did what we
+        // intended).
         let account = self
             .sequencer
             .get_account(signer.account_id)
@@ -783,6 +954,18 @@ impl LezMcpServer {
                     // request-drop cannot release the lock while the
                     // Initialize may still commit.
                     let guard = self.ctx.signed_write_lock.clone().lock_owned().await;
+                    // [P2-2] Re-verify the write gate AFTER acquiring the lock,
+                    // immediately before the Initialize submission (mirrors the
+                    // transfer path's post-lock recheck). The pre-lock check at
+                    // the top of this tool can be older than FINGERPRINT_TTL by
+                    // now if we waited behind a slow signed write, so re-checking
+                    // here stops the Initialize riding an obsolete fingerprint.
+                    // Held under `guard`, so the verified fingerprint still
+                    // covers the submission that follows.
+                    if let Err(refusal) = self.ctx.ensure_fresh_write_gate().await {
+                        drop(guard); // nothing submitted
+                        return Ok(refusal);
+                    }
                     let ctx = self.ctx.clone();
                     let outcome = run_guarded_detached(guard, async move {
                         let signer = ctx.signer.as_ref().expect("signer checked above");
@@ -883,12 +1066,19 @@ impl LezMcpServer {
             // claim can never solve against a seed an in-flight commit is about
             // to rotate.
             let ctx = self.ctx.clone();
-            let expected_min = balance + faucet::PRIZE_PER_CLAIM;
             let outcome = run_guarded_detached(claim_guard, async move {
+                // Seed the claim was solved against; if getTransaction is
+                // unavailable the confirmation watches this seed rotate (sound
+                // because the whole claim cycle is serialized under claim_lock)
+                // — never a balance threshold (unrelated credits would forge it).
+                let solved_seed = solved.seed;
                 let submission = faucet::submit_solved_claim(&ctx.sequencer, &solved).await?;
                 let (confirmed, confirmation) = ctx
-                    .confirm_submitted_tx(&submission.tx_hash, &account_id, expected_min)
-                    .await;
+                    .confirm_submitted_tx(
+                        &submission.tx_hash,
+                        ConfirmFallback::PinataSeed { solved_seed },
+                    )
+                    .await?;
                 Ok::<_, String>((submission, confirmed, confirmation))
             })
             .await;
@@ -1182,6 +1372,20 @@ impl LezMcpServer {
                 })));
             }
 
+            // The nonce this Transfer will be submitted against. Read under the
+            // signed-write lock immediately before submission: no other signed
+            // write can advance it in the gap, so the fallback confirming a
+            // nonce past this value proves OUR tx (not some racing write)
+            // committed. LezClient::transfer reads the same current nonce.
+            let submitted_nonce = ctx
+                .sequencer
+                .get_accounts_nonces(vec![from])
+                .await
+                .map_err(|e| tool_fail(format!("reading sender nonce failed: {e}")))?
+                .first()
+                .copied()
+                .unwrap_or_default();
+
             let tx_hash = match lez.transfer(to, amount).await {
                 Ok(h) => h,
                 Err(e) => return Err(tool_fail(format!("transfer failed: {e}"))),
@@ -1190,10 +1394,20 @@ impl LezMcpServer {
             // Confirm THIS transaction committed (tx-specific), not merely that
             // the recipient balance moved (which concurrent activity could
             // forge). Still inside the critical section: the nonce advances
-            // only on commitment, so the next signed write must wait for it.
+            // only on commitment, so the next signed write must wait for it. If
+            // getTransaction is unavailable the fallback watches the SENDER's
+            // nonce advance past `submitted_nonce` (sound under serialization) —
+            // never the recipient balance threshold (unrelated credits forge it).
             let (confirmed, confirmation) = ctx
-                .confirm_submitted_tx(&tx_hash, &to, to_balance + amount)
-                .await;
+                .confirm_submitted_tx(
+                    &tx_hash,
+                    ConfirmFallback::SignerNonce {
+                        account: from,
+                        submitted_nonce,
+                    },
+                )
+                .await
+                .map_err(tool_fail)?;
             let final_to_balance = ctx.balance_of(&to).await.unwrap_or(to_balance);
             Ok((init_tx_hash, tx_hash, confirmed, confirmation, final_to_balance))
         })
@@ -1884,6 +2098,220 @@ mod tests {
             1,
             "the transfer whose balance was drained under the lock is refused, \
              never broadcast"
+        );
+    }
+
+    // ── [P1-1] sound confirmation predicates ────────────────────────────
+
+    #[test]
+    fn nonce_advanced_predicate() {
+        let submitted = Nonce(7);
+        // Advanced strictly past the submitted nonce → confirmed.
+        assert!(nonce_advanced(Some(Nonce(8)), submitted));
+        assert!(nonce_advanced(Some(Nonce(9)), submitted));
+        // Equal (our tx has NOT committed yet) or behind → not confirmed. This
+        // is the crux of [P1-1]: an Initialize moves no funds, so the old
+        // balance-threshold fallback would false-confirm here; the nonce does
+        // not, because it only advances on our tx committing.
+        assert!(!nonce_advanced(Some(Nonce(7)), submitted));
+        assert!(!nonce_advanced(Some(Nonce(6)), submitted));
+        // Nonce unreadable this poll (transient) → not a confirmation.
+        assert!(!nonce_advanced(None, submitted));
+    }
+
+    #[test]
+    fn seed_rotated_predicate() {
+        let solved = [0x11u8; 32];
+        // Any rotation away from the solved seed → confirmed.
+        assert!(seed_rotated(&[0x22u8; 32], &solved));
+        // Same seed → the claim has NOT committed (unlike a balance credit,
+        // which an unrelated faucet win could forge).
+        assert!(!seed_rotated(&[0x11u8; 32], &solved));
+    }
+
+    // ── [P1-1] fallback confirmation loop: nonce advancement ────────────
+    //
+    // When getTransaction is unavailable, a SIGNED write is confirmed by the
+    // signer's nonce advancing past the submitted value (sound under
+    // serialization). Advance → confirmed; unchanged for the whole window →
+    // UNCONFIRMED error (the caller must not assume commit).
+    #[tokio::test]
+    async fn fallback_nonce_confirmation_advanced_then_unconfirmed() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let submitted = Nonce(7);
+
+        // Advanced: unchanged for two polls, then the chain nonce moves past it.
+        let polls = Arc::new(AtomicU64::new(0));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let out = poll_for_confirmation(
+            deadline,
+            Duration::from_millis(1),
+            "nonce_advanced",
+            || {
+                let polls = polls.clone();
+                Box::pin(async move {
+                    let n = polls.fetch_add(1, Ordering::SeqCst);
+                    let current = if n < 2 { Nonce(7) } else { Nonce(8) };
+                    Ok::<bool, ()>(nonce_advanced(Some(current), submitted))
+                })
+            },
+            || "unreachable".to_string(),
+        )
+        .await;
+        assert_eq!(out, Ok((true, "nonce_advanced")));
+
+        // Unchanged for the whole (short) window → UNCONFIRMED error.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(15);
+        let out = poll_for_confirmation(
+            deadline,
+            Duration::from_millis(1),
+            "nonce_advanced",
+            || Box::pin(async move { Ok::<bool, ()>(nonce_advanced(Some(Nonce(7)), submitted)) }),
+            || "nonce did not advance".to_string(),
+        )
+        .await;
+        assert_eq!(out, Err("nonce did not advance".to_string()));
+    }
+
+    // ── [P1-1] fallback confirmation loop: pinata seed rotation ──────────
+    #[tokio::test]
+    async fn fallback_seed_rotation_confirmation_then_unconfirmed() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let solved = [0x11u8; 32];
+
+        // Rotates after a couple of polls → confirmed.
+        let polls = Arc::new(AtomicU64::new(0));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let out = poll_for_confirmation(
+            deadline,
+            Duration::from_millis(1),
+            "seed_rotated",
+            || {
+                let polls = polls.clone();
+                Box::pin(async move {
+                    let n = polls.fetch_add(1, Ordering::SeqCst);
+                    let current: [u8; 32] = if n < 2 { [0x11u8; 32] } else { [0x22u8; 32] };
+                    Ok::<bool, ()>(seed_rotated(&current, &solved))
+                })
+            },
+            || "unreachable".to_string(),
+        )
+        .await;
+        assert_eq!(out, Ok((true, "seed_rotated")));
+
+        // Never rotates within the window → UNCONFIRMED error (seed NOT assumed
+        // rotated — the next claim will not be misattributed to this one).
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(15);
+        let out = poll_for_confirmation(
+            deadline,
+            Duration::from_millis(1),
+            "seed_rotated",
+            || Box::pin(async move { Ok::<bool, ()>(seed_rotated(&[0x11u8; 32], &solved)) }),
+            || "seed did not rotate".to_string(),
+        )
+        .await;
+        assert_eq!(out, Err("seed did not rotate".to_string()));
+    }
+
+    // Transient probe errors (Err(())) must be ignored — a flaky RPC read must
+    // not be mistaken for an unconfirmed tx, nor short-circuit the window.
+    #[tokio::test]
+    async fn fallback_confirmation_ignores_transient_read_errors() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let polls = Arc::new(AtomicU64::new(0));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let out = poll_for_confirmation(
+            deadline,
+            Duration::from_millis(1),
+            "nonce_advanced",
+            || {
+                let polls = polls.clone();
+                Box::pin(async move {
+                    // First two polls: transient read failure; third: confirmed.
+                    match polls.fetch_add(1, Ordering::SeqCst) {
+                        0 | 1 => Err(()),
+                        _ => Ok(true),
+                    }
+                })
+            },
+            || "unreachable".to_string(),
+        )
+        .await;
+        assert_eq!(out, Ok((true, "nonce_advanced")));
+    }
+
+    // ── [P2-2] faucet auto-Initialize rechecks the write gate under lock ─
+    //
+    // The faucet's auto-init passes a PRE-LOCK gate check, then can queue behind
+    // a slow signed write for longer than FINGERPRINT_TTL. A mid-session testnet
+    // upgrade turns the pre-lock fingerprint stale while it waits. The fix
+    // re-checks the gate AFTER acquiring the signed-write lock, immediately
+    // before the Initialize submission — so the obsolete-fingerprint write is
+    // refused instead of broadcast.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn faucet_init_rechecks_write_gate_after_acquiring_lock() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let signed_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let gate_fresh = Arc::new(AtomicBool::new(true));
+        let submissions = Arc::new(AtomicU64::new(0));
+        let refusals = Arc::new(AtomicU64::new(0));
+
+        // Writer A: a slow signed write holding the lock; the testnet upgrades
+        // (gate goes stale) mid-write, before A releases.
+        let a = {
+            let lock = signed_write_lock.clone();
+            let gate = gate_fresh.clone();
+            tokio::spawn(async move {
+                let _guard = lock.lock_owned().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                gate.store(false, Ordering::SeqCst); // mid-session upgrade
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            })
+        };
+
+        // Let A take the lock first so B genuinely queues behind it.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Writer B: the faucet auto-init. Pre-lock gate check passes (still
+        // fresh), then it waits behind A and, [P2-2], rechecks under the lock.
+        let b = {
+            let lock = signed_write_lock.clone();
+            let gate = gate_fresh.clone();
+            let submissions = submissions.clone();
+            let refusals = refusals.clone();
+            tokio::spawn(async move {
+                assert!(
+                    gate.load(Ordering::SeqCst),
+                    "pre-lock gate check passes before the wait"
+                );
+                let guard = lock.lock_owned().await; // queues behind A
+                // [P2-2] post-lock recheck, immediately before the Initialize.
+                if !gate.load(Ordering::SeqCst) {
+                    refusals.fetch_add(1, Ordering::SeqCst);
+                    drop(guard);
+                    return;
+                }
+                submissions.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        a.await.unwrap();
+        b.await.unwrap();
+
+        assert_eq!(
+            submissions.load(Ordering::SeqCst),
+            0,
+            "the post-lock recheck refuses the Initialize once the gate went \
+             stale while queued — no obsolete-fingerprint submission"
+        );
+        assert_eq!(
+            refusals.load(Ordering::SeqCst),
+            1,
+            "the queued auto-init is refused, not broadcast"
         );
     }
 }
