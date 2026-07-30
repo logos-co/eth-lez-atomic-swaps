@@ -108,7 +108,8 @@ if missing:
         f"(expected={sorted(truth)}, present={sorted(n for n in index_names if n)})")
 
 checked = []
-problems = []
+problems = []       # content-level defects (catalog is WRONG)          -> fail(20)
+infra_problems = [] # network-inability / unverifiable (can't complete) -> broken(30)
 for pkg in pkgs:
     name = pkg.get("name")
     versions = pkg.get("versions", [])
@@ -135,20 +136,54 @@ for pkg in pkgs:
         if man.get("version") and v and man.get("version") != v:
             problems.append(
                 f"{name} {v}: manifest.version={man.get('version')} != version entry {v}")
-        # HEAD the .lgx asset (follow GitHub's redirect to the CDN)
+        # HEAD the .lgx asset (follow GitHub's redirect to the CDN).
+        # CLASSIFICATION (P2-4/P2-5): only content-level defects are fail(20) —
+        # a 404 on an ADVERTISED asset, a size mismatch, a missing index `size`,
+        # or a bad manifest. Anything that merely means we COULDN'T CHECK — DNS
+        # failure, timeout, connection refused, 5xx, or an unverifiable size (no
+        # Content-Length) — is broken(30), a transient harness inability, not a
+        # catalog regression.
         if not url:
-            problems.append(f"{name} {v}: version entry has no url")
+            problems.append(f"{name} {v}: version entry has no url")  # content: index malformed
             continue
         try:
             code, clen = head_asset(url)
-            if code != 200:
-                problems.append(f"{name} {v}: asset HTTP {code}")
-            elif size and clen and int(clen) != int(size):
-                problems.append(f"{name} {v}: asset size {clen} != index size {size}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                problems.append(f"{name} {v}: asset HTTP 404 (advertised asset missing) {url}")
+            elif e.code and e.code >= 500:
+                infra_problems.append(f"{name} {v}: asset server error HTTP {e.code} (transient) {url}")
             else:
-                checked.append(f"{name}@{v}({(int(clen)//1024) if clen else '?'}KiB ok)")
+                # Other 4xx on an advertised asset is a real catalog/access defect.
+                problems.append(f"{name} {v}: asset HTTP {e.code} {url}")
+            continue
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # DNS / timeout / connection refused / socket error — network-inability.
+            infra_problems.append(f"{name} {v}: asset unreachable (network) {url} ({e})")
+            continue
         except Exception as e:
-            problems.append(f"{name} {v}: asset unreachable {url} ({e})")
+            # Unknown fetch failure: default to broken, never false-fail.
+            infra_problems.append(f"{name} {v}: asset fetch error {url} ({e})")
+            continue
+        # Got an HTTP response with a status code.
+        if code == 404:
+            problems.append(f"{name} {v}: asset HTTP 404 (advertised asset missing) {url}")
+        elif code and code >= 500:
+            infra_problems.append(f"{name} {v}: asset server error HTTP {code} (transient) {url}")
+        elif code != 200:
+            problems.append(f"{name} {v}: asset HTTP {code} {url}")
+        elif size is None:
+            # Index entry itself has no size field — a catalog defect.
+            problems.append(f"{name} {v}: index entry has no size field")
+        elif clen is None:
+            # 200 but the server gave no Content-Range/Content-Length — the size
+            # is unverifiable, so we cannot complete the check: broken, not fail.
+            infra_problems.append(
+                f"{name} {v}: asset size unverifiable (no Content-Length from server) {url}")
+        elif int(clen) != int(size):
+            problems.append(f"{name} {v}: asset size {clen} != index size {size}")
+        else:
+            checked.append(f"{name}@{v}({int(clen)//1024}KiB ok)")
 
     # Cross-check ONLY the latest version per package against metadata.json.
     if name in truth:
@@ -160,8 +195,14 @@ for pkg in pkgs:
         # version against the source of truth; note it, don't false-fail.
         checked.append(f"{name}(no in-repo metadata; latest={latest_v} unverified)")
 
+# Content-level defects win: a genuine catalog regression is reported as fail
+# even if some other asset was ALSO unverifiable due to a transient error.
 if problems:
     die("fail", "; ".join(problems))
+# No content defects, but something prevented a COMPLETE verification (network
+# down, 5xx, unverifiable size) — inconclusive, so broken (not a false pass).
+if infra_problems:
+    die("broken", "could not fully verify catalog (transient/unverifiable): " + "; ".join(infra_problems))
 
 die("pass", f"schemaV{index.get('schemaVersion')} chain ok: " + ", ".join(checked))
 PY

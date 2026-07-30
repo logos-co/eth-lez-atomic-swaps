@@ -23,22 +23,51 @@ for tool in make cargo logos-scaffold; do
   command -v "$tool" >/dev/null 2>&1 || { emit_result "$LEG" broken "$tool not on PATH"; exit $?; }
 done
 
-canary_log "running full two-peer swap via 'make demo' (this boots localnet + anvil)"
+# Stage classification is by EXPLICIT stage evidence, never by the mere presence
+# of infra keywords in the log (those words — "localnet", "scaffold", "setup" —
+# also appear in SUCCESSFUL bring-up logs, so keyword-presence would misclassify a
+# genuine swap regression as a broken canary). Two positive stage boundaries:
+#   Stage 1 (leg-owned): `make contracts` (forge build) — a pre-app step whose
+#            own exit code we capture; a failure here is toolchain/infra.
+#   Stage 2: `make demo` prints "--- Running Swap ---" ONLY after localnet + anvil
+#            + HTLC-deploy + wallet setup all succeeded (see src/cli/demo.rs
+#            run_demo). Its presence is proof the APP stage was reached, so a
+#            nonzero exit AFTER it is a swap-logic failure, not infra.
+
+# --- Stage 1 (pre-app infra): ETH contracts build -------------------------
+# A forge/contracts failure is toolchain/infra, never a swap-atomicity
+# regression. Run it as its own stage BEFORE the heavy localnet bring-up so its
+# exit code classifies cleanly. `make demo` re-runs this (incremental no-op)
+# under the Makefile's wallet/circuits env + localnet-stop trap, so we keep
+# `make demo` as the single heavy invocation for the swap itself.
+canary_log "stage 1/2: building ETH contracts (pre-app infra)"
 # BSD/macOS mktemp requires TRAILING X's (a `.log` suffix after them is taken
-# literally, so a second/concurrent run collides). This log is deliberately
-# retained (not trap-removed): the result evidence points to it for post-mortem.
+# literally, so a second/concurrent run collides). Logs are deliberately
+# retained (not trap-removed): the result evidence points to them for post-mortem.
+CONTRACTS_LOG="$(mktemp "${TMPDIR:-/tmp}/canary-swap-contracts.XXXXXX")"
+if ! ( cd "$ROOT" && make contracts ) > "$CONTRACTS_LOG" 2>&1; then
+  tail -30 "$CONTRACTS_LOG" >&2
+  emit_result "$LEG" broken "contracts (forge) build failed — pre-app infra, not a swap regression — see $CONTRACTS_LOG"
+  exit $?
+fi
+
+# --- Stage 2: full two-peer swap via 'make demo' --------------------------
+canary_log "stage 2/2: running full two-peer swap via 'make demo' (boots localnet + anvil)"
 LOG="$(mktemp "${TMPDIR:-/tmp}/canary-swap.XXXXXX")"
 ( cd "$ROOT" && make demo ) > "$LOG" 2>&1
 RC=$?
 tail -30 "$LOG" >&2
 
 if [ $RC -ne 0 ]; then
-  # Distinguish "infra never came up" from "swap logic failed".
-  if grep -qiE "localnet|scaffold|setup|no such file|connection refused|toolchain" "$LOG" \
-     && ! grep -qi "completed" "$LOG"; then
-    emit_result "$LEG" broken "make demo failed to bring up localnet/toolchain (rc=$RC) — see $LOG"
+  # Classify by POSITIVE app-stage evidence, not by infra-keyword presence.
+  if grep -qF -- "--- Running Swap ---" "$LOG"; then
+    # The app stage was reached: localnet + anvil + HTLC-deploy + wallet setup
+    # all completed, then the swap itself failed. A real (app) regression.
+    emit_result "$LEG" fail "swap app stage reached ('--- Running Swap ---') but 'make demo' exited $RC without a completed swap — see $LOG"
   else
-    emit_result "$LEG" fail "make demo exited $RC without a completed swap — see $LOG"
+    # Never reached the swap stage: infra/toolchain bring-up (localnet, anvil,
+    # HTLC deploy, wallet topup) failed before the app ran.
+    emit_result "$LEG" broken "'make demo' failed during infra bring-up before the swap stage (rc=$RC) — see $LOG"
   fi
   exit $?
 fi

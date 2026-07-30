@@ -13,9 +13,13 @@
 //! code distinguishes the two:
 //!
 //!   stdout final line:  PROBE_VERDICT <status>|<evidence>
-//!     pass    (0)  — invalid tx was loudly rejected  => #640 looks FIXED
-//!     red     (10) — invalid tx silently accepted     => #640 reproduced
-//!     broken  (30) — could not run the experiment (no sequencer, pin mismatch)
+//!     pass    (0)  — invalid tx was loudly rejected       => #640 looks FIXED
+//!     red     (10) — invalid tx silently accepted (no-op)  => #640 reproduced
+//!     fail    (20) — invalid tx was ACCEPTED *and EXECUTED* => the bare-u128
+//!                    encoding now moves funds; the canary's #640 assumptions
+//!                    have CHANGED and #640 status must be re-derived
+//!     broken  (30) — could not run the experiment (no sequencer, pin mismatch,
+//!                    or the setup/control preconditions were not met)
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -258,12 +262,17 @@ async fn main() {
     let (recip_valid_sk, recipient_valid) = keypair(rand::random());
     let (recip_invalid_sk, recipient_invalid) = keypair(rand::random());
 
-    // Optional funding + initialization. The malformed-tx branch's PASS verdict
-    // ("#640 fixed") is only trustworthy if the invalid-sender was a viable
-    // sender to begin with — funded AND initialized. Otherwise a rejection could
-    // be blamed on an unfunded/uninitialized account rather than the malformed
-    // instruction. So in funded mode we track the invalid-sender's setup and
-    // require it as a precondition before running the experiment.
+    // Optional funding + initialization. The malformed-tx verdict is only
+    // trustworthy if the invalid-sender was a viable sender to begin with —
+    // otherwise a silent no-op could be blamed on an unfunded/uninitialized
+    // account rather than the malformed instruction. Funding a *balance* is a
+    // NECESSARY but NOT SUFFICIENT proof of that: a positive vault balance does
+    // not prove the account was Initialize'd under authenticated_transfer, and a
+    // transfer from an uninitialized sender would no-op for setup reasons, not
+    // #640. The SUFFICIENT proof is the same-sender/same-recipient EFFECTFUL
+    // control below (section 2b): the exact bad_id -> recipient_invalid path is
+    // first shown to move funds with a well-formed typed instruction. Here we
+    // only track the cheap balance precheck to bail early if funding failed.
     let mut bad_claim_ok = false;
     let mut bad_init_sent = false;
     if args.funded {
@@ -303,25 +312,24 @@ async fn main() {
         // Let the Initialize/claim txs land in a block before transferring.
         tokio::time::sleep(Duration::from_secs(18)).await;
 
-        // PRECONDITION: the invalid-sender must actually hold a spendable
-        // balance now — the real proof it is a viable sender, regardless of
-        // whether Initialize reported "already initialized". If we cannot
-        // establish this, we must NOT run (and cannot trust) the #640
-        // experiment: a later rejection could not be attributed to the
-        // malformed instruction. Report broken and stop.
+        // PRECHECK (necessary, not sufficient): the invalid-sender must at least
+        // hold a spendable balance now. This only rules out "funding never
+        // landed"; it does NOT prove Initialize succeeded — that is established
+        // by the effectful same-sender control (section 2b). Bail early as broken
+        // if even this cheap precheck fails.
         let bad_balance_ready = poll_balance_at_least(&client, bad_id, args.amount, 15).await;
         log(&format!(
-            "invalid-sender setup: claim_funded={bad_claim_ok} initialize_sent={bad_init_sent} \
+            "invalid-sender precheck: claim_funded={bad_claim_ok} initialize_sent={bad_init_sent} \
              balance_ready={bad_balance_ready}"
         ));
         if !(bad_claim_ok && bad_balance_ready) {
             verdict(
                 "broken",
                 &format!(
-                    "PRECONDITION FAILED: could not establish a funded+initialized invalid-sender \
-                     ({bad_id}) before the #640 experiment (claim_funded={bad_claim_ok}, \
-                     balance_ready={bad_balance_ready}). A rejection here could not be attributed to \
-                     the malformed instruction vs an unfunded/uninitialized account — not running."
+                    "PRECHECK FAILED: could not even fund the invalid-sender ({bad_id}) before the \
+                     #640 experiment (claim_funded={bad_claim_ok}, balance_ready={bad_balance_ready}). \
+                     Without spendable funds the same-sender control cannot run, so a malformed no-op \
+                     could not be attributed to the instruction vs an unfunded account — not running."
                 ),
             );
         }
@@ -383,6 +391,67 @@ async fn main() {
         String::new()
     };
 
+    // 2b. SAME-SENDER, SAME-RECIPIENT EFFECTFUL control --------------------
+    // This is the airtight setup proof (P1-1). The malformed-tx verdict must be
+    // attributable to the INSTRUCTION ENCODING, not to setup (e.g. the exact
+    // sender/recipient not being Initialize'd, which would make ANY transfer a
+    // no-op). So — in funded mode — first prove the EXACT bad_id -> recipient_invalid
+    // pair used for the malformed tx MOVES FUNDS with a well-formed typed
+    // instruction. If it does, the setup question is closed: those two accounts
+    // demonstrably work, so a subsequent malformed no-op can only be the encoding.
+    // `malformed_baseline` records recipient_invalid's balance AFTER this control
+    // so section 3 measures a FURTHER increase (executed) vs no change (silent
+    // #640 drop). Only funded mode can observe effects; unfunded stays weaker.
+    let mut malformed_baseline: u128 = 0;
+    if args.funded {
+        let cn = nonces_for(&client, bad_id).await;
+        let ctrl_tx = build_transfer(
+            at_program,
+            bad_id,
+            &bad_sk,
+            recipient_invalid,
+            cn,
+            Instruction::Transfer { amount: args.amount },
+        );
+        let ctrl_h: HashType = match client.send_transaction(ctrl_tx).await {
+            Ok(h) => h,
+            Err(e) => verdict(
+                "broken",
+                &format!(
+                    "SAME-SENDER CONTROL FAILED: a well-formed typed transfer from the malformed \
+                     sender ({bad_id}) to the malformed recipient ({recipient_invalid}) was rejected \
+                     at submit ({e}) — cannot establish that this exact path executes typed \
+                     instructions, so a malformed no-op would be unattributable. Not testing #640."
+                ),
+            ),
+        };
+        let ctrl_hash = ctrl_h.to_string();
+        let ctrl_included = poll_included(&client, ctrl_h).await;
+        // The recipient must actually GAIN the amount — that is the proof the
+        // exact pair is Initialize'd and executes typed transfers.
+        let ctrl_effect = poll_balance_at_least(&client, recipient_invalid, args.amount, 30).await;
+        if !(ctrl_included && ctrl_effect) {
+            verdict(
+                "broken",
+                &format!(
+                    "SAME-SENDER CONTROL FAILED: typed transfer {ctrl_hash} from the malformed sender \
+                     ({bad_id}) to the malformed recipient ({recipient_invalid}) did not take effect \
+                     (included={ctrl_included}, balance_effect={ctrl_effect}) — this exact path does \
+                     not execute even well-formed transfers (likely an uninitialized account), so a \
+                     malformed no-op would be indistinguishable from broken setup. Not testing #640."
+                ),
+            );
+        }
+        // Record the post-control baseline so a malformed EXECUTION would push
+        // recipient_invalid strictly above it (baseline + amount).
+        malformed_baseline = get_balance(&client, recipient_invalid).await.unwrap_or(args.amount);
+        log(&format!(
+            "same-sender control OK: {ctrl_hash} moved {}→recipient_invalid \
+             (included={ctrl_included}); baseline now {malformed_baseline}",
+            args.amount
+        ));
+    }
+
     // 3. DELIBERATELY-INVALID bare-u128 transfer (bug #640) ----------------
     let bn = nonces_for(&client, bad_id).await;
     let bad_amount: u128 = args.amount; // bare u128 instead of Instruction::Transfer
@@ -413,21 +482,53 @@ async fn main() {
                 ),
             ),
         },
-        // Accepted silently: the canary's red light.
+        // Accepted at submit: distinguish a silent NO-OP (#640) from actual
+        // EXECUTION (P1-2). In funded mode the same-sender control already moved
+        // `amount` to recipient_invalid (baseline = malformed_baseline); if the
+        // malformed tx also EXECUTES, recipient_invalid rises to at least
+        // baseline + amount. If it stays at the baseline, the malformed transfer
+        // was a silent no-op despite a demonstrably-working sender => #640.
         Ok(h) => {
             let bad_hash = h.to_string();
             log(&format!("invalid bare-u128 transfer ACCEPTED (no error): {bad_hash}"));
             let bad_included = poll_included(&client, h).await;
-            // If funded, confirm the malformed tx moved NOTHING despite the
-            // sender having funds — the silent no-op at the heart of #640.
-            let bad_effect = args.funded && poll_balance_at_least(&client, recipient_invalid, args.amount, 15).await;
+            let want_if_executed = malformed_baseline.saturating_add(args.amount);
+            let bad_effect =
+                args.funded && poll_balance_at_least(&client, recipient_invalid, want_if_executed, 15).await;
+
+            // THREE-WAY: accepted + EFFECT observed => the encoding now executes.
+            // This breaks the canary's core #640 assumption (silent no-op). It is
+            // NOT the expected red light and NOT a pass — emit a distinct fail(20).
+            if bad_effect {
+                verdict(
+                    "fail",
+                    &format!(
+                        "UNEXPECTED-EXECUTION: the sequencer ACCEPTED *and EXECUTED* the malformed \
+                         bare-u128 transfer (hash={bad_hash}, included={bad_included}): \
+                         recipient_invalid ({recipient_invalid}) balance rose from the same-sender \
+                         control baseline {malformed_baseline} to at least {want_if_executed} — the \
+                         bare-u128 encoding now MOVES FUNDS. The canary's #640 assumptions have \
+                         CHANGED; #640 status is UNKNOWN and must be re-derived. \
+                         (same-sender control first moved {}→recipient_invalid; general control \
+                         {valid_hash} included={valid_included}{effect_note})",
+                        args.amount
+                    ),
+                )
+            }
+
+            // Accepted, no effect: the silent no-op at the heart of #640.
             let drop_note = if args.funded {
                 format!(
-                    "; despite a FUNDED sender the malformed transfer executed NO balance move \
-                     (recipient effect={bad_effect}, expected false)"
+                    "; despite a FUNDED, DEMONSTRABLY-WORKING sender (same-sender control first \
+                     moved {}→recipient_invalid to baseline {malformed_baseline}) the malformed \
+                     transfer moved NO further balance (recipient stayed below {want_if_executed}, \
+                     expected)",
+                    args.amount
                 )
             } else {
-                String::new()
+                "; effect UNOBSERVED (unfunded mode: proves acceptance-without-error only, \
+                 not the no-op)"
+                    .to_string()
             };
             verdict(
                 "red",
@@ -436,11 +537,16 @@ async fn main() {
                      (hash={bad_hash}, included={bad_included}) with no submit error and no \
                      execution error surfaced — a deliberately-invalid instruction was NOT \
                      loudly rejected{drop_note}. See logos-blockchain/logos-execution-zone#640. \
-                     (control: valid typed transfer {valid_hash} included={valid_included}{effect_note})"
+                     (general control: valid typed transfer {valid_hash} included={valid_included}{effect_note})"
                 ),
             )
         }
     }
+}
+
+/// Single balance read (no polling); `None` on RPC error.
+async fn get_balance(client: &SequencerClient, id: AccountId) -> Option<u128> {
+    client.get_account_balance(id).await.ok()
 }
 
 /// Poll get_transaction until the hash resolves (included) or we give up.
