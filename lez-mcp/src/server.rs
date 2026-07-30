@@ -187,7 +187,19 @@ pub struct Ctx {
     /// → confirm) across ALL invocations. The pinata seed rotates on every
     /// committed claim, so two concurrent claims could otherwise solve the same
     /// seed and have the loser's solution silently dropped/misattributed.
-    claim_lock: tokio::sync::Mutex<()>,
+    /// `Arc` so an OWNED guard can move into the detached submit+confirm task
+    /// (see [`run_guarded_detached`]) and survive an MCP request-drop.
+    claim_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes ALL signed writes (auth-transfer `Initialize` and `Transfer`)
+    /// end-to-end — from the nonce read through commitment resolution. The
+    /// sequencer nonce only advances when a transaction commits, and both
+    /// `LezClient::transfer` and `initialize_signer_account` read the nonce
+    /// independently, so two concurrent signed writes would otherwise read the
+    /// same nonce and double-submit. There is exactly one signer per server
+    /// today, so one global lock is the per-signer lock. Unsigned writes (the
+    /// pinata claim submission itself) deliberately do NOT take it — only a
+    /// claim's *auto-initialize* (which is signed) does.
+    signed_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live transfer preview tokens, keyed by token string.
     preview_tokens: Mutex<HashMap<String, PreviewToken>>,
     /// Global guard limiting concurrent faucet PoW solves (CPU bound). With the
@@ -215,7 +227,8 @@ impl Ctx {
                 checked_at: Instant::now(),
             }),
             refresh_lock: tokio::sync::Mutex::new(()),
-            claim_lock: tokio::sync::Mutex::new(()),
+            claim_lock: Arc::new(tokio::sync::Mutex::new(())),
+            signed_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             preview_tokens: Mutex::new(HashMap::new()),
             pow_permits: Arc::new(Semaphore::new(POW_CONCURRENCY)),
             eth: OnceCell::new(),
@@ -233,6 +246,220 @@ impl Ctx {
             })
             .await
     }
+
+    /// Current cached write-gate verdict (no refresh).
+    async fn writes_enabled(&self) -> bool {
+        self.gate.read().await.gate.writes_enabled()
+    }
+
+    /// Gate a write. Any submission must be covered by a *fresh-enough* verified
+    /// fingerprint: if the cached verification is stale (older than
+    /// [`FINGERPRINT_TTL`]) or not currently verified, re-run getProgramIds
+    /// against the configured sequencer before proceeding. A refresh failure —
+    /// or a mismatch surfaced by the refresh — blocks the write. Called before
+    /// EACH submission (every claim iteration, every transfer/initialize) so a
+    /// mid-session testnet upgrade cannot let writes ride an obsolete
+    /// fingerprint.
+    async fn ensure_fresh_write_gate(&self) -> Result<(), CallToolResult> {
+        // Fast path: currently verified and still fresh.
+        {
+            let gs = self.gate.read().await;
+            if gate_is_fresh(&gs, FINGERPRINT_TTL, Instant::now()) {
+                return Ok(());
+            }
+        }
+
+        // Refresh against the configured sequencer — single-flight + double
+        // checked so concurrent writers share one verification and cannot let
+        // an older response resurrect a stale verdict.
+        let gate = refresh_gate_single_flight(
+            &self.gate,
+            &self.refresh_lock,
+            FINGERPRINT_TTL,
+            || async {
+                match run_fingerprint(&self.sequencer, &self.cfg.sequencer_url).await {
+                    Ok(report) if report.matched => Gate::Verified(report),
+                    Ok(report) => Gate::Mismatch(report),
+                    Err(e) => Gate::Unverified { error: e },
+                }
+            },
+        )
+        .await;
+
+        if gate.writes_enabled() {
+            Ok(())
+        } else {
+            Err(err_json(json!({
+                "ok": false,
+                "error": "writes_disabled",
+                "reason": "the live version fingerprint against the configured sequencer did not \
+                           verify (re-checked immediately before this write); a mismatched \
+                           client's transactions are silently dropped, so write tools are \
+                           refused. Run lez_fingerprint (no arguments) for the full diff.",
+                "fingerprint": gate.to_json(),
+            })))
+        }
+    }
+
+    /// Confirm a *specific* submitted transaction rather than trusting any
+    /// balance credit (which concurrent transfers/claims or duplicate
+    /// submissions can forge). Polls `getTransaction(tx_hash)`: the sequencer
+    /// silently drops what it will not execute, so the tx appearing by hash is
+    /// a tx-specific commitment signal. Falls back to a balance-delta check —
+    /// explicitly marked weak — only if `getTransaction` is unavailable.
+    /// Returns `(confirmed, strength)`.
+    async fn confirm_submitted_tx(
+        &self,
+        tx_hash: &str,
+        account: &AccountId,
+        expected_min_balance: u128,
+    ) -> (bool, &'static str) {
+        if let Ok(hash) = tx_hash.parse::<HashType>() {
+            let bytes = hash.0;
+            let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+            loop {
+                match self.sequencer.get_transaction(HashType(bytes)).await {
+                    Ok(Some(_)) => return (true, "tx_committed"),
+                    Ok(None) => {}
+                    // RPC lacks/refused getTransaction — drop to the weak path.
+                    Err(_) => break,
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    // Strong *negative*: the tx is not committed within the window.
+                    return (false, "tx_committed");
+                }
+                tokio::time::sleep(COMMIT_POLL).await;
+            }
+        }
+
+        // Weak fallback: any credit reaching the threshold (cross-confirmable).
+        let (_bal, ok) = self.wait_balance_at_least(account, expected_min_balance).await;
+        (ok, "balance_delta_weak")
+    }
+
+    async fn balance_of(&self, account_id: &AccountId) -> Result<u128, String> {
+        // Thin wrapper over LezClient::get_balance when a client exists;
+        // identical raw RPC otherwise (read-only mode).
+        match &self.lez {
+            Some(lez) => lez.get_balance(account_id).await.map_err(|e| e.to_string()),
+            None => self
+                .sequencer
+                .get_account_balance(*account_id)
+                .await
+                .map_err(|e| format!("get_account_balance failed: {e}")),
+        }
+    }
+
+    /// Wait until `account`'s balance reaches `min`. Returns the last
+    /// observed balance and whether the target was reached.
+    async fn wait_balance_at_least(&self, account: &AccountId, min: u128) -> (u128, bool) {
+        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+        loop {
+            let balance = self.balance_of(account).await.unwrap_or(0);
+            if balance >= min {
+                return (balance, true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return (balance, false);
+            }
+            tokio::time::sleep(COMMIT_POLL).await;
+        }
+    }
+
+    /// True when the account exists on-chain (has ever been initialized /
+    /// claimed by a program). The sequencer SILENTLY DROPS pinata claims and
+    /// transfers that reference never-initialized accounts, so tools must
+    /// check this up front (mirrors the wallet CLI's
+    /// `ensure_public_recipient_initialized`).
+    async fn account_exists(&self, account_id: &AccountId) -> Result<bool, String> {
+        let account = self
+            .sequencer
+            .get_account(*account_id)
+            .await
+            .map_err(|e| format!("get_account failed: {e}"))?;
+        Ok(account != lee_core::account::Account::default())
+    }
+
+    /// Send `authenticated_transfer::Initialize` for the signer's account and
+    /// wait until the account is owned by the auth-transfer program.
+    ///
+    /// SIGNED write: callers must hold [`Ctx::signed_write_lock`] across this
+    /// call — it reads the account nonce independently, so running it
+    /// concurrently with any other signed write races the nonce.
+    async fn initialize_signer_account(&self, signer: &Signer) -> Result<String, String> {
+        let program_id = programs::authenticated_transfer().id();
+        let nonces = self
+            .sequencer
+            .get_accounts_nonces(vec![signer.account_id])
+            .await
+            .map_err(|e| format!("get_accounts_nonces failed: {e}"))?;
+
+        let message = lee::public_transaction::Message::try_new(
+            program_id,
+            vec![signer.account_id],
+            nonces,
+            authenticated_transfer_core::Instruction::Initialize,
+        )
+        .map_err(|e| format!("failed to build Initialize message: {e}"))?;
+        let witness_set = WitnessSet::for_message(&message, &[&signer.key]);
+        let tx = PublicTransaction::new(message, witness_set);
+
+        let tx_hash = self
+            .sequencer
+            .send_transaction(LeeTransaction::Public(tx))
+            .await
+            .map_err(|e| format!("Initialize submission failed: {e}"))?
+            .to_string();
+
+        // Wait for the account to become auth-transfer-owned.
+        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
+        loop {
+            let account = self
+                .sequencer
+                .get_account(signer.account_id)
+                .await
+                .map_err(|e| format!("get_account failed: {e}"))?;
+            if account.program_owner == program_id {
+                return Ok(tx_hash);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "account Initialize did not commit within {}s (tx {tx_hash})",
+                    COMMIT_TIMEOUT.as_secs()
+                ));
+            }
+            tokio::time::sleep(COMMIT_POLL).await;
+        }
+    }
+}
+
+/// Run `work` inside a SPAWNED task that owns `guard`, and await its result.
+///
+/// This is the drop-survival primitive for write critical sections: once the
+/// submission side of a write has started, the section must run to commitment
+/// resolution even if the MCP request future is dropped (client cancellation /
+/// disconnect). A plain `.await` in the request would drop the guard
+/// mid-broadcast — the tx can still commit afterwards, so the next caller
+/// would race it (unrotated pinata seed, unadvanced nonce). Spawning detaches
+/// the critical section from the request: on request-drop the task keeps
+/// running and releases the lock only after `work` (submit + confirm) has
+/// resolved. The request merely awaits the JoinHandle; a panic inside the task
+/// is surfaced as an error.
+async fn run_guarded_detached<G, F, T>(guard: G, work: F) -> Result<T, String>
+where
+    G: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = tokio::spawn(async move {
+        // The guard lives HERE — released when the critical section genuinely
+        // finishes, not when the awaiting request future is dropped.
+        let _guard = guard;
+        work.await
+    });
+    handle
+        .await
+        .map_err(|e| format!("write critical-section task failed: {e}"))
 }
 
 // ── Result helpers ──────────────────────────────────────────────────────
@@ -370,192 +597,6 @@ impl LezMcpServer {
     pub fn new(ctx: Arc<Ctx>) -> Self {
         Self { ctx }
     }
-
-    /// Current cached write-gate verdict (no refresh).
-    async fn writes_enabled(&self) -> bool {
-        self.ctx.gate.read().await.gate.writes_enabled()
-    }
-
-    /// Gate a write. Any submission must be covered by a *fresh-enough* verified
-    /// fingerprint: if the cached verification is stale (older than
-    /// [`FINGERPRINT_TTL`]) or not currently verified, re-run getProgramIds
-    /// against the configured sequencer before proceeding. A refresh failure —
-    /// or a mismatch surfaced by the refresh — blocks the write. Called before
-    /// EACH submission (every claim iteration, every transfer/initialize) so a
-    /// mid-session testnet upgrade cannot let writes ride an obsolete
-    /// fingerprint.
-    async fn ensure_fresh_write_gate(&self) -> Result<(), CallToolResult> {
-        // Fast path: currently verified and still fresh.
-        {
-            let gs = self.ctx.gate.read().await;
-            if gate_is_fresh(&gs, FINGERPRINT_TTL, Instant::now()) {
-                return Ok(());
-            }
-        }
-
-        // Refresh against the configured sequencer — single-flight + double
-        // checked so concurrent writers share one verification and cannot let
-        // an older response resurrect a stale verdict.
-        let gate = refresh_gate_single_flight(
-            &self.ctx.gate,
-            &self.ctx.refresh_lock,
-            FINGERPRINT_TTL,
-            || async {
-                match run_fingerprint(&self.ctx.sequencer, &self.ctx.cfg.sequencer_url).await {
-                    Ok(report) if report.matched => Gate::Verified(report),
-                    Ok(report) => Gate::Mismatch(report),
-                    Err(e) => Gate::Unverified { error: e },
-                }
-            },
-        )
-        .await;
-
-        if gate.writes_enabled() {
-            Ok(())
-        } else {
-            Err(err_json(json!({
-                "ok": false,
-                "error": "writes_disabled",
-                "reason": "the live version fingerprint against the configured sequencer did not \
-                           verify (re-checked immediately before this write); a mismatched \
-                           client's transactions are silently dropped, so write tools are \
-                           refused. Run lez_fingerprint (no arguments) for the full diff.",
-                "fingerprint": gate.to_json(),
-            })))
-        }
-    }
-
-    /// Confirm a *specific* submitted transaction rather than trusting any
-    /// balance credit (which concurrent transfers/claims or duplicate
-    /// submissions can forge). Polls `getTransaction(tx_hash)`: the sequencer
-    /// silently drops what it will not execute, so the tx appearing by hash is
-    /// a tx-specific commitment signal. Falls back to a balance-delta check —
-    /// explicitly marked weak — only if `getTransaction` is unavailable.
-    /// Returns `(confirmed, strength)`.
-    async fn confirm_submitted_tx(
-        &self,
-        tx_hash: &str,
-        account: &AccountId,
-        expected_min_balance: u128,
-    ) -> (bool, &'static str) {
-        if let Ok(hash) = tx_hash.parse::<HashType>() {
-            let bytes = hash.0;
-            let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
-            loop {
-                match self.ctx.sequencer.get_transaction(HashType(bytes)).await {
-                    Ok(Some(_)) => return (true, "tx_committed"),
-                    Ok(None) => {}
-                    // RPC lacks/refused getTransaction — drop to the weak path.
-                    Err(_) => break,
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    // Strong *negative*: the tx is not committed within the window.
-                    return (false, "tx_committed");
-                }
-                tokio::time::sleep(COMMIT_POLL).await;
-            }
-        }
-
-        // Weak fallback: any credit reaching the threshold (cross-confirmable).
-        let (_bal, ok) = self.wait_balance_at_least(account, expected_min_balance).await;
-        (ok, "balance_delta_weak")
-    }
-
-    async fn balance_of(&self, account_id: &AccountId) -> Result<u128, String> {
-        // Thin wrapper over LezClient::get_balance when a client exists;
-        // identical raw RPC otherwise (read-only mode).
-        match &self.ctx.lez {
-            Some(lez) => lez.get_balance(account_id).await.map_err(|e| e.to_string()),
-            None => self
-                .ctx
-                .sequencer
-                .get_account_balance(*account_id)
-                .await
-                .map_err(|e| format!("get_account_balance failed: {e}")),
-        }
-    }
-
-    /// Wait until `account`'s balance reaches `min`. Returns the last
-    /// observed balance and whether the target was reached.
-    async fn wait_balance_at_least(&self, account: &AccountId, min: u128) -> (u128, bool) {
-        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
-        loop {
-            let balance = self.balance_of(account).await.unwrap_or(0);
-            if balance >= min {
-                return (balance, true);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return (balance, false);
-            }
-            tokio::time::sleep(COMMIT_POLL).await;
-        }
-    }
-
-    /// True when the account exists on-chain (has ever been initialized /
-    /// claimed by a program). The sequencer SILENTLY DROPS pinata claims and
-    /// transfers that reference never-initialized accounts, so tools must
-    /// check this up front (mirrors the wallet CLI's
-    /// `ensure_public_recipient_initialized`).
-    async fn account_exists(&self, account_id: &AccountId) -> Result<bool, String> {
-        let account = self
-            .ctx
-            .sequencer
-            .get_account(*account_id)
-            .await
-            .map_err(|e| format!("get_account failed: {e}"))?;
-        Ok(account != lee_core::account::Account::default())
-    }
-
-    /// Send `authenticated_transfer::Initialize` for the signer's account and
-    /// wait until the account is owned by the auth-transfer program.
-    async fn initialize_signer_account(&self, signer: &Signer) -> Result<String, String> {
-        let program_id = programs::authenticated_transfer().id();
-        let nonces = self
-            .ctx
-            .sequencer
-            .get_accounts_nonces(vec![signer.account_id])
-            .await
-            .map_err(|e| format!("get_accounts_nonces failed: {e}"))?;
-
-        let message = lee::public_transaction::Message::try_new(
-            program_id,
-            vec![signer.account_id],
-            nonces,
-            authenticated_transfer_core::Instruction::Initialize,
-        )
-        .map_err(|e| format!("failed to build Initialize message: {e}"))?;
-        let witness_set = WitnessSet::for_message(&message, &[&signer.key]);
-        let tx = PublicTransaction::new(message, witness_set);
-
-        let tx_hash = self
-            .ctx
-            .sequencer
-            .send_transaction(LeeTransaction::Public(tx))
-            .await
-            .map_err(|e| format!("Initialize submission failed: {e}"))?
-            .to_string();
-
-        // Wait for the account to become auth-transfer-owned.
-        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
-        loop {
-            let account = self
-                .ctx
-                .sequencer
-                .get_account(signer.account_id)
-                .await
-                .map_err(|e| format!("get_account failed: {e}"))?;
-            if account.program_owner == program_id {
-                return Ok(tx_hash);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "account Initialize did not commit within {}s (tx {tx_hash})",
-                    COMMIT_TIMEOUT.as_secs()
-                ));
-            }
-            tokio::time::sleep(COMMIT_POLL).await;
-        }
-    }
 }
 
 #[tool_router]
@@ -585,7 +626,7 @@ impl LezMcpServer {
             },
         };
 
-        match self.balance_of(&account_id).await {
+        match self.ctx.balance_of(&account_id).await {
             Ok(balance) => Ok(ok_json(json!({
                 "ok": true,
                 "account_id": account_id_to_base58(&account_id),
@@ -654,13 +695,13 @@ impl LezMcpServer {
                     "ok": true,
                     "verdict": verdict,
                     "report": report,
-                    "writes_enabled": self.writes_enabled().await,
+                    "writes_enabled": self.ctx.writes_enabled().await,
                 })))
             }
             Err(e) => Ok(err_json(json!({
                 "ok": false,
                 "error": e,
-                "writes_enabled": self.writes_enabled().await,
+                "writes_enabled": self.ctx.writes_enabled().await,
             }))),
         }
     }
@@ -679,7 +720,7 @@ impl LezMcpServer {
     ) -> Result<CallToolResult, McpError> {
         // Fresh write gate before any submission (init included); re-checked
         // per claim inside the loop below.
-        if let Err(refusal) = self.ensure_fresh_write_gate().await {
+        if let Err(refusal) = self.ctx.ensure_fresh_write_gate().await {
             return Ok(refusal);
         }
 
@@ -700,14 +741,26 @@ impl LezMcpServer {
         // Auto-initialize when we hold the account's signing key; otherwise
         // explain what is needed (mirrors `wallet auth-transfer init`).
         let mut init_tx_hash = None;
-        match self.account_exists(&account_id).await {
+        match self.ctx.account_exists(&account_id).await {
             Err(e) => return Ok(tool_fail(e)),
             Ok(true) => {}
             Ok(false) => match &self.ctx.signer {
                 Some(signer) if signer.account_id == account_id => {
-                    match self.initialize_signer_account(signer).await {
-                        Ok(h) => init_tx_hash = Some(h),
-                        Err(e) => {
+                    // Auto-initialize is a SIGNED write: serialize it against
+                    // every other signed write ([P1-1] — it reads the nonce
+                    // independently), and run it detached so an MCP
+                    // request-drop cannot release the lock while the
+                    // Initialize may still commit.
+                    let guard = self.ctx.signed_write_lock.clone().lock_owned().await;
+                    let ctx = self.ctx.clone();
+                    let outcome = run_guarded_detached(guard, async move {
+                        let signer = ctx.signer.as_ref().expect("signer checked above");
+                        ctx.initialize_signer_account(signer).await
+                    })
+                    .await;
+                    match outcome {
+                        Ok(Ok(h)) => init_tx_hash = Some(h),
+                        Ok(Err(e)) | Err(e) => {
                             return Ok(tool_fail(format!(
                                 "account initialization failed: {e}"
                             )));
@@ -731,7 +784,7 @@ impl LezMcpServer {
             },
         }
 
-        let start_balance = match self.balance_of(&account_id).await {
+        let start_balance = match self.ctx.balance_of(&account_id).await {
             Ok(b) => b,
             Err(e) => return Ok(tool_fail(e)),
         };
@@ -750,9 +803,23 @@ impl LezMcpServer {
             // Serialize the ENTIRE claim cycle (fetch challenge → solve → submit
             // → confirm) across all invocations: the pinata seed rotates on each
             // committed claim, so overlapping cycles could otherwise solve the
-            // same seed and have the loser silently dropped. Held until this
-            // iteration's confirm completes (seed has rotated by then).
-            let _claim_guard = self.ctx.claim_lock.lock().await;
+            // same seed and have the loser silently dropped. Owned guard: once
+            // submission starts it moves into a detached task ([P2-2] below) and
+            // is released only after this iteration's commitment resolves.
+            let claim_guard = self.ctx.claim_lock.clone().lock_owned().await;
+
+            // [P2-3] Re-evaluate the target decision UNDER the lock. A request
+            // queued behind another claim cycle sees a pre-lock balance that is
+            // stale by the time the lock is granted; deciding on it would fire
+            // an unnecessary extra claim. Re-read before fetching the challenge
+            // (keep the last-seen balance on a transient read error — the
+            // per-claim confirm threshold below stays conservative).
+            balance = self.ctx.balance_of(&account_id).await.unwrap_or(balance);
+            if let Some(t) = target
+                && balance >= t
+            {
+                break; // guard drops here; nothing was submitted
+            }
 
             // Solve first (fetch challenge + PoW; may take up to ~45s and may
             // wait on the PoW semaphore). The gate is (re)checked AFTER this,
@@ -774,27 +841,35 @@ impl LezMcpServer {
 
             // Fresh write gate immediately before the send (post-PoW,
             // post-semaphore). A failed recheck aborts THIS submission.
-            if let Err(refusal) = self.ensure_fresh_write_gate().await {
+            if let Err(refusal) = self.ctx.ensure_fresh_write_gate().await {
                 return Ok(refusal);
             }
 
-            let submission =
-                match faucet::submit_solved_claim(&self.ctx.sequencer, &solved).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        incomplete = Some(e);
-                        break;
-                    }
-                };
+            // [P2-2] From here the claim may reach the sequencer. Run submit +
+            // confirm in a detached task that OWNS the claim guard: if the MCP
+            // request is cancelled mid-broadcast, the task still runs to
+            // commitment resolution and only then releases the lock — the next
+            // claim can never solve against a seed an in-flight commit is about
+            // to rotate.
+            let ctx = self.ctx.clone();
+            let expected_min = balance + faucet::PRIZE_PER_CLAIM;
+            let outcome = run_guarded_detached(claim_guard, async move {
+                let submission = faucet::submit_solved_claim(&ctx.sequencer, &solved).await?;
+                let (confirmed, confirmation) = ctx
+                    .confirm_submitted_tx(&submission.tx_hash, &account_id, expected_min)
+                    .await;
+                Ok::<_, String>((submission, confirmed, confirmation))
+            })
+            .await;
+            let (submission, confirmed, confirmation) = match outcome {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) | Err(e) => {
+                    incomplete = Some(e);
+                    break;
+                }
+            };
 
-            let (confirmed, confirmation) = self
-                .confirm_submitted_tx(
-                    &submission.tx_hash,
-                    &account_id,
-                    balance + faucet::PRIZE_PER_CLAIM,
-                )
-                .await;
-            let new_balance = self.balance_of(&account_id).await.unwrap_or(balance);
+            let new_balance = self.ctx.balance_of(&account_id).await.unwrap_or(balance);
             claims.push(json!({
                 "tx_hash": submission.tx_hash,
                 "pow_solution": submission.solution.to_string(),
@@ -844,7 +919,7 @@ impl LezMcpServer {
         &self,
         Parameters(p): Parameters<TransferParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (Some(lez), Some(signer)) = (&self.ctx.lez, &self.ctx.signer) else {
+        let (Some(_lez), Some(signer)) = (&self.ctx.lez, &self.ctx.signer) else {
             return Ok(tool_fail(
                 "no signing key configured — set LEZ_SIGNING_KEY, LEZ_SIGNING_KEY_FILE, or \
                  LEZ_WALLET_HOME + LEZ_ACCOUNT_ID in the server environment",
@@ -916,7 +991,7 @@ impl LezMcpServer {
                 "recipient_initialized": recipient_initialized,
                 "recipient_warning": recipient_warning,
                 "sufficient_balance": sufficient,
-                "writes_enabled": self.writes_enabled().await,
+                "writes_enabled": self.ctx.writes_enabled().await,
                 "preview_token": token,
                 "preview_expires_in_secs": PREVIEW_TTL.as_secs(),
                 "note": "nothing was sent — call again with confirm=true AND preview_token to \
@@ -963,8 +1038,9 @@ impl LezMcpServer {
             }
         }
 
-        // 2) Fresh write gate (re-verified immediately before the write).
-        if let Err(refusal) = self.ensure_fresh_write_gate().await {
+        // 2) Fresh write gate (early refusal before queueing on the write lock;
+        //    re-verified again inside the critical section below).
+        if let Err(refusal) = self.ctx.ensure_fresh_write_gate().await {
             return Ok(refusal);
         }
 
@@ -1010,35 +1086,66 @@ impl LezMcpServer {
             )));
         }
 
-        // A fresh raw-key account is not yet owned by the auth-transfer
-        // program; the sequencer would reject its Transfer. Initialize first
-        // (same as `wallet auth-transfer init`).
-        let init_tx_hash = if sender_initialized {
-            None
-        } else {
-            match self.initialize_signer_account(signer).await {
-                Ok(h) => Some(h),
-                Err(e) => return Ok(tool_fail(format!("account initialization failed: {e}"))),
-            }
+        // 5) [P1-1] The signed critical section: (maybe) Initialize, then
+        //    Transfer, then confirm — all under the global signed-write lock,
+        //    held from BEFORE the first nonce read until commitment resolution.
+        //    Both Initialize and LezClient::transfer read the signer's nonce
+        //    independently, and the nonce only advances when a tx commits, so
+        //    two concurrent confirmed transfers (or a transfer racing a faucet
+        //    auto-init) would otherwise read the same nonce and double-submit.
+        //    Run detached ([`run_guarded_detached`]): an MCP request-drop
+        //    mid-broadcast cannot release the lock while the tx may still
+        //    commit with the old nonce.
+        let signed_guard = self.ctx.signed_write_lock.clone().lock_owned().await;
+        let ctx = self.ctx.clone();
+        let sender_needs_init = !sender_initialized;
+        let outcome = run_guarded_detached(signed_guard, async move {
+            let signer = ctx.signer.as_ref().expect("signer checked above");
+            let lez = ctx.lez.as_ref().expect("lez client checked above");
+
+            // Waiting on the write lock can outlast the fingerprint TTL;
+            // re-verify before the first signed submission.
+            ctx.ensure_fresh_write_gate().await?;
+
+            // A fresh raw-key account is not yet owned by the auth-transfer
+            // program; the sequencer would reject its Transfer. Initialize
+            // first (same as `wallet auth-transfer init`).
+            let init_tx_hash = if sender_needs_init {
+                match ctx.initialize_signer_account(signer).await {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        return Err(tool_fail(format!("account initialization failed: {e}")));
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Initialize can take minutes; re-verify the gate is still fresh
+            // before the actual Transfer submission.
+            ctx.ensure_fresh_write_gate().await?;
+
+            let tx_hash = match lez.transfer(to, amount).await {
+                Ok(h) => h,
+                Err(e) => return Err(tool_fail(format!("transfer failed: {e}"))),
+            };
+
+            // Confirm THIS transaction committed (tx-specific), not merely that
+            // the recipient balance moved (which concurrent activity could
+            // forge). Still inside the critical section: the nonce advances
+            // only on commitment, so the next signed write must wait for it.
+            let (confirmed, confirmation) = ctx
+                .confirm_submitted_tx(&tx_hash, &to, to_balance + amount)
+                .await;
+            let final_to_balance = ctx.balance_of(&to).await.unwrap_or(to_balance);
+            Ok((init_tx_hash, tx_hash, confirmed, confirmation, final_to_balance))
+        })
+        .await;
+        let (init_tx_hash, tx_hash, confirmed, confirmation, final_to_balance) = match outcome {
+            Ok(Ok(v)) => v,
+            Ok(Err(refusal)) => return Ok(refusal),
+            Err(e) => return Ok(tool_fail(e)),
         };
-
-        // Initialize can take minutes; re-verify the gate is still fresh before
-        // the actual Transfer submission.
-        if let Err(refusal) = self.ensure_fresh_write_gate().await {
-            return Ok(refusal);
-        }
-
-        let tx_hash = match lez.transfer(to, amount).await {
-            Ok(h) => h,
-            Err(e) => return Ok(tool_fail(format!("transfer failed: {e}"))),
-        };
-
-        // Confirm THIS transaction committed (tx-specific), not merely that the
-        // recipient balance moved (which concurrent activity could forge).
-        let (confirmed, confirmation) = self
-            .confirm_submitted_tx(&tx_hash, &to, to_balance + amount)
-            .await;
-        let final_to_balance = self.balance_of(&to).await.unwrap_or(to_balance);
 
         Ok(ok_json(json!({
             "ok": true,
@@ -1473,6 +1580,111 @@ mod tests {
         let mismatch = Gate::Mismatch(bad);
         assert!(!mismatch.writes_enabled());
         assert_eq!(mismatch.to_json()["report"]["matched"], json!(false));
+    }
+
+    // ── [P1-1] signed-write serialization ───────────────────────────────
+
+    // Model the signed-write path with a slow mock "sequencer": each write
+    // reads the current nonce, spends a while submitting/confirming, and only
+    // then advances the nonce (exactly how the real sequencer behaves — the
+    // nonce moves on COMMITMENT, not on read). Without the signed-write lock
+    // held from nonce read through confirmation, concurrent writers all read
+    // the same nonce and double-submit; with it, every write sees a distinct
+    // nonce.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn signed_writes_serialize_from_nonce_read_through_confirmation() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let signed_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let chain_nonce = Arc::new(AtomicU64::new(0));
+        let submitted_nonces = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let lock = signed_write_lock.clone();
+            let chain_nonce = chain_nonce.clone();
+            let submitted = submitted_nonces.clone();
+            handles.push(tokio::spawn(async move {
+                // As in lez_transfer / the faucet auto-init: owned guard, then
+                // the whole nonce-read → submit → confirm section detached.
+                let guard = lock.lock_owned().await;
+                run_guarded_detached(guard, async move {
+                    let nonce = chain_nonce.load(Ordering::SeqCst); // nonce read
+                    tokio::time::sleep(Duration::from_millis(15)).await; // slow submit+confirm
+                    chain_nonce.store(nonce + 1, Ordering::SeqCst); // commitment advances it
+                    submitted.lock().unwrap().push(nonce);
+                })
+                .await
+                .expect("critical section completes");
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let mut nonces = submitted_nonces.lock().unwrap().clone();
+        nonces.sort_unstable();
+        assert_eq!(
+            nonces,
+            vec![0, 1, 2, 3],
+            "every signed write must observe a distinct nonce — same-nonce \
+             double submission means the lock was not held through confirmation"
+        );
+    }
+
+    // ── [P2-2] request-drop survival of write critical sections ─────────
+
+    // Dropping the MCP request future mid-submission must NOT release the
+    // write lock early: the detached task keeps running, and the lock frees
+    // only after the commitment ("work") resolves.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dropped_request_keeps_lock_until_commitment_resolves() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let committed = Arc::new(AtomicBool::new(false));
+
+        let guard = lock.clone().lock_owned().await;
+        let committed_in_task = committed.clone();
+        // The "request": awaits the detached critical section.
+        let request = tokio::spawn(run_guarded_detached(guard, async move {
+            // Submission is in flight; commitment resolves after a delay.
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            committed_in_task.store(true, Ordering::SeqCst);
+        }));
+
+        // Let the detached task start, then drop the request mid-flight (MCP
+        // cancellation).
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        request.abort();
+
+        // The critical section is detached: the lock must still be held and
+        // the commitment not yet resolved.
+        assert!(
+            lock.clone().try_lock_owned().is_err(),
+            "lock must remain held after the request is dropped"
+        );
+        assert!(!committed.load(Ordering::SeqCst));
+
+        // Once the lock is grantable again, the commitment must have resolved
+        // first — the next writer can never sneak in before it.
+        let _next_writer = lock.lock().await;
+        assert!(
+            committed.load(Ordering::SeqCst),
+            "lock released only after the detached critical section resolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_guarded_detached_surfaces_panics_as_errors() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = lock.clone().lock_owned().await;
+        let out: Result<(), String> =
+            run_guarded_detached(guard, async { panic!("boom") }).await;
+        let err = out.expect_err("panic must surface as an error");
+        assert!(err.contains("task failed"), "unexpected error: {err}");
+        // And the lock is released — no poisoned/stuck state.
+        assert!(lock.try_lock().is_ok());
     }
 
     #[test]

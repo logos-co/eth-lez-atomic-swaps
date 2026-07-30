@@ -25,15 +25,35 @@ use sequencer_service_rpc::{RpcClient as _, SequencerClient};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 
-/// Sets a shared cancel flag when dropped. Held on the async side across the
-/// `spawn_blocking` join: if the awaiting future is cancelled (the MCP request
-/// is dropped), this guard's `Drop` fires and flips the flag, so the detached
-/// blocking solver stops promptly at its next check instead of hashing on.
-struct CancelOnDrop(Arc<AtomicBool>);
+/// Sets a shared cancel flag when dropped *while armed*. Held on the async side
+/// across the `spawn_blocking` join: if the awaiting future is cancelled (the
+/// MCP request is dropped), this guard's `Drop` fires and flips the flag, so the
+/// detached blocking solver stops promptly at its next check instead of hashing
+/// on. When the solve completes normally the guard is [`disarm`](Self::disarm)ed
+/// and then dropped *normally* — no `mem::forget`, so its `Arc` clone is
+/// released rather than leaked once per successful solve.
+struct CancelOnDrop {
+    flag: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self { flag, armed: true }
+    }
+
+    /// Defuse the guard: a subsequent drop will neither set the flag nor leak —
+    /// the held `Arc` clone is released on scope exit as usual.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
+        if self.armed {
+            self.flag.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -184,7 +204,7 @@ pub async fn solve_claim(
     let cancel = Arc::new(AtomicBool::new(false));
     // Drop-guard: if THIS future is cancelled while awaiting the join below,
     // its Drop sets the flag and the detached solver stops at its next check.
-    let cancel_guard = CancelOnDrop(cancel.clone());
+    let mut cancel_guard = CancelOnDrop::new(cancel.clone());
     let cancel_task = cancel.clone();
     let solution = tokio::task::spawn_blocking(move || {
         // The permit lives here — released only when the solve genuinely ends,
@@ -199,9 +219,10 @@ pub async fn solve_claim(
         format!("PoW task panicked: {e}")
     })??;
 
-    // Solve completed normally; the guard has done its job. Defuse it so it does
-    // not set the (now meaningless) flag on scope exit.
-    std::mem::forget(cancel_guard);
+    // Solve completed normally; the guard has done its job. Disarm it so its
+    // (normal) drop neither sets the now-meaningless flag nor leaks its Arc
+    // clone — it is released on scope exit like any other value.
+    cancel_guard.disarm();
 
     Ok(SolvedClaim { solution, winner })
 }
@@ -329,10 +350,37 @@ mod tests {
     fn cancel_on_drop_sets_the_flag() {
         let flag = Arc::new(AtomicBool::new(false));
         {
-            let _g = CancelOnDrop(flag.clone());
+            let _g = CancelOnDrop::new(flag.clone());
             assert!(!flag.load(Ordering::Relaxed), "flag stays clear while guard is live");
         }
-        assert!(flag.load(Ordering::Relaxed), "dropping the guard cancels");
+        assert!(flag.load(Ordering::Relaxed), "dropping an ARMED guard cancels");
+    }
+
+    // A disarmed guard must (a) NOT set the cancel flag, and (b) release its
+    // held Arc clone on drop rather than leaking it. The former `mem::forget`
+    // did (a) but leaked the Arc every successful solve; the strong-count check
+    // proves the clone is now reclaimed.
+    #[test]
+    fn disarm_releases_arc_and_suppresses_cancel() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut g = CancelOnDrop::new(flag.clone());
+            assert_eq!(
+                Arc::strong_count(&flag),
+                2,
+                "guard holds a live clone while in scope"
+            );
+            g.disarm();
+        }
+        assert_eq!(
+            Arc::strong_count(&flag),
+            1,
+            "disarmed guard's Arc clone is released on drop — no leak"
+        );
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "a disarmed guard must not cancel"
+        );
     }
 
     // The permit must live INSIDE the blocking solve, releasing only when the

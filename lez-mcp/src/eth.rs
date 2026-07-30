@@ -1,7 +1,7 @@
 //! Read-only Sepolia EthHTLC access. No ETH key required — the provider has
 //! no wallet; only `eth_call` / `eth_getLogs` are used.
 
-use std::sync::Mutex;
+use std::future::Future;
 
 use alloy::{
     primitives::{Address, FixedBytes},
@@ -10,6 +10,7 @@ use alloy::{
     sol_types::SolEvent as _,
 };
 use swap_orchestrator::eth::client::EthHTLC;
+use tokio::sync::Mutex;
 
 /// Max block span per `eth_getLogs` call (public providers cap ranges).
 const LOG_SCAN_CHUNK: u64 = 40_000;
@@ -70,6 +71,92 @@ struct ScanCache {
     locked: Vec<SeenLock>,
 }
 
+/// Handle a chain head that has REGRESSED below the cache's high-water mark
+/// (provider lag/failover, or a reorg deeper than [`REORG_SAFETY_WINDOW`]).
+/// Cached events above `latest` are no longer known-canonical: prune them and
+/// pull `next_block` back to `latest + 1` so the tail is genuinely re-scanned,
+/// instead of keeping orphaned events above head and reporting
+/// `reached_head = true` over them.
+fn prune_head_regression(cache: &mut ScanCache, latest: u64, from_block: u64) {
+    let high_water = cache.next_block.saturating_sub(1);
+    if latest < high_water {
+        cache.locked.retain(|l| l.block <= latest);
+        cache.next_block = latest.saturating_add(1).max(from_block);
+    }
+}
+
+/// What a completed (or budget-exhausted) scan pass yields, before the
+/// per-swap-id state fetches.
+struct ScanPass {
+    /// Distinct swap ids whose `Locked` event carries the queried hashlock.
+    matched: Vec<[u8; 32]>,
+    /// Highest block fully scanned across all calls.
+    coverage_to: u64,
+    reached_head: bool,
+}
+
+/// Drive one bounded, incremental scan pass against head `latest`, reading
+/// `Locked` events for each `[start, end]` range via `fetch`.
+///
+/// The ENTIRE pass — head-regression pruning, rewind, chunked fetches,
+/// reconciliation, resume-point commits, and match extraction — runs under the
+/// cache's async lock, so concurrent `sepolia_htlc_status` calls serialize:
+/// a slower, older scan can never interleave with (and reconcile stale reads
+/// over) a newer one; queued callers simply resume from the refreshed cache.
+async fn run_scan<F, Fut>(
+    cache: &Mutex<ScanCache>,
+    from_block: u64,
+    latest: u64,
+    hashlock: [u8; 32],
+    fetch: F,
+) -> Result<ScanPass, String>
+where
+    F: Fn(u64, u64) -> Fut,
+    Fut: Future<Output = Result<Vec<SeenLock>, String>>,
+{
+    let mut cache = cache.lock().await;
+
+    // If head regressed below our high-water mark, drop now-unverifiable
+    // cached events above it and rewind before scanning.
+    prune_head_regression(&mut cache, latest, from_block);
+
+    // Rewind the resume point by the safety window to re-scan a possibly
+    // reorged tail (clamped to the deployment/floor block).
+    let mut start = rewind_start(cache.next_block, from_block, REORG_SAFETY_WINDOW);
+    let mut chunks_used = 0u64;
+
+    while start <= latest && chunks_used < MAX_CHUNKS_PER_CALL {
+        let end = (start + LOG_SCAN_CHUNK - 1).min(latest);
+        let fresh = fetch(start, end).await?;
+
+        // Replace this chunk's cached events with the fresh reads (drops
+        // reorg orphans) and advance the resume point.
+        reconcile_range(&mut cache.locked, start, end, fresh);
+        if end + 1 > cache.next_block {
+            cache.next_block = end + 1;
+        }
+
+        chunks_used += 1;
+        start = end + 1;
+    }
+
+    // Recompute matches from the reconciled cache (so a reorged-away match
+    // is not resurrected) and the coverage high-water mark.
+    let mut matched: Vec<[u8; 32]> = Vec::new();
+    for l in &cache.locked {
+        if l.hashlock == hashlock && !matched.contains(&l.swap_id) {
+            matched.push(l.swap_id);
+        }
+    }
+    // next_block - 1 is the highest block fully scanned across all calls.
+    let coverage_to = cache.next_block.saturating_sub(1);
+    Ok(ScanPass {
+        matched,
+        coverage_to,
+        reached_head: coverage_to >= latest,
+    })
+}
+
 pub struct EthReader {
     contract: EthHTLC::EthHTLCInstance<DynProvider>,
     from_block: u64,
@@ -127,12 +214,19 @@ impl EthReader {
     }
 
     /// Resolve a hashlock to its HTLC(s) by scanning `Locked` events. Bounded,
-    /// incremental, and reorg-safe:
+    /// incremental, serialized, and reorg-safe:
+    /// - The whole scan→reconcile→commit pass runs under the cache's async lock
+    ///   (see [`run_scan`]), so concurrent calls cannot run overlapping getLogs
+    ///   sweeps where a stale older scan reconciles over newer canonical state —
+    ///   queued callers await and then resume from the refreshed cache.
     /// - Each call rewinds the resume point by [`REORG_SAFETY_WINDOW`] blocks
     ///   and re-reads that tail, replacing the cached events in the rewound
     ///   range with fresh reads (deduped by `(tx_hash, log_index)`). A reorg can
     ///   therefore neither strand an orphaned event in the cache nor permanently
     ///   skip a canonical block introduced by the reorg.
+    /// - A head BELOW the cached high-water mark (lagging/failed-over provider,
+    ///   deep reorg) prunes cached events above it and rewinds, rather than
+    ///   reporting `reached_head` over orphaned state.
     /// - Scan at most `MAX_CHUNKS_PER_CALL` chunks per call (the request
     ///   budget); progress is cached so a follow-up call resumes rather than
     ///   restarts. When the budget is hit before head, `reached_head` is false.
@@ -145,78 +239,48 @@ impl EthReader {
             .await
             .map_err(|e| format!("eth_blockNumber failed: {e}"))?;
 
-        // Rewind the resume point by the safety window to re-scan a possibly
-        // reorged tail (clamped to the deployment/floor block).
-        let mut start = {
-            let cache = self.cache.lock().expect("scan cache poisoned");
-            rewind_start(cache.next_block, self.from_block, REORG_SAFETY_WINDOW)
+        let address = self.address();
+        let fetch = |start: u64, end: u64| {
+            let provider = provider.clone();
+            async move {
+                let filter = Filter::new()
+                    .address(address)
+                    .event_signature(EthHTLC::Locked::SIGNATURE_HASH)
+                    .from_block(start)
+                    .to_block(end);
+                let logs = provider
+                    .get_logs(&filter)
+                    .await
+                    .map_err(|e| format!("eth_getLogs({start}..{end}) failed: {e}"))?;
+
+                let mut fresh = Vec::new();
+                for log in logs {
+                    // Positional metadata for reorg reconciliation / dedup. Present
+                    // on any confirmed getLogs result; fall back defensively.
+                    let block = log.block_number.unwrap_or(start);
+                    let tx_hash = log.transaction_hash.map(|h| h.0).unwrap_or([0u8; 32]);
+                    let log_index = log.log_index.unwrap_or(0);
+                    if let Ok(decoded) = log.log_decode::<EthHTLC::Locked>() {
+                        let event = &decoded.inner.data;
+                        fresh.push(SeenLock {
+                            swap_id: event.swapId.0,
+                            hashlock: event.hashlock.0,
+                            block,
+                            tx_hash,
+                            log_index,
+                        });
+                    }
+                }
+                Ok(fresh)
+            }
         };
 
-        let mut chunks_used = 0u64;
+        let pass = run_scan(&self.cache, self.from_block, latest, hashlock, fetch).await?;
 
-        while start <= latest && chunks_used < MAX_CHUNKS_PER_CALL {
-            let end = (start + LOG_SCAN_CHUNK - 1).min(latest);
-            let filter = Filter::new()
-                .address(self.address())
-                .event_signature(EthHTLC::Locked::SIGNATURE_HASH)
-                .from_block(start)
-                .to_block(end);
-            let logs = provider
-                .get_logs(&filter)
-                .await
-                .map_err(|e| format!("eth_getLogs({start}..{end}) failed: {e}"))?;
-
-            let mut fresh = Vec::new();
-            for log in logs {
-                // Positional metadata for reorg reconciliation / dedup. Present
-                // on any confirmed getLogs result; fall back defensively.
-                let block = log.block_number.unwrap_or(start);
-                let tx_hash = log.transaction_hash.map(|h| h.0).unwrap_or([0u8; 32]);
-                let log_index = log.log_index.unwrap_or(0);
-                if let Ok(decoded) = log.log_decode::<EthHTLC::Locked>() {
-                    let event = &decoded.inner.data;
-                    fresh.push(SeenLock {
-                        swap_id: event.swapId.0,
-                        hashlock: event.hashlock.0,
-                        block,
-                        tx_hash,
-                        log_index,
-                    });
-                }
-            }
-
-            // Replace this chunk's cached events with the fresh reads (drops
-            // reorg orphans) and advance the resume point.
-            {
-                let mut cache = self.cache.lock().expect("scan cache poisoned");
-                reconcile_range(&mut cache.locked, start, end, fresh);
-                if end + 1 > cache.next_block {
-                    cache.next_block = end + 1;
-                }
-            }
-
-            chunks_used += 1;
-            start = end + 1;
-        }
-
-        // Recompute matches from the reconciled cache (so a reorged-away match
-        // is not resurrected) and the coverage high-water mark.
-        let (matched_ids, coverage_to) = {
-            let cache = self.cache.lock().expect("scan cache poisoned");
-            let mut matched: Vec<[u8; 32]> = Vec::new();
-            for l in &cache.locked {
-                if l.hashlock == hashlock && !matched.contains(&l.swap_id) {
-                    matched.push(l.swap_id);
-                }
-            }
-            // next_block - 1 is the highest block fully scanned across all calls.
-            (matched, cache.next_block.saturating_sub(1))
-        };
-        let reached_head = coverage_to >= latest;
-
-        // Fetch current on-chain state for each matched swap id.
-        let mut found = Vec::with_capacity(matched_ids.len());
-        for swap_id in matched_ids {
+        // Fetch current on-chain state for each matched swap id (outside the
+        // scan lock — these are per-id eth_calls that no longer touch the cache).
+        let mut found = Vec::with_capacity(pass.matched.len());
+        for swap_id in pass.matched {
             let htlc = self.htlc_by_swap_id(swap_id).await?;
             found.push(FoundHtlc { swap_id, htlc });
         }
@@ -224,8 +288,8 @@ impl EthReader {
         Ok(ScanOutcome {
             found,
             coverage_from: self.from_block,
-            coverage_to,
-            reached_head,
+            coverage_to: pass.coverage_to,
+            reached_head: pass.reached_head,
         })
     }
 }
@@ -341,5 +405,154 @@ mod tests {
             vec![lock(4, 4, 1000, 0xDD, 0), lock(5, 5, 1000, 0xDD, 1)],
         );
         assert_eq!(multi.len(), 2, "distinct log_index in one tx are separate events");
+    }
+
+    // ── [P2-6] head-regression pruning ──────────────────────────────────
+
+    #[test]
+    fn head_regression_prunes_orphans_and_rewinds() {
+        let mut cache = ScanCache {
+            next_block: 2001, // high-water mark 2000
+            locked: vec![
+                lock(1, 1, 1500, 0xAA, 0), // below the regressed head — kept
+                lock(2, 2, 1990, 0xBB, 0), // above it — orphaned, must go
+            ],
+        };
+        prune_head_regression(&mut cache, 1900, 100);
+        assert_eq!(cache.next_block, 1901, "resume point pulled back to latest+1");
+        assert_eq!(cache.locked.len(), 1, "events above the regressed head pruned");
+        assert_eq!(cache.locked[0].block, 1500);
+    }
+
+    #[test]
+    fn head_regression_noop_when_head_at_or_above_high_water() {
+        let mut cache = ScanCache {
+            next_block: 2001,
+            locked: vec![lock(1, 1, 1990, 0xAA, 0)],
+        };
+        // Head equal to the high-water mark: nothing to prune.
+        prune_head_regression(&mut cache, 2000, 100);
+        assert_eq!(cache.next_block, 2001);
+        assert_eq!(cache.locked.len(), 1);
+        // Head above: also untouched.
+        prune_head_regression(&mut cache, 5000, 100);
+        assert_eq!(cache.next_block, 2001);
+        assert_eq!(cache.locked.len(), 1);
+    }
+
+    #[test]
+    fn head_regression_never_rewinds_below_from_block() {
+        let mut cache = ScanCache {
+            next_block: 600,
+            locked: vec![lock(1, 1, 550, 0xAA, 0)],
+        };
+        // Head regressed below even the deployment floor.
+        prune_head_regression(&mut cache, 400, 500);
+        assert_eq!(cache.next_block, 500, "clamped to from_block");
+        assert!(cache.locked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_scan_after_head_regression_rescans_and_drops_orphans() {
+        // Pass 1: head 2000, one Locked event at block 1990.
+        let cache = Mutex::new(ScanCache {
+            next_block: 0,
+            locked: Vec::new(),
+        });
+        let hashlock = [7u8; 32];
+        let pass1 = run_scan(&cache, 0, 2000, hashlock, |start, end| async move {
+            Ok(if (start..=end).contains(&1990) {
+                vec![lock(9, 7, 1990, 0xAA, 0)]
+            } else {
+                vec![]
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(pass1.matched.len(), 1);
+        assert!(pass1.reached_head);
+
+        // Pass 2: the provider's head has REGRESSED to 1900 and the canonical
+        // chain no longer contains the event. The orphan above head must not be
+        // reported, and reached_head must describe the regressed head honestly.
+        let pass2 = run_scan(&cache, 0, 1900, hashlock, |_, _| async move { Ok(vec![]) })
+            .await
+            .unwrap();
+        assert!(
+            pass2.matched.is_empty(),
+            "orphaned event above the regressed head must not survive"
+        );
+        assert_eq!(pass2.coverage_to, 1900);
+        assert!(pass2.reached_head);
+    }
+
+    // ── [P2-5] scan serialization ───────────────────────────────────────
+
+    // Two concurrent scans over one cache must not run overlapping fetches:
+    // the whole scan→reconcile→commit pass holds the cache's async lock, so a
+    // stale older sweep can never reconcile over newer canonical state. The
+    // slow mock fetch would overlap without the lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_scans_serialize_and_share_the_cache() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let latest = LOG_SCAN_CHUNK * 2; // a few chunks per pass
+        let cache = Arc::new(Mutex::new(ScanCache {
+            next_block: 0,
+            locked: Vec::new(),
+        }));
+        let in_fetch = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let fetches = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let cache = cache.clone();
+            let in_fetch = in_fetch.clone();
+            let overlapped = overlapped.clone();
+            let fetches = fetches.clone();
+            handles.push(tokio::spawn(async move {
+                run_scan(&cache, 0, latest, [1u8; 32], move |_start, _end| {
+                    let in_fetch = in_fetch.clone();
+                    let overlapped = overlapped.clone();
+                    let fetches = fetches.clone();
+                    async move {
+                        if in_fetch.fetch_add(1, Ordering::SeqCst) > 0 {
+                            overlapped.store(true, Ordering::SeqCst);
+                        }
+                        fetches.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        in_fetch.fetch_sub(1, Ordering::SeqCst);
+                        Ok(vec![])
+                    }
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        for h in handles {
+            let pass = h.await.unwrap();
+            assert!(pass.reached_head, "both callers see the fully-scanned cache");
+            assert_eq!(pass.coverage_to, latest);
+        }
+        assert!(
+            !overlapped.load(Ordering::SeqCst),
+            "scan passes must serialize — no two getLogs sweeps in flight at once"
+        );
+        // The queued pass resumes from the refreshed cache: it only re-reads
+        // the rewind tail (1 chunk), not the whole range again.
+        assert!(
+            fetches.load(Ordering::SeqCst) < 6,
+            "second pass must resume from the shared cache, not rescan from zero \
+             (saw {} fetches)",
+            fetches.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            cache.lock().await.next_block,
+            latest + 1,
+            "both passes committed into the one shared cache"
+        );
     }
 }
