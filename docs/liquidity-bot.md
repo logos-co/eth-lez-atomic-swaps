@@ -16,10 +16,40 @@ swap-cli --env-file maker.env maker --loop
 |---|---|
 | Startup timelock guard | Refuses to start unless `ETH_TIMELOCK_MINUTES >= LEZ_TIMELOCK_MINUTES + margin` (margin `--timelock-margin-minutes`, default 5, min 5 — EthHTLC enforces `minTimelockDelta = 300s`). Taker locks first with the long timelock; maker locks second with the short one. |
 | Startup inventory guard | Refuses to start if LEZ balance < `LEZ_AMOUNT`. |
-| Heartbeat offer republish | Spawns `node web/offer-board/publish-offer.mjs` (override: `--publisher-script` / `OFFER_PUBLISHER_SCRIPT`), which republishes the offer every `--heartbeat-secs` (default 45, env `OFFER_HEARTBEAT_SECS`) with fresh timelocks. Needed because the fleet runs `store=false` — late-joining board viewers only see live messages. Supervised: restarted with 30s backoff if it dies. Requires `node` + `npm install` in `web/offer-board/`. |
+| Heartbeat offer republish | Spawns `node offer-publisher/publish-offer.mjs` (override: `--publisher-script` / `OFFER_PUBLISHER_SCRIPT`), which republishes the offer every `--heartbeat-secs` (default 45, env `OFFER_HEARTBEAT_SECS`) with fresh timelocks. Needed because the fleet runs `store=false` — late-joining subscribers only see live messages. Supervised: restarted with 30s backoff if it dies. This is a **headless Node.js daemon dependency of `--loop`** (not browser tech): requires `node` >= 20 + `npm install` in `offer-publisher/`. See [Offer-publisher sidecar](#offer-publisher-sidecar-node-dependency) below. |
 | Crash recovery | In-flight swaps are journaled to `--state-file` (default `.maker-state.json`, env `MAKER_STATE_FILE`). On startup each journaled escrow is checked on-chain: expired → LEZ refunded (feeless); taker already claimed → ETH claimed with the revealed preimage (profit recovered); still live → resumed in a background watcher; terminal → dropped. |
 | Faucet sidecar | `--fund-to <target>` (env `FUND_TO_TARGET`) loops `wallet pinata claim --to <maker>` (150 LEZ per claim, feeless, repeatable) until the balance reaches the target. Standalone (`maker --fund-to 3000` then exit) or combined with `--loop` (tops up before the loop starts). Wallet binary path: `--wallet-bin` / `LEZ_WALLET_BIN`. Requires wallet-mode auth (`LEZ_WALLET_HOME` + `LEZ_ACCOUNT_ID`). |
 | Graceful stop | Ctrl-C / SIGINT stops after the current wait; out-of-inventory stops the loop cleanly. |
+
+## Offer-publisher sidecar (Node dependency)
+
+The `--loop` heartbeat is served by a **headless Node.js daemon**,
+`offer-publisher/publish-offer.mjs`, that `swap-cli` spawns and supervises. It
+is **not** a website and has no browser/UI code — it connects once to the
+logos.dev delivery fleet over raw TCP (`@waku/sdk` + `@libp2p/tcp`) and
+lightpushes the offer JSON every heartbeat.
+
+**Why Node and not pure Rust?** The fleet runs `store=false`, so the offer has
+to be re-broadcast on an interval or late-joining subscribers never see it. The
+Rust `swap-cli` links **no delivery/Waku client** (it coordinates every swap
+purely on-chain), so the only publish path that exists today is this JS
+sidecar — it emits both the initial offer and every republish. A pure-Rust
+republish is the intended follow-up (it would let us drop Node entirely), but it
+is a large change: it requires introducing a Rust logos-delivery/Waku lightpush
+client wire-compatible with cluster-2 autosharding and the offer schema, none of
+which is in the dependency tree yet. Until then, **Node >= 20 is a hard runtime
+dependency of the heartbeat only** — swaps still complete without it (they
+coordinate on-chain); only the offer advertisement stops.
+
+Setup (once, in the repo checkout):
+
+```sh
+cd offer-publisher && npm install
+```
+
+> **The browser offer board is not in this repo.** The viewer UI that displays
+> these offers now lives in the `swap_ui` Basecamp app (home screen). This
+> sidecar only *publishes* offers; it never renders them.
 
 ## Configuration
 
@@ -50,7 +80,7 @@ RESTRICT_COUNTERPARTY=1                 # required to start --loop (see below)
 The LEZ HTLC `Claim` instruction is gated on `signer == taker_id`: only the
 account you name in `LEZ_TAKER_ACCOUNT_ID` can ever claim the LEZ the maker
 locks. The loop has **no inbound channel** to learn a public taker's LEZ
-account per-swap (the offer board is publish-only), so every escrow it creates
+account per-swap (offer advertisement is publish-only), so every escrow it creates
 is locked to that one static account. `--loop` therefore refuses to start
 unless you pass `--restrict-counterparty` (`RESTRICT_COUNTERPARTY=1`) to
 acknowledge this — the standing bot serves a **single, pre-arranged
@@ -119,7 +149,7 @@ OnCalendar=hourly
 
 `WorkingDirectory` should be the repo checkout (or set
 `OFFER_PUBLISHER_SCRIPT` to an absolute path) so the heartbeat sidecar is
-found; run `npm install` in `web/offer-board/` once.
+found; run `npm install` in `offer-publisher/` once.
 
 ## launchd (macOS)
 
@@ -164,8 +194,8 @@ Taker-locks-first makes griefing costly to the attacker and ~free to the maker:
   `AutoAcceptInsufficientFunds` (loop stopped — refill and restart) and on
   repeated `AutoAcceptSwapFailed`.
 - **Heartbeat**: `[offer-publisher]` lines show publish acks; the supervisor
-  logs restarts. If the offer stops appearing on the board, check `node` is
-  installed and the fleet is reachable (`npm run smoke` in `web/offer-board`).
+  logs restarts. If the offer stops being advertised, check `node` is
+  installed and the fleet is reachable (`npm run smoke` in `offer-publisher`).
 - **Balances**: watch maker LEZ balance vs `LEZ_AMOUNT` (loop stops below it)
   and Sepolia ETH vs ~1e-4 ETH per claim.
 - **State file**: a non-empty `.maker-state.json` after a crash is normal —

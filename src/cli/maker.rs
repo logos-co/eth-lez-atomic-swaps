@@ -16,7 +16,7 @@ use super::{bot, create_clients, output};
 
 /// Default publisher script path, relative to the working directory
 /// (repo checkout layout).
-const DEFAULT_PUBLISHER_SCRIPT: &str = "web/offer-board/publish-offer.mjs";
+const DEFAULT_PUBLISHER_SCRIPT: &str = "offer-publisher/publish-offer.mjs";
 
 #[derive(Args)]
 pub struct MakerArgs {
@@ -31,13 +31,13 @@ pub struct MakerArgs {
     loop_mode: bool,
 
     /// Heartbeat interval (seconds) for republishing the offer over Waku
-    /// lightpush. The fleet runs store=false, so late-joining board viewers
+    /// lightpush. The fleet runs store=false, so late-joining subscribers
     /// only see live messages — keep this at 30-60s. 0 disables publishing.
     #[arg(long, env = "OFFER_HEARTBEAT_SECS", default_value_t = 45)]
     heartbeat_secs: u64,
 
     /// Node.js offer publisher script (long-lived @waku/sdk lightpush
-    /// sidecar). Defaults to web/offer-board/publish-offer.mjs if present.
+    /// sidecar). Defaults to offer-publisher/publish-offer.mjs if present.
     #[arg(long, env = "OFFER_PUBLISHER_SCRIPT")]
     publisher_script: Option<String>,
 
@@ -257,7 +257,7 @@ async fn cmd_maker_loop(
     // Heartbeat offer publisher (best-effort sidecar).
     let publisher_handle = if args.heartbeat_secs == 0 {
         warn!(
-            "offer heartbeat disabled (--heartbeat-secs 0) — board viewers will not see this offer"
+            "offer heartbeat disabled (--heartbeat-secs 0) — subscribers will not see this offer"
         );
         None
     } else {

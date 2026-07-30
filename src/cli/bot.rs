@@ -867,7 +867,7 @@ pub fn spawn_offer_publisher(
                 }
                 Err(e) => warn!(
                     "offer publisher spawn failed ({}): {e}; retrying in 30s \
-                     (is node installed and `npm install` run in web/offer-board?)",
+                     (is node installed and `npm install` run in offer-publisher?)",
                     script.display()
                 ),
             }
