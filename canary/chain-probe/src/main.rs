@@ -283,7 +283,7 @@ async fn main() {
         ] {
             match vault_claim(&client, id, sk, args.amount + 100).await {
                 Ok(h) => {
-                    let ok = poll_balance_at_least(&client, id, args.amount, 20).await;
+                    let ok = poll_balance_at_least(&client, id, args.amount, 20).await.reached();
                     log(&format!("{label} {id}: vault-claim {h}, funded>= {}: {ok}", args.amount));
                     if id == bad_id {
                         bad_claim_ok = ok;
@@ -317,7 +317,7 @@ async fn main() {
         // landed"; it does NOT prove Initialize succeeded — that is established
         // by the effectful same-sender control (section 2b). Bail early as broken
         // if even this cheap precheck fails.
-        let bad_balance_ready = poll_balance_at_least(&client, bad_id, args.amount, 15).await;
+        let bad_balance_ready = poll_balance_at_least(&client, bad_id, args.amount, 15).await.reached();
         log(&format!(
             "invalid-sender precheck: claim_funded={bad_claim_ok} initialize_sent={bad_init_sent} \
              balance_ready={bad_balance_ready}"
@@ -359,7 +359,7 @@ async fn main() {
     // verdict is only meaningful if the sequencer is demonstrably including AND
     // executing well-formed transfers on this substrate. If the control does not
     // land, the experiment is confounded — report broken and stop.
-    let valid_included = poll_included(&client, valid_h).await;
+    let valid_included = poll_included(&client, valid_h, 15).await;
     if !valid_included {
         verdict(
             "broken",
@@ -370,7 +370,8 @@ async fn main() {
             ),
         );
     }
-    let valid_effect = args.funded && poll_balance_at_least(&client, recipient_valid, args.amount, 30).await;
+    let valid_effect =
+        args.funded && poll_balance_at_least(&client, recipient_valid, args.amount, 30).await.reached();
     if args.funded && !valid_effect {
         verdict(
             "broken",
@@ -426,10 +427,10 @@ async fn main() {
             ),
         };
         let ctrl_hash = ctrl_h.to_string();
-        let ctrl_included = poll_included(&client, ctrl_h).await;
+        let ctrl_included = poll_included(&client, ctrl_h, 15).await;
         // The recipient must actually GAIN the amount — that is the proof the
         // exact pair is Initialize'd and executes typed transfers.
-        let ctrl_effect = poll_balance_at_least(&client, recipient_invalid, args.amount, 30).await;
+        let ctrl_effect = poll_balance_at_least(&client, recipient_invalid, args.amount, 30).await.reached();
         if !(ctrl_included && ctrl_effect) {
             verdict(
                 "broken",
@@ -491,16 +492,58 @@ async fn main() {
         Ok(h) => {
             let bad_hash = h.to_string();
             log(&format!("invalid bare-u128 transfer ACCEPTED (no error): {bad_hash}"));
-            let bad_included = poll_included(&client, h).await;
+            // Generous window (45×2s = 90s ≈ 6 block intervals). A `red` verdict
+            // hinges on confirmed inclusion, so the malformed tx must be given
+            // enough block cycles that a false "not-included" (which would
+            // suppress a legitimate red) reflects a genuine drop, not impatience.
+            let bad_included = poll_included(&client, h, 45).await;
             let want_if_executed = malformed_baseline.saturating_add(args.amount);
-            let bad_effect =
-                args.funded && poll_balance_at_least(&client, recipient_invalid, want_if_executed, 15).await;
 
-            // THREE-WAY: accepted + EFFECT observed => the encoding now executes.
-            // This breaks the canary's core #640 assumption (silent no-op). It is
-            // NOT the expected red light and NOT a pass — emit a distinct fail(20).
-            if bad_effect {
-                verdict(
+            // Only funded mode observes balance effects; polling an unfunded,
+            // uninitialized recipient would just burn the window. In unfunded
+            // mode the verdict rests on acceptance + inclusion alone (weaker, by
+            // design), so `bad_poll` is a sentinel that `classify_malformed`
+            // ignores when `funded == false`.
+            let bad_poll = if args.funded {
+                poll_balance_at_least(&client, recipient_invalid, want_if_executed, 15).await
+            } else {
+                BalancePoll::BelowThreshold
+            };
+
+            // CONCLUSIVENESS GATE (P1): a `red` verdict asserts #640 reproduced —
+            // the malformed tx was accepted, INCLUDED, and silently no-op'd. That
+            // claim is only trustworthy with (a) confirmed inclusion AND (b), in
+            // funded mode, a balance read that actually SUCCEEDED and showed the
+            // recipient stayed at baseline. Absent either, a sequencer stall
+            // (never included) or an RPC outage (balance unobservable) is
+            // indistinguishable from a genuine silent no-op — so the honest
+            // verdict is `broken`, never a false `red`.
+            match classify_malformed(args.funded, bad_included, bad_poll) {
+                MalformedVerdict::NotIncluded => verdict(
+                    "broken",
+                    &format!(
+                        "INCONCLUSIVE: the malformed bare-u128 transfer (hash={bad_hash}) was \
+                         ACCEPTED at submit but was NEVER INCLUDED within the poll window. A \
+                         sequencer stall/backlog cannot be distinguished from a genuine #640 \
+                         silent no-op here, so this is NOT evidence #640 reproduced. \
+                         (control valid tx {valid_hash} included={valid_included}{effect_note})"
+                    ),
+                ),
+                MalformedVerdict::BalanceUnobservable => verdict(
+                    "broken",
+                    &format!(
+                        "INCONCLUSIVE: the malformed bare-u128 transfer (hash={bad_hash}) was \
+                         included, but EVERY post-submit balance read of recipient_invalid \
+                         ({recipient_invalid}) FAILED (RPC unobservable) — cannot confirm the \
+                         recipient stayed at baseline {malformed_baseline}, so a silent no-op \
+                         cannot be distinguished from an RPC outage. NOT evidence #640 reproduced. \
+                         (control valid tx {valid_hash} included={valid_included}{effect_note})"
+                    ),
+                ),
+                // Accepted + EFFECT observed => the encoding now executes. This
+                // breaks the canary's core #640 assumption (silent no-op). It is
+                // NOT the expected red light and NOT a pass — a distinct fail(20).
+                MalformedVerdict::Executed => verdict(
                     "fail",
                     &format!(
                         "UNEXPECTED-EXECUTION: the sequencer ACCEPTED *and EXECUTED* the malformed \
@@ -513,33 +556,35 @@ async fn main() {
                          {valid_hash} included={valid_included}{effect_note})",
                         args.amount
                     ),
-                )
-            }
-
-            // Accepted, no effect: the silent no-op at the heart of #640.
-            let drop_note = if args.funded {
-                format!(
-                    "; despite a FUNDED, DEMONSTRABLY-WORKING sender (same-sender control first \
-                     moved {}→recipient_invalid to baseline {malformed_baseline}) the malformed \
-                     transfer moved NO further balance (recipient stayed below {want_if_executed}, \
-                     expected)",
-                    args.amount
-                )
-            } else {
-                "; effect UNOBSERVED (unfunded mode: proves acceptance-without-error only, \
-                 not the no-op)"
-                    .to_string()
-            };
-            verdict(
-                "red",
-                &format!(
-                    "#640 reproduced: sequencer ACCEPTED the malformed bare-u128 transfer \
-                     (hash={bad_hash}, included={bad_included}) with no submit error and no \
-                     execution error surfaced — a deliberately-invalid instruction was NOT \
-                     loudly rejected{drop_note}. See logos-blockchain/logos-execution-zone#640. \
-                     (general control: valid typed transfer {valid_hash} included={valid_included}{effect_note})"
                 ),
-            )
+                // Accepted, INCLUDED, and (funded) a successful read showed the
+                // recipient stayed at baseline: the silent no-op at the heart of #640.
+                MalformedVerdict::SilentNoOp => {
+                    let drop_note = if args.funded {
+                        format!(
+                            "; despite a FUNDED, DEMONSTRABLY-WORKING sender (same-sender control \
+                             first moved {}→recipient_invalid to baseline {malformed_baseline}) the \
+                             malformed transfer moved NO further balance — a successful balance read \
+                             showed recipient stayed below {want_if_executed}, as expected",
+                            args.amount
+                        )
+                    } else {
+                        "; effect UNOBSERVED (unfunded mode: proves acceptance-with-inclusion and \
+                         no error only, not the no-op)"
+                            .to_string()
+                    };
+                    verdict(
+                        "red",
+                        &format!(
+                            "#640 reproduced: sequencer ACCEPTED the malformed bare-u128 transfer \
+                             (hash={bad_hash}, included={bad_included}) with no submit error and no \
+                             execution error surfaced — a deliberately-invalid instruction was NOT \
+                             loudly rejected{drop_note}. See logos-blockchain/logos-execution-zone#640. \
+                             (general control: valid typed transfer {valid_hash} included={valid_included}{effect_note})"
+                        ),
+                    )
+                }
+            }
         }
     }
 }
@@ -550,8 +595,12 @@ async fn get_balance(client: &SequencerClient, id: AccountId) -> Option<u128> {
 }
 
 /// Poll get_transaction until the hash resolves (included) or we give up.
-async fn poll_included(client: &SequencerClient, hash: HashType) -> bool {
-    for _ in 0..15 {
+/// `tries` polls × 2s each. The debug localnet's `block_create_timeout` is 15s,
+/// so a window must span several block intervals to reliably observe inclusion —
+/// especially for the malformed tx, whose false "not-included" would suppress a
+/// legitimate `red` (see the malformed branch, which uses a generous window).
+async fn poll_included(client: &SequencerClient, hash: HashType, tries: u32) -> bool {
+    for _ in 0..tries {
         if let Ok(Some(_)) = client.get_transaction(hash).await {
             return true;
         }
@@ -560,14 +609,156 @@ async fn poll_included(client: &SequencerClient, hash: HashType) -> bool {
     false
 }
 
-async fn poll_balance_at_least(client: &SequencerClient, id: AccountId, want: u128, tries: u32) -> bool {
+/// Outcome of polling an account balance against a threshold. Unlike a bare
+/// bool, this DISTINGUISHES "the reads succeeded and the balance stayed below
+/// the threshold" (a trustworthy observation) from "every read failed" (the
+/// balance is unobservable — no evidence either way). That distinction is what
+/// lets the malformed-tx branch avoid a false `red` during an RPC outage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BalancePoll {
+    /// At least one read succeeded AND the balance reached `want`.
+    Reached,
+    /// At least one read succeeded, but the balance never reached `want` within
+    /// the window. A TRUSTWORTHY "stayed below threshold" observation.
+    BelowThreshold,
+    /// Every read failed (RPC error/outage) — the balance is UNOBSERVABLE.
+    Unobservable,
+}
+
+impl BalancePoll {
+    /// True only when the threshold was observed to be reached. Preserves the
+    /// old bare-bool contract for the setup/control call sites, which only care
+    /// whether the balance climbed to `want`.
+    fn reached(self) -> bool {
+        matches!(self, BalancePoll::Reached)
+    }
+}
+
+async fn poll_balance_at_least(
+    client: &SequencerClient,
+    id: AccountId,
+    want: u128,
+    tries: u32,
+) -> BalancePoll {
+    let mut any_read_ok = false;
     for _ in 0..tries {
         if let Ok(bal) = client.get_account_balance(id).await {
+            any_read_ok = true;
             if bal >= want {
-                return true;
+                return BalancePoll::Reached;
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    false
+    if any_read_ok {
+        BalancePoll::BelowThreshold
+    } else {
+        BalancePoll::Unobservable
+    }
+}
+
+/// The terminal verdict for the ACCEPTED-at-submit malformed tx, as a pure,
+/// unit-testable value. A `red` (#640 reproduced) verdict is CONCLUSIVE only
+/// when the malformed tx was confirmed INCLUDED and — in funded mode — a
+/// balance read actually succeeded and showed the recipient stayed at baseline.
+/// Anything short of that is `broken`, not `red`, so a sequencer stall (never
+/// included) or an RPC outage (balance unobservable) can never masquerade as a
+/// #640 reproduction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MalformedVerdict {
+    /// broken(30): accepted at submit but never included in the poll window.
+    NotIncluded,
+    /// broken(30): included, but every post-submit balance read failed.
+    BalanceUnobservable,
+    /// fail(20): included AND the recipient balance rose — the encoding executes.
+    Executed,
+    /// red(10): included, and (funded) a read showed the recipient stayed at
+    /// baseline — the silent no-op at the heart of #640.
+    SilentNoOp,
+}
+
+/// Classify the accepted-at-submit malformed tx. Pure so it is unit-testable.
+/// `funded` selects whether a balance observation is required for a conclusive
+/// verdict; in unfunded mode `bad_poll` is ignored (no balances are observed).
+fn classify_malformed(funded: bool, bad_included: bool, bad_poll: BalancePoll) -> MalformedVerdict {
+    if !bad_included {
+        return MalformedVerdict::NotIncluded;
+    }
+    if funded {
+        match bad_poll {
+            BalancePoll::Reached => return MalformedVerdict::Executed,
+            BalancePoll::Unobservable => return MalformedVerdict::BalanceUnobservable,
+            // Reads succeeded and the recipient stayed at baseline — a genuine
+            // silent no-op, the expected #640 signature.
+            BalancePoll::BelowThreshold => {}
+        }
+    }
+    MalformedVerdict::SilentNoOp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_malformed, BalancePoll, MalformedVerdict};
+
+    // included + funded + a successful read showing baseline stayed => red(10).
+    #[test]
+    fn included_observed_baseline_is_red() {
+        assert_eq!(
+            classify_malformed(true, true, BalancePoll::BelowThreshold),
+            MalformedVerdict::SilentNoOp
+        );
+    }
+
+    // Accepted but never included => broken(30), regardless of funding/poll.
+    #[test]
+    fn not_included_is_broken() {
+        for funded in [true, false] {
+            for poll in [
+                BalancePoll::Reached,
+                BalancePoll::BelowThreshold,
+                BalancePoll::Unobservable,
+            ] {
+                assert_eq!(
+                    classify_malformed(funded, false, poll),
+                    MalformedVerdict::NotIncluded,
+                    "funded={funded} poll={poll:?}"
+                );
+            }
+        }
+    }
+
+    // Included but every balance read failed => broken(30), NOT a false red.
+    #[test]
+    fn reads_all_failed_is_broken() {
+        assert_eq!(
+            classify_malformed(true, true, BalancePoll::Unobservable),
+            MalformedVerdict::BalanceUnobservable
+        );
+    }
+
+    // Included + recipient balance rose => fail(20): the encoding now executes.
+    #[test]
+    fn included_observed_increase_is_fail() {
+        assert_eq!(
+            classify_malformed(true, true, BalancePoll::Reached),
+            MalformedVerdict::Executed
+        );
+    }
+
+    // Unfunded mode: no balances observed, so an included accept => red(10) on
+    // acceptance+inclusion alone (weaker, by design); poll is ignored.
+    #[test]
+    fn unfunded_included_is_red_ignoring_poll() {
+        for poll in [
+            BalancePoll::Reached,
+            BalancePoll::BelowThreshold,
+            BalancePoll::Unobservable,
+        ] {
+            assert_eq!(
+                classify_malformed(false, true, poll),
+                MalformedVerdict::SilentNoOp,
+                "poll={poll:?}"
+            );
+        }
+    }
 }
