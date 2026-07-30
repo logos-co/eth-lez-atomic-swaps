@@ -388,6 +388,25 @@ impl Ctx {
     /// concurrently with any other signed write races the nonce.
     async fn initialize_signer_account(&self, signer: &Signer) -> Result<String, String> {
         let program_id = programs::authenticated_transfer().id();
+
+        // [P1-1] The ownership check at the call sites runs BEFORE this lock is
+        // held, so two requests can both observe a default account and both
+        // reach here. We hold `signed_write_lock` now: re-read ownership under
+        // it and, if a concurrent init already made the account
+        // auth-transfer-owned, SKIP the submission and report success.
+        // Submitting regardless would broadcast a guaranteed-to-fail Initialize
+        // (the account is no longer default); its loop would then see ownership
+        // already satisfied and return "success", letting the next signed write
+        // reuse the failed tx's un-advanced nonce.
+        let existing = self
+            .sequencer
+            .get_account(signer.account_id)
+            .await
+            .map_err(|e| format!("get_account failed: {e}"))?;
+        if existing.program_owner == program_id {
+            return Ok("already-initialized".to_string());
+        }
+
         let nonces = self
             .sequencer
             .get_accounts_nonces(vec![signer.account_id])
@@ -411,25 +430,37 @@ impl Ctx {
             .map_err(|e| format!("Initialize submission failed: {e}"))?
             .to_string();
 
-        // Wait for the account to become auth-transfer-owned.
-        let deadline = tokio::time::Instant::now() + COMMIT_TIMEOUT;
-        loop {
-            let account = self
-                .sequencer
-                .get_account(signer.account_id)
-                .await
-                .map_err(|e| format!("get_account failed: {e}"))?;
-            if account.program_owner == program_id {
-                return Ok(tx_hash);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "account Initialize did not commit within {}s (tx {tx_hash})",
-                    COMMIT_TIMEOUT.as_secs()
-                ));
-            }
-            tokio::time::sleep(COMMIT_POLL).await;
+        // [P1-1 belt] Confirm THIS submitted Initialize committed — by tx hash,
+        // not merely that the account became program-owned (a concurrent init
+        // could satisfy ownership without our tx landing). Consistent with the
+        // transfer path's per-tx confirmation, and still inside the
+        // signed-write lock so the nonce it advances is visible to the next
+        // signed write before the lock is released.
+        let (confirmed, _strength) = self
+            .confirm_submitted_tx(&tx_hash, &signer.account_id, existing.balance)
+            .await;
+        if !confirmed {
+            return Err(format!(
+                "account Initialize did not commit within {}s (tx {tx_hash})",
+                COMMIT_TIMEOUT.as_secs()
+            ));
         }
+
+        // Ownership must actually be the auth-transfer program now. This also
+        // guards the weak balance-delta fallback inside `confirm_submitted_tx`,
+        // which cannot observe an ownership flip (an Initialize moves no funds).
+        let account = self
+            .sequencer
+            .get_account(signer.account_id)
+            .await
+            .map_err(|e| format!("get_account failed: {e}"))?;
+        if account.program_owner != program_id {
+            return Err(format!(
+                "account Initialize did not take effect: ownership did not flip to \
+                 the auth-transfer program (tx {tx_hash})"
+            ));
+        }
+        Ok(tx_hash)
     }
 }
 
@@ -1125,6 +1156,32 @@ impl LezMcpServer {
             // before the actual Transfer submission.
             ctx.ensure_fresh_write_gate().await?;
 
+            // [P2-2] Re-read the sender balance UNDER the signed-write lock,
+            // immediately before submission. The pre-lock sufficiency check
+            // (step 4) can be stale by the time the lock is granted: a prior
+            // queued transfer may have drained the sender. Broadcasting on a
+            // stale balance would fire a guaranteed-to-fail Transfer and then
+            // block the full confirm window waiting on it. Re-check and refuse
+            // with a structured error instead — no broadcast.
+            let current_balance = ctx
+                .balance_of(&from)
+                .await
+                .map_err(|e| tool_fail(format!("re-reading sender balance failed: {e}")))?;
+            if current_balance < amount {
+                return Err(err_json(json!({
+                    "ok": false,
+                    "error": "insufficient_balance",
+                    "reason": format!(
+                        "sender {} balance {} is below amount {} at submission time \
+                         (a concurrent transfer likely drained it); refused without \
+                         broadcasting",
+                        account_id_to_base58(&from),
+                        current_balance,
+                        amount
+                    ),
+                })));
+            }
+
             let tx_hash = match lez.transfer(to, amount).await {
                 Ok(h) => h,
                 Err(e) => return Err(tool_fail(format!("transfer failed: {e}"))),
@@ -1699,6 +1756,134 @@ mod tests {
         assert_eq!(
             err.structured_content.as_ref().unwrap()["error"],
             json!("nope")
+        );
+    }
+
+    // ── [P1-1] double-init skip under the signed-write lock ─────────────
+    //
+    // Two requests both observe a DEFAULT (uninitialized) account before taking
+    // the signed-write lock — the pre-lock `account_exists` check in the faucet
+    // and transfer paths. Under the lock, `initialize_signer_account` re-reads
+    // ownership; if a concurrent init already flipped it, the submission is
+    // SKIPPED (treated as success). This models that invariant with the real
+    // serialization primitive: exactly one Initialize is submitted, consuming
+    // the nonce exactly once. Without the re-check every request would submit a
+    // guaranteed-to-fail Initialize against the now-owned account.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_inits_submit_exactly_once_when_rechecked_under_lock() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let signed_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+        // Models on-chain ownership: false = default, true = auth-transfer-owned.
+        let initialized = Arc::new(AtomicBool::new(false));
+        let submissions = Arc::new(AtomicU64::new(0));
+        let chain_nonce = Arc::new(AtomicU64::new(0));
+        let submitted_nonces = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let lock = signed_write_lock.clone();
+            let initialized = initialized.clone();
+            let submissions = submissions.clone();
+            let chain_nonce = chain_nonce.clone();
+            let submitted_nonces = submitted_nonces.clone();
+            handles.push(tokio::spawn(async move {
+                // Owned guard, then the whole re-check → submit → confirm
+                // section detached (exactly the faucet/transfer auto-init path).
+                let guard = lock.lock_owned().await;
+                run_guarded_detached(guard, async move {
+                    // [P1-1] Re-check ownership UNDER the lock.
+                    if initialized.load(Ordering::SeqCst) {
+                        return; // already initialized → skip, treated as success
+                    }
+                    // First writer: read nonce, submit + confirm (slow), then
+                    // commitment advances the nonce and flips ownership.
+                    let nonce = chain_nonce.load(Ordering::SeqCst);
+                    submitted_nonces.lock().unwrap().push(nonce);
+                    submissions.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    chain_nonce.store(nonce + 1, Ordering::SeqCst);
+                    initialized.store(true, Ordering::SeqCst);
+                })
+                .await
+                .expect("critical section completes");
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            submissions.load(Ordering::SeqCst),
+            1,
+            "only the first init under the lock submits; the rest observe the \
+             flipped ownership and skip — no guaranteed-fail Initialize"
+        );
+        assert_eq!(
+            submitted_nonces.lock().unwrap().clone(),
+            vec![0u64],
+            "the single Initialize consumed nonce 0 exactly once"
+        );
+    }
+
+    // ── [P2-2] stale-balance refusal under the signed-write lock ────────
+    //
+    // Two transfers both pass the PRE-LOCK sufficiency check (the sender can
+    // afford exactly one). Under the signed-write lock — held through
+    // commitment — the first debits the sender; the second re-reads the balance
+    // and, seeing it now insufficient, refuses WITHOUT broadcasting a
+    // guaranteed-to-fail Transfer (and without blocking the full confirm
+    // window on it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_transfers_refuse_on_stale_balance_under_lock() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let signed_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let amount = 100u128;
+        // Enough for exactly ONE transfer of `amount`.
+        let balance = Arc::new(Mutex::new(150u128));
+        let broadcasts = Arc::new(AtomicU64::new(0));
+        let refusals = Arc::new(AtomicU64::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let lock = signed_write_lock.clone();
+            let balance = balance.clone();
+            let broadcasts = broadcasts.clone();
+            let refusals = refusals.clone();
+            handles.push(tokio::spawn(async move {
+                let guard = lock.lock_owned().await;
+                run_guarded_detached(guard, async move {
+                    // [P2-2] Re-read the sender balance UNDER the lock, before
+                    // submission. (Scope the guard so it is not held across the
+                    // await.)
+                    let bal_now = *balance.lock().unwrap();
+                    if bal_now < amount {
+                        refusals.fetch_add(1, Ordering::SeqCst);
+                        return; // refused — no broadcast, no confirm-window wait
+                    }
+                    broadcasts.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(15)).await; // submit + confirm
+                    *balance.lock().unwrap() -= amount; // commitment debits sender
+                })
+                .await
+                .expect("critical section completes");
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        assert_eq!(
+            broadcasts.load(Ordering::SeqCst),
+            1,
+            "only the funded transfer broadcasts"
+        );
+        assert_eq!(
+            refusals.load(Ordering::SeqCst),
+            1,
+            "the transfer whose balance was drained under the lock is refused, \
+             never broadcast"
         );
     }
 }

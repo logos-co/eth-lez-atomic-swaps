@@ -95,26 +95,41 @@ struct ScanPass {
     reached_head: bool,
 }
 
-/// Drive one bounded, incremental scan pass against head `latest`, reading
-/// `Locked` events for each `[start, end]` range via `fetch`.
+/// Drive one bounded, incremental scan pass, reading the chain head via
+/// `read_head` and `Locked` events for each `[start, end]` range via `fetch`.
 ///
-/// The ENTIRE pass — head-regression pruning, rewind, chunked fetches,
-/// reconciliation, resume-point commits, and match extraction — runs under the
-/// cache's async lock, so concurrent `sepolia_htlc_status` calls serialize:
-/// a slower, older scan can never interleave with (and reconcile stale reads
-/// over) a newer one; queued callers simply resume from the refreshed cache.
-async fn run_scan<F, Fut>(
+/// The ENTIRE pass — chain-head read, head-regression pruning, rewind, chunked
+/// fetches, reconciliation, resume-point commits, and match extraction — runs
+/// under the cache's async lock, so concurrent `sepolia_htlc_status` calls
+/// serialize: a slower, older scan can never interleave with (and reconcile
+/// stale reads over) a newer one; queued callers simply resume from the
+/// refreshed cache.
+///
+/// [P2-3] `read_head` is invoked INSIDE the lock (not passed in as a value read
+/// beforehand): head/prune/reconcile/commit must be one atomic unit per pass.
+/// A head read outside the lock let a stalled call resume later carrying a
+/// stale (older) head and run `prune_head_regression` against a cache a newer
+/// pass had already advanced past — deleting legitimate progress and events.
+async fn run_scan<F, Fut, H, HFut>(
     cache: &Mutex<ScanCache>,
     from_block: u64,
-    latest: u64,
+    read_head: H,
     hashlock: [u8; 32],
     fetch: F,
 ) -> Result<ScanPass, String>
 where
     F: Fn(u64, u64) -> Fut,
     Fut: Future<Output = Result<Vec<SeenLock>, String>>,
+    H: FnOnce() -> HFut,
+    HFut: Future<Output = Result<u64, String>>,
 {
     let mut cache = cache.lock().await;
+
+    // [P2-3] Read the chain head UNDER the scan lock, immediately before the
+    // regression check that consumes it. This binds the head to the cache
+    // snapshot it is compared against, so a stalled/queued call cannot prune a
+    // newer cache with an older head.
+    let latest = read_head().await?;
 
     // If head regressed below our high-water mark, drop now-unverifiable
     // cached events above it and rewind before scanning.
@@ -234,12 +249,16 @@ impl EthReader {
     ///   reorged-away match is not reported from stale cache.
     pub async fn find_by_hashlock(&self, hashlock: [u8; 32]) -> Result<ScanOutcome, String> {
         let provider = self.contract.provider();
-        let latest = provider
-            .get_block_number()
-            .await
-            .map_err(|e| format!("eth_blockNumber failed: {e}"))?;
-
         let address = self.address();
+
+        // [P2-3] Defer the head read into `run_scan` so it happens under the
+        // scan lock, atomically with prune/reconcile/commit.
+        let read_head = || async {
+            provider
+                .get_block_number()
+                .await
+                .map_err(|e| format!("eth_blockNumber failed: {e}"))
+        };
         let fetch = |start: u64, end: u64| {
             let provider = provider.clone();
             async move {
@@ -275,7 +294,7 @@ impl EthReader {
             }
         };
 
-        let pass = run_scan(&self.cache, self.from_block, latest, hashlock, fetch).await?;
+        let pass = run_scan(&self.cache, self.from_block, read_head, hashlock, fetch).await?;
 
         // Fetch current on-chain state for each matched swap id (outside the
         // scan lock — these are per-id eth_calls that no longer touch the cache).
@@ -460,13 +479,19 @@ mod tests {
             locked: Vec::new(),
         });
         let hashlock = [7u8; 32];
-        let pass1 = run_scan(&cache, 0, 2000, hashlock, |start, end| async move {
-            Ok(if (start..=end).contains(&1990) {
-                vec![lock(9, 7, 1990, 0xAA, 0)]
-            } else {
-                vec![]
-            })
-        })
+        let pass1 = run_scan(
+            &cache,
+            0,
+            || async { Ok(2000) },
+            hashlock,
+            |start, end| async move {
+                Ok(if (start..=end).contains(&1990) {
+                    vec![lock(9, 7, 1990, 0xAA, 0)]
+                } else {
+                    vec![]
+                })
+            },
+        )
         .await
         .unwrap();
         assert_eq!(pass1.matched.len(), 1);
@@ -475,9 +500,15 @@ mod tests {
         // Pass 2: the provider's head has REGRESSED to 1900 and the canonical
         // chain no longer contains the event. The orphan above head must not be
         // reported, and reached_head must describe the regressed head honestly.
-        let pass2 = run_scan(&cache, 0, 1900, hashlock, |_, _| async move { Ok(vec![]) })
-            .await
-            .unwrap();
+        let pass2 = run_scan(
+            &cache,
+            0,
+            || async { Ok(1900) },
+            hashlock,
+            |_, _| async move { Ok(vec![]) },
+        )
+        .await
+        .unwrap();
         assert!(
             pass2.matched.is_empty(),
             "orphaned event above the regressed head must not survive"
@@ -514,7 +545,7 @@ mod tests {
             let overlapped = overlapped.clone();
             let fetches = fetches.clone();
             handles.push(tokio::spawn(async move {
-                run_scan(&cache, 0, latest, [1u8; 32], move |_start, _end| {
+                run_scan(&cache, 0, move || async move { Ok(latest) }, [1u8; 32], move |_start, _end| {
                     let in_fetch = in_fetch.clone();
                     let overlapped = overlapped.clone();
                     let fetches = fetches.clone();
@@ -553,6 +584,68 @@ mod tests {
             cache.lock().await.next_block,
             latest + 1,
             "both passes committed into the one shared cache"
+        );
+    }
+
+    // ── [P2-3] head read is serialized with the scan pass ───────────────
+    //
+    // The chain-head read must happen UNDER the scan lock. If it ran before
+    // the lock, a queued second pass would read head while the first pass is
+    // still mid-fetch (holding the lock) — exactly the interleaving that let a
+    // stale head prune a newer cache. We instrument `read_head` to flag if any
+    // fetch is in flight when it runs; with the read serialized under the lock
+    // the flag must stay clear.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn head_read_runs_under_the_scan_lock() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let latest = LOG_SCAN_CHUNK * 2;
+        let cache = Arc::new(Mutex::new(ScanCache {
+            next_block: 0,
+            locked: Vec::new(),
+        }));
+        let in_fetch = Arc::new(AtomicUsize::new(0));
+        let head_during_fetch = Arc::new(AtomicBool::new(false));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let cache = cache.clone();
+            let in_fetch = in_fetch.clone();
+            let head_during_fetch = head_during_fetch.clone();
+            handles.push(tokio::spawn(async move {
+                let in_fetch_head = in_fetch.clone();
+                let head_during_fetch = head_during_fetch.clone();
+                let read_head = move || async move {
+                    // A fetch in flight here means another pass holds the lock
+                    // while we read head → the read escaped the lock.
+                    if in_fetch_head.load(Ordering::SeqCst) > 0 {
+                        head_during_fetch.store(true, Ordering::SeqCst);
+                    }
+                    Ok(latest)
+                };
+                let in_fetch = in_fetch.clone();
+                run_scan(&cache, 0, read_head, [1u8; 32], move |_s, _e| {
+                    let in_fetch = in_fetch.clone();
+                    async move {
+                        in_fetch.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        in_fetch.fetch_sub(1, Ordering::SeqCst);
+                        Ok(vec![])
+                    }
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert!(
+            !head_during_fetch.load(Ordering::SeqCst),
+            "chain-head read must run under the scan lock, never while another \
+             pass is mid-fetch"
         );
     }
 }
