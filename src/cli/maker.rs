@@ -18,6 +18,19 @@ use super::{bot, create_clients, output};
 /// (repo checkout layout).
 const DEFAULT_PUBLISHER_SCRIPT: &str = "offer-publisher/publish-offer.mjs";
 
+/// Boolish value parser for env/flag booleans (clap's default `bool` parser only
+/// accepts `true`/`false`, but operators reasonably set `RESTRICT_COUNTERPARTY=1`).
+/// Accepts `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off` (case-insensitive).
+fn parse_boolish(s: &str) -> std::result::Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "no" | "n" | "off" => Ok(false),
+        other => Err(format!(
+            "expected a boolean (1/0, true/false, yes/no, on/off), got '{other}'"
+        )),
+    }
+}
+
 #[derive(Args)]
 pub struct MakerArgs {
     /// Accept a specific hashlock (64-char hex) instead of discovering via on-chain event
@@ -60,7 +73,18 @@ pub struct MakerArgs {
     /// claim. To avoid silently shipping that broken-for-the-public default,
     /// `--loop` refuses to start unless this flag is set, making the
     /// designated-counterparty limitation explicit.
-    #[arg(long, env = "RESTRICT_COUNTERPARTY")]
+    ///
+    /// Accepts a boolish value from the env/flag (`1`/`0`, `true`/`false`,
+    /// `yes`/`no`, `on`/`off`) so `RESTRICT_COUNTERPARTY=1` works, not just
+    /// `=true`; a bare `--restrict-counterparty` (no value) means `true`.
+    #[arg(
+        long,
+        env = "RESTRICT_COUNTERPARTY",
+        value_parser = parse_boolish,
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+    )]
     restrict_counterparty: bool,
 
     /// Faucet sidecar: loop `wallet pinata claim` (150 LEZ each) until the
@@ -160,7 +184,7 @@ async fn cmd_maker_loop(
              --lez-taker-account (LEZ_TAKER_ACCOUNT_ID). The LEZ HTLC Claim is gated on \
              signer == taker_id and the loop has no way to learn an arbitrary public taker's \
              LEZ account per-swap, so every escrow would be locked to that one account and no \
-             other taker could claim. Pass --restrict-counterparty (RESTRICT_COUNTERPARTY=1) to \
+             other taker could claim. Pass --restrict-counterparty (RESTRICT_COUNTERPARTY=true) to \
              acknowledge this and run the loop for the designated taker."
                 .into(),
         ));
@@ -438,5 +462,60 @@ fn describe(event: &SwapProgress) -> String {
         } => format!("loop stopped ({total_completed} completed, {total_failed} failed)"),
         SwapProgress::AutoAcceptCancelled => "loop cancelled".into(),
         other => format!("{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_boolish;
+    use clap::Parser;
+
+    // P2-3: the docs advertise RESTRICT_COUNTERPARTY=1, but clap's default bool
+    // parser only accepts true/false. The boolish parser accepts 1/0, true/false,
+    // yes/no, on/off (case-insensitive) and rejects anything else.
+    #[test]
+    fn boolish_parses_env_style_values() {
+        for truthy in ["1", "true", "TRUE", "yes", "Y", "on", " true "] {
+            assert_eq!(parse_boolish(truthy), Ok(true), "{truthy:?} should be true");
+        }
+        for falsy in ["0", "false", "FALSE", "no", "N", "off"] {
+            assert_eq!(parse_boolish(falsy), Ok(false), "{falsy:?} should be false");
+        }
+        for bad in ["", "2", "maybe", "enable"] {
+            assert!(parse_boolish(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    // The clap wiring: `RESTRICT_COUNTERPARTY=1` parses to `true`, a bare
+    // `--restrict-counterparty` flag (no value) is `true`, and the default is
+    // `false`. Uses a tiny throwaway parser mirroring the real arg attributes so
+    // the test does not depend on the full MakerArgs surface (env/other fields).
+    #[derive(Parser)]
+    struct BoolishProbe {
+        #[arg(
+            long,
+            value_parser = parse_boolish,
+            num_args = 0..=1,
+            default_value_t = false,
+            default_missing_value = "true",
+        )]
+        flag: bool,
+    }
+
+    #[test]
+    fn boolish_clap_flag_and_value_forms() {
+        assert!(!BoolishProbe::parse_from(["x"]).flag, "default is false");
+        assert!(
+            BoolishProbe::parse_from(["x", "--flag"]).flag,
+            "bare flag means true"
+        );
+        assert!(
+            BoolishProbe::parse_from(["x", "--flag", "1"]).flag,
+            "=1 parses to true"
+        );
+        assert!(
+            !BoolishProbe::parse_from(["x", "--flag", "0"]).flag,
+            "=0 parses to false"
+        );
     }
 }

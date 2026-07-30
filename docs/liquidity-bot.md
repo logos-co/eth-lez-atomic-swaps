@@ -72,7 +72,7 @@ LEZ_TIMELOCK_MINUTES=20                 # --loop default when unset (single-shot
 ETH_TIMELOCK_MINUTES=40                 # --loop default when unset (single-shot: 10)
 OFFER_HEARTBEAT_SECS=45
 MAKER_STATE_FILE=/var/lib/lez-maker/state.json
-RESTRICT_COUNTERPARTY=1                 # required to start --loop (see below)
+RESTRICT_COUNTERPARTY=true              # required to start --loop; accepts 1/0/true/false/yes/no (see below)
 ```
 
 ### Designated-taker requirement (read before you set `LEZ_TAKER_ACCOUNT_ID`)
@@ -82,7 +82,7 @@ account you name in `LEZ_TAKER_ACCOUNT_ID` can ever claim the LEZ the maker
 locks. The loop has **no inbound channel** to learn a public taker's LEZ
 account per-swap (offer advertisement is publish-only), so every escrow it creates
 is locked to that one static account. `--loop` therefore refuses to start
-unless you pass `--restrict-counterparty` (`RESTRICT_COUNTERPARTY=1`) to
+unless you pass `--restrict-counterparty` (`RESTRICT_COUNTERPARTY=true`) to
 acknowledge this — the standing bot serves a **single, pre-arranged
 counterparty**, not the open public.
 
@@ -92,7 +92,7 @@ Real designated-taker flow:
 2. Obtain their LEZ account id (base58): `wallet account list` on their side,
    or have them send it to you.
 3. Set `LEZ_TAKER_ACCOUNT_ID=<their base58 account>` in `maker.env`.
-4. Start with `--restrict-counterparty` (or `RESTRICT_COUNTERPARTY=1`).
+4. Start with `--restrict-counterparty` (or `RESTRICT_COUNTERPARTY=true`).
 
 > **⚠️ WARNING — funds lock to whatever taker you configure.** The maker
 > transfers `LEZ_AMOUNT` into an escrow that **only** `LEZ_TAKER_ACCOUNT_ID`

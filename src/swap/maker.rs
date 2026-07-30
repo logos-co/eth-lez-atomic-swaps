@@ -28,9 +28,16 @@ use crate::{
 /// confirmed on-chain). Defined here so the swap layer can drive the journal
 /// without depending on the CLI layer.
 pub trait SwapJournal: Send + Sync {
-    /// Durably record an in-flight swap. Must return `Err` (not silently drop)
-    /// if the write cannot be made durable, so the caller can refuse to lock.
+    /// Durably record an in-flight swap in the `PreLock` stage, BEFORE locking
+    /// LEZ (P2-2). Must return `Err` (not silently drop) if the write cannot be
+    /// made durable, so the caller can refuse to lock. If the lock then fails
+    /// pre-commit, reconciliation retires this `PreLock` entry (nothing was
+    /// locked) instead of wedging startup forever.
     fn record(&self, hashlock_hex: &str, swap_id: &str) -> Result<()>;
+    /// Upgrade a recorded entry from `PreLock` to `Funded` after the LEZ lock is
+    /// confirmed on-chain (P2-2). Best-effort: a lost upgrade self-heals via
+    /// reconciliation (still-`PreLock` entry + existing escrow ⇒ re-upgrade).
+    fn mark_funded(&self, hashlock_hex: &str);
     /// Clear a swap after a confirmed terminal state. Best-effort: a failed
     /// clear only costs a redundant (idempotent) reconcile on the next restart.
     fn clear(&self, hashlock_hex: &str);
@@ -380,6 +387,13 @@ pub async fn run_maker(
         )
         .await?;
     info!(tx_hash = %lez_lock_tx, "maker: LEZ locked");
+    // P2-2: the lock is confirmed and an on-chain escrow now exists — upgrade the
+    // journal entry from PreLock to Funded so a later crash-recovery pass treats
+    // a phantom/short escrow read as ambiguous (retain) rather than as a
+    // never-locked entry to retire.
+    if let Some(guards) = guards {
+        guards.journal.mark_funded(&hashlock_hex);
+    }
     progress::report(
         &progress,
         SwapProgress::LezLocked {
@@ -893,6 +907,7 @@ mod tests {
                 .insert(hashlock_hex.to_string());
             Ok(())
         }
+        fn mark_funded(&self, _hashlock_hex: &str) {}
         fn clear(&self, hashlock_hex: &str) {
             self.entries.lock().unwrap().remove(hashlock_hex);
         }

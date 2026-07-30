@@ -93,6 +93,33 @@ pub fn program_id_to_hex(id: &ProgramId) -> String {
 // In-flight swap journal (crash recovery)
 // ---------------------------------------------------------------------------
 
+/// Lifecycle stage of a journaled in-flight swap (P2-2). The entry is written
+/// `PreLock` durably BEFORE `LezClient::lock`, and upgraded to `Funded` only
+/// after the lock is confirmed on-chain. The distinction lets reconciliation
+/// tell apart two "no escrow on chain" cases that are otherwise identical:
+///   - `PreLock` + conclusively-absent escrow ⇒ the lock never committed
+///     (RPC failure/rejection before commit); nothing was ever locked, so the
+///     entry is RETIRED (tombstoned) instead of retained-forever, which would
+///     otherwise wedge sequential startup on every restart.
+///   - `Funded` + absent escrow ⇒ ambiguous phantom/short read of an escrow
+///     that DOES exist; must be retained (dropping it would strand locked LEZ).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwapStage {
+    /// Journaled before the LEZ lock; no on-chain escrow is guaranteed to exist.
+    PreLock,
+    /// The LEZ lock is confirmed; an on-chain escrow exists for this hashlock.
+    Funded,
+}
+
+impl Default for SwapStage {
+    /// Back-compat: entries in state files written before the `stage` field
+    /// existed were only ever persisted AFTER a confirmed lock, so they are
+    /// `Funded`. `#[serde(default)]` on the field uses this.
+    fn default() -> Self {
+        Self::Funded
+    }
+}
+
 /// One journaled in-flight swap: recorded when the maker matches an ETH lock
 /// (just before locking LEZ), removed when the swap reaches a terminal state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +130,10 @@ pub struct InFlightSwap {
     pub swap_id: String,
     /// Unix seconds when the entry was recorded.
     pub recorded_at: u64,
+    /// Lifecycle stage (P2-2). `#[serde(default)]` = `Funded` for state files
+    /// written before this field existed (those were only persisted post-lock).
+    #[serde(default)]
+    pub stage: SwapStage,
 }
 
 /// A swap moved out of the active journal because it can never terminalize and
@@ -222,6 +253,25 @@ impl StateStore {
         })
     }
 
+    /// Upgrade a journaled entry from `PreLock` to `Funded` (P2-2), called after
+    /// the LEZ lock is confirmed on-chain. Best-effort persist: a lost upgrade is
+    /// self-healing — reconciliation will find the still-`PreLock` entry next to
+    /// its existing on-chain escrow and re-upgrade it, so a dropped write only
+    /// costs a redundant upgrade, never a wrong retirement. No-op if absent.
+    pub fn mark_funded(&self, hashlock: &str) {
+        let mut state = self.state.lock().expect("state lock");
+        let mut changed = false;
+        for s in &mut state.in_flight {
+            if s.hashlock == hashlock && s.stage != SwapStage::Funded {
+                s.stage = SwapStage::Funded;
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_logged(&state);
+        }
+    }
+
     /// Remove a swap by hashlock (no-op if absent).
     pub fn remove(&self, hashlock: &str) {
         let mut state = self.state.lock().expect("state lock");
@@ -288,8 +338,14 @@ impl crate::swap::maker::SwapJournal for StateStore {
                 hashlock: hashlock_hex.to_string(),
                 swap_id: swap_id.to_string(),
                 recorded_at: now_unix(),
+                // P2-2: written BEFORE the lock — no on-chain escrow yet.
+                stage: SwapStage::PreLock,
             },
         )
+    }
+
+    fn mark_funded(&self, hashlock_hex: &str) {
+        StateStore::mark_funded(self, hashlock_hex);
     }
 
     fn clear(&self, hashlock_hex: &str) {
@@ -363,35 +419,83 @@ enum WedgeDisposition {
     Retain,
 }
 
-/// Classify a suspected wedge from its FRESH paired re-read (P1-1 / P1-2). Pure
-/// so the decision is unit-testable without a live sequencer.
+/// Classify a suspected wedge from its FRESH paired re-read, enforcing the read
+/// ORDER `state → balance → STATE` (P1-1 / P1-2). Pure so the decision is
+/// unit-testable without a live sequencer.
 ///
-/// - `fresh_state`: escrow state from the re-read (`None` = absent/phantom).
-/// - `fresh_balance`: highest balance across the bounded re-read (`None` = every
-///   read failed; an outage must NOT be read as zero → no quarantine).
+/// A taker `Claim` can commit in the WINDOW between the pre-balance state read
+/// and the balance read: the escrow drains to zero, so a cached `Locked`
+/// pre-state paired with a fresh zero balance would misfire quarantine and burn
+/// the revealed preimage / forfeit the ETH claim. Closing that window requires a
+/// FINAL state read taken AFTER the balance observation — quarantine is
+/// conclusive only if BOTH the pre- and post-balance state reads still show
+/// `Locked`. A `Claimed` at EITHER read means the preimage is on-chain and routes
+/// to ETH recovery.
+///
+/// - `pre_state`: escrow state read BEFORE the balance (`None` = absent/phantom).
+/// - `balance`: highest balance across the bounded re-read (`None` = every read
+///   failed; an outage must NOT be read as zero → no quarantine).
+/// - `post_state`: escrow state read AFTER the balance — the authoritative final
+///   read that a mid-window claim would reveal (`None` = absent/phantom).
 fn classify_wedge_reread(
-    fresh_state: Option<HTLCState>,
-    fresh_balance: Option<u128>,
+    pre_state: Option<HTLCState>,
+    balance: Option<u128>,
+    post_state: Option<HTLCState>,
     now_ms: u64,
     timelock_ms: u64,
     amount: u128,
 ) -> WedgeDisposition {
-    match fresh_state {
-        // Taker revealed the preimage after our stale Locked read — recover ETH.
-        Some(HTLCState::Claimed) => WedgeDisposition::RecoverClaimed,
-        // Already terminal on the maker side.
-        Some(HTLCState::Refunded) => WedgeDisposition::Dropped,
-        // Still Locked: quarantine ONLY if the low balance is confirmed on the
-        // fresh paired read. All-reads-failed (`None`) or a now-sufficient
-        // balance → retain and retry.
-        Some(HTLCState::Locked) => match fresh_balance {
-            Some(b) if is_partial_lock_wedge(HTLCState::Locked, now_ms, timelock_ms, b, amount) => {
-                WedgeDisposition::Quarantine
-            }
-            _ => WedgeDisposition::Retain,
-        },
-        // Absent/phantom re-read — not conclusive, retain.
-        None => WedgeDisposition::Retain,
+    // A taker `Claim` observed at EITHER the pre- or post-balance state read
+    // means the preimage is on-chain — recover the ETH, never quarantine. This
+    // is the P1-1 window: a claim that commits between the state and balance
+    // reads drains the escrow to zero, so a cached `Locked` + fresh zero must not
+    // be mistaken for the funding-never-landed wedge.
+    if matches!(pre_state, Some(HTLCState::Claimed))
+        || matches!(post_state, Some(HTLCState::Claimed))
+    {
+        return WedgeDisposition::RecoverClaimed;
+    }
+    // Refunded at the FINAL read is terminal on the maker side.
+    if matches!(post_state, Some(HTLCState::Refunded)) {
+        return WedgeDisposition::Dropped;
+    }
+    // Quarantine is conclusive ONLY when BOTH the pre- and post-balance state
+    // reads show `Locked` (so no claim slipped through the window) AND the low
+    // balance is confirmed at/after expiry. Any ambiguity — an absent read at
+    // either end, all-failed balance (`None`), or a now-sufficient balance —
+    // routes to retain-and-retry; quarantine is irreversible.
+    match (pre_state, post_state, balance) {
+        (Some(HTLCState::Locked), Some(HTLCState::Locked), Some(b))
+            if is_partial_lock_wedge(HTLCState::Locked, now_ms, timelock_ms, b, amount) =>
+        {
+            WedgeDisposition::Quarantine
+        }
+        _ => WedgeDisposition::Retain,
+    }
+}
+
+/// What reconciliation does with a journal entry whose escrow reads
+/// conclusively ABSENT (every bounded read was `None`) — decided by the journal
+/// STAGE (P2-2). Pure so the PreLock-retire vs Funded-retain decision is
+/// unit-testable without a live sequencer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsentEscrowAction {
+    /// `PreLock` entry + no escrow ever appeared ⇒ the LEZ lock failed
+    /// pre-commit; nothing was ever locked. RETIRE it (tombstone into quarantine
+    /// with `pre-lock-abandoned`) so it stops wedging startup — but never reuse
+    /// the hashlock/secret.
+    RetirePreLock,
+    /// `Funded` entry ⇒ an escrow DID exist on-chain; an all-`None` read is an
+    /// ambiguous phantom/short read (the LEZ HTLC program never deletes an
+    /// account). RETAIN and retry so locked LEZ is never stranded.
+    RetainFunded,
+}
+
+/// Classify a conclusively-absent escrow read by journal stage (P2-2).
+fn classify_absent_escrow(stage: SwapStage) -> AbsentEscrowAction {
+    match stage {
+        SwapStage::PreLock => AbsentEscrowAction::RetirePreLock,
+        SwapStage::Funded => AbsentEscrowAction::RetainFunded,
     }
 }
 
@@ -734,7 +838,20 @@ pub async fn reconcile(
         };
 
         match read_escrow_bounded(&lez_client, &hashlock).await {
-            Some(escrow) => match escrow.state {
+            Some(escrow) => {
+                // P2-2: an on-chain escrow exists for this hashlock, so the lock
+                // DID commit. If the entry is still `PreLock` (crash between the
+                // pre-lock journal write and the post-lock upgrade), promote it to
+                // `Funded` before handling — it must never be mistaken for a
+                // never-locked entry and retired.
+                if entry.stage == SwapStage::PreLock {
+                    info!(
+                        hashlock = %entry.hashlock,
+                        "reconcile: PreLock entry has an on-chain escrow — upgrading to Funded"
+                    );
+                    store.mark_funded(&entry.hashlock);
+                }
+                match escrow.state {
                 HTLCState::Claimed => {
                     // Taker revealed the preimage while we were down — collect the ETH.
                     recover_claimed_escrow(config, &entry, &escrow, store).await;
@@ -784,17 +901,28 @@ pub async fn reconcile(
                         // P1-1: the initial read is a wedge CANDIDATE only — a
                         // taker `Claim` can land AFTER it. Quarantine is
                         // irreversible (strands the LEZ, burns the secret), so
-                        // RE-READ the escrow and balance and act only on the fresh
-                        // paired observation. If the taker claimed, recover the
-                        // ETH; quarantine only if still Locked + still underfunded.
-                        let fresh = read_escrow_bounded(&lez_client, &hashlock).await;
-                        let fresh_amount = fresh.as_ref().map_or(escrow.amount, |e| e.amount);
-                        let fresh_timelock = fresh.as_ref().map_or(escrow.timelock, |e| e.timelock);
+                        // RE-READ following the ORDER state → balance → STATE and
+                        // act only on the fresh triple. A claim that commits in the
+                        // window between the pre-state read and the balance read
+                        // drains the escrow to zero; the FINAL state read after the
+                        // balance closes that hole. If the taker claimed, recover
+                        // the ETH; quarantine only if BOTH state reads are still
+                        // Locked and the escrow is still underfunded.
+                        let pre = read_escrow_bounded(&lez_client, &hashlock).await;
+                        let pre_state = pre.as_ref().map(|e| e.state);
+                        let pre_amount = pre.as_ref().map_or(escrow.amount, |e| e.amount);
+                        let pre_timelock = pre.as_ref().map_or(escrow.timelock, |e| e.timelock);
                         let fresh_balance =
-                            max_escrow_balance(&lez_client, &pda, fresh_amount).await;
+                            max_escrow_balance(&lez_client, &pda, pre_amount).await;
+                        // FINAL state read AFTER the balance observation.
+                        let post = read_escrow_bounded(&lez_client, &hashlock).await;
+                        let post_state = post.as_ref().map(|e| e.state);
+                        let fresh_amount = post.as_ref().map_or(pre_amount, |e| e.amount);
+                        let fresh_timelock = post.as_ref().map_or(pre_timelock, |e| e.timelock);
                         match classify_wedge_reread(
-                            fresh.as_ref().map(|e| e.state),
+                            pre_state,
                             fresh_balance,
+                            post_state,
                             now_unix() * 1000,
                             fresh_timelock,
                             fresh_amount,
@@ -820,15 +948,20 @@ pub async fn reconcile(
                                 );
                             }
                             WedgeDisposition::RecoverClaimed => {
-                                // Taker claimed after our stale read — the preimage
-                                // is on-chain; recover the ETH instead of eating it.
+                                // Taker claimed after our stale read (possibly in
+                                // the state→balance window) — the preimage is
+                                // on-chain; recover the ETH instead of eating it.
                                 info!(
                                     hashlock = %entry.hashlock,
                                     "reconcile: taker claimed after the wedge candidate read — claiming ETH"
                                 );
-                                let fresh = fresh
-                                    .expect("RecoverClaimed implies a fresh escrow read was present");
-                                recover_claimed_escrow(config, &entry, &fresh, store).await;
+                                let claimed = post
+                                    .filter(|e| e.state == HTLCState::Claimed)
+                                    .or_else(|| {
+                                        pre.filter(|e| e.state == HTLCState::Claimed)
+                                    })
+                                    .expect("RecoverClaimed implies a Claimed escrow read");
+                                recover_claimed_escrow(config, &entry, &claimed, store).await;
                             }
                             WedgeDisposition::Dropped => {
                                 info!(
@@ -883,18 +1016,48 @@ pub async fn reconcile(
                         )));
                     }
                 }
-            },
+                }
+            }
             None => {
-                // Every read was absent/errored — ambiguous, NOT conclusive
-                // absence (P1-2 / principle i). `get_escrow` returns `None` for
-                // missing/short/phantom data, and the LEZ HTLC program never
-                // deletes an account. Dropping now would strand locked LEZ if the
-                // escrow exists but read phantom/short; a never-locked entry costs
-                // only a redundant idempotent reconcile next restart. Retain.
-                warn!(
-                    hashlock = %entry.hashlock,
-                    "reconcile: escrow read absent/ambiguous after retries — retaining for next reconcile"
-                );
+                // Every read was absent/errored after bounded retries. What this
+                // means depends on the journal STAGE (P2-2):
+                match classify_absent_escrow(entry.stage) {
+                    AbsentEscrowAction::RetirePreLock => {
+                    // The entry was written just BEFORE the lock and the lock
+                    // never produced an on-chain escrow — the lock failed
+                    // pre-commit (RPC failure/rejection). Nothing was ever locked,
+                    // so no funds are at risk; but a `Funded`-style retain would
+                    // keep an all-None entry forever and wedge sequential startup
+                    // on every restart. RETIRE it. Per the no-secret-reuse rule it
+                    // is tombstoned into quarantine (not silently deleted) so the
+                    // operator can see the hashlock must not be reused.
+                    warn!(
+                        hashlock = %entry.hashlock,
+                        "reconcile: PreLock entry with no on-chain escrow after retries — lock never \
+                         committed; retiring (pre-lock-abandoned). Nothing was locked, but do NOT \
+                         reuse the hashlock/secret."
+                    );
+                    store.quarantine(
+                        &entry.hashlock,
+                        "pre-lock-abandoned: journaled PreLock but no on-chain escrow ever appeared \
+                         (LEZ lock failed before commit). No funds locked; hashlock retired and must \
+                         NOT be reused."
+                            .to_string(),
+                    );
+                    }
+                    AbsentEscrowAction::RetainFunded => {
+                    // Funded stage: an escrow DID exist on-chain. An all-None read
+                    // is ambiguous, NOT conclusive absence (P1-2 / principle i):
+                    // `get_escrow` returns `None` for missing/short/phantom data
+                    // and the LEZ HTLC program never deletes an account. Dropping
+                    // now would strand locked LEZ if the escrow read phantom/short.
+                    // Retain and retry on the next reconcile.
+                    warn!(
+                        hashlock = %entry.hashlock,
+                        "reconcile: Funded escrow read absent/ambiguous after retries — retaining for next reconcile"
+                    );
+                    }
+                }
             }
         }
     }
@@ -1170,6 +1333,7 @@ mod tests {
                 hashlock: "ab".repeat(32),
                 swap_id: format!("0x{}", "cd".repeat(32)),
                 recorded_at: 123,
+                stage: SwapStage::PreLock,
             })
             .unwrap();
         // Idempotent on hashlock.
@@ -1178,6 +1342,7 @@ mod tests {
                 hashlock: "ab".repeat(32),
                 swap_id: format!("0x{}", "cd".repeat(32)),
                 recorded_at: 456,
+                stage: SwapStage::PreLock,
             })
             .unwrap();
         assert_eq!(store.snapshot().len(), 1);
@@ -1228,6 +1393,7 @@ mod tests {
             hashlock: "ab".repeat(32),
             swap_id: format!("0x{}", "cd".repeat(32)),
             recorded_at: 7,
+            stage: SwapStage::PreLock,
         };
         store.record(swap.clone()).expect("durable record");
         // Idempotent on hashlock.
@@ -1258,6 +1424,7 @@ mod tests {
                 hashlock: hl.clone(),
                 swap_id: format!("0x{}", "cd".repeat(32)),
                 recorded_at: 1,
+                stage: SwapStage::PreLock,
             })
             .unwrap();
         assert!(store.contains(&hl));
@@ -1410,33 +1577,128 @@ mod tests {
     #[test]
     fn classify_wedge_reread_recovers_taker_claim_not_quarantine() {
         let (expiry, after) = (1_000_000u64, 1_000_001u64);
-        // Fresh read shows the taker claimed after our stale Locked read, even
-        // though the balance still reads low → recover ETH, not quarantine.
+        // Post-balance read shows the taker claimed after our stale Locked read,
+        // even though the balance still reads low → recover ETH, not quarantine.
         assert_eq!(
-            classify_wedge_reread(Some(HTLCState::Claimed), Some(0), after, expiry, 150),
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                Some(0),
+                Some(HTLCState::Claimed),
+                after,
+                expiry,
+                150
+            ),
             WedgeDisposition::RecoverClaimed,
             "a taker claim after the stale read must route to ETH recovery, not quarantine"
         );
-        // Still Locked + still underfunded + expired on the fresh paired read →
+        // Both pre- and post-balance reads Locked + still underfunded + expired →
         // genuine wedge, quarantine.
         assert_eq!(
-            classify_wedge_reread(Some(HTLCState::Locked), Some(0), after, expiry, 150),
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                Some(0),
+                Some(HTLCState::Locked),
+                after,
+                expiry,
+                150
+            ),
             WedgeDisposition::Quarantine
         );
         // Fresh read shows a now-sufficient balance → not wedged, retain/retry.
         assert_eq!(
-            classify_wedge_reread(Some(HTLCState::Locked), Some(150), after, expiry, 150),
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                Some(150),
+                Some(HTLCState::Locked),
+                after,
+                expiry,
+                150
+            ),
             WedgeDisposition::Retain
         );
-        // Fresh read shows Refunded → already terminal, drop.
+        // Final read shows Refunded → already terminal, drop.
         assert_eq!(
-            classify_wedge_reread(Some(HTLCState::Refunded), Some(0), after, expiry, 150),
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                Some(0),
+                Some(HTLCState::Refunded),
+                after,
+                expiry,
+                150
+            ),
             WedgeDisposition::Dropped
         );
-        // Fresh escrow read absent/phantom → not conclusive, retain.
+        // Final escrow read absent/phantom → not conclusive, retain.
         assert_eq!(
-            classify_wedge_reread(None, Some(0), after, expiry, 150),
+            classify_wedge_reread(Some(HTLCState::Locked), Some(0), None, after, expiry, 150),
             WedgeDisposition::Retain
+        );
+    }
+
+    // P1-1: enforce the read ORDER state → balance → STATE. A taker `Claim` can
+    // commit in the window between the pre-balance state read and the balance
+    // read, draining the escrow to zero. A cached `Locked` pre-state paired with
+    // a fresh zero balance must therefore NEVER quarantine on its own — the FINAL
+    // (post-balance) state read is authoritative. Quarantine requires BOTH state
+    // reads to still be `Locked`.
+    #[test]
+    fn classify_wedge_reread_state_balance_state_ordering() {
+        let (expiry, after) = (1_000_000u64, 1_000_001u64);
+        // The exact race: pre-state Locked, balance drained to zero, then the
+        // FINAL state read reveals the claim → recover, never quarantine.
+        assert_eq!(
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                Some(0),
+                Some(HTLCState::Claimed),
+                after,
+                expiry,
+                150
+            ),
+            WedgeDisposition::RecoverClaimed,
+            "claim revealed at the FINAL state read must recover ETH, not quarantine"
+        );
+        // A claim already visible at the PRE read (before balance) also recovers,
+        // whatever the later balance/state read shows.
+        assert_eq!(
+            classify_wedge_reread(
+                Some(HTLCState::Claimed),
+                Some(0),
+                Some(HTLCState::Locked),
+                after,
+                expiry,
+                150
+            ),
+            WedgeDisposition::RecoverClaimed,
+            "a claim seen at the pre-balance read must recover ETH"
+        );
+        // Pre-state Locked but the FINAL read is absent/phantom → not both-Locked,
+        // so NOT conclusive; retain rather than quarantine on the stale pre-read.
+        assert_eq!(
+            classify_wedge_reread(Some(HTLCState::Locked), Some(0), None, after, expiry, 150),
+            WedgeDisposition::Retain,
+            "an absent FINAL state read must not quarantine on the stale pre-read"
+        );
+        // Pre-state absent but the FINAL read Locked + underfunded → still not
+        // both-Locked; retain.
+        assert_eq!(
+            classify_wedge_reread(None, Some(0), Some(HTLCState::Locked), after, expiry, 150),
+            WedgeDisposition::Retain,
+            "an absent pre-balance state read must not quarantine"
+        );
+        // Only when BOTH reads are Locked and the escrow is conclusively
+        // underfunded at/after expiry is the wedge genuine → quarantine.
+        assert_eq!(
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                Some(0),
+                Some(HTLCState::Locked),
+                after,
+                expiry,
+                150
+            ),
+            WedgeDisposition::Quarantine,
+            "both-Locked + conclusively-underfunded + expired is the genuine wedge"
         );
     }
 
@@ -1448,10 +1710,116 @@ mod tests {
     fn classify_wedge_reread_all_balance_reads_failed_retains() {
         let (expiry, after) = (1_000_000u64, 1_000_001u64);
         assert_eq!(
-            classify_wedge_reread(Some(HTLCState::Locked), None, after, expiry, 150),
+            classify_wedge_reread(
+                Some(HTLCState::Locked),
+                None,
+                Some(HTLCState::Locked),
+                after,
+                expiry,
+                150
+            ),
             WedgeDisposition::Retain,
             "all-balance-reads-failed must retain a Locked escrow, never quarantine"
         );
+    }
+
+    // P2-2: a conclusively-absent escrow read is retired vs retained purely by
+    // journal stage — a PreLock entry (lock never committed) is retired, a Funded
+    // entry (escrow existed, read phantom) is retained.
+    #[test]
+    fn classify_absent_escrow_by_stage() {
+        assert_eq!(
+            classify_absent_escrow(SwapStage::PreLock),
+            AbsentEscrowAction::RetirePreLock,
+            "a PreLock entry with no on-chain escrow was never locked — retire it"
+        );
+        assert_eq!(
+            classify_absent_escrow(SwapStage::Funded),
+            AbsentEscrowAction::RetainFunded,
+            "a Funded entry that reads absent is an ambiguous phantom read — retain it"
+        );
+    }
+
+    // P2-2: mark_funded upgrades a PreLock entry in place and persists across a
+    // reload; the reconcile-side effect of the RetirePreLock path (tombstone into
+    // quarantine) is exercised end-to-end on the store.
+    #[test]
+    fn prelock_marked_funded_then_survives_reload() {
+        let path = std::env::temp_dir()
+            .join(format!("maker-prelock-funded-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = StateStore::load(&path).unwrap();
+        let hl = "ab".repeat(32);
+        store
+            .record(InFlightSwap {
+                hashlock: hl.clone(),
+                swap_id: format!("0x{}", "cd".repeat(32)),
+                recorded_at: 1,
+                stage: SwapStage::PreLock,
+            })
+            .unwrap();
+        assert_eq!(store.snapshot()[0].stage, SwapStage::PreLock);
+        // Post-lock upgrade.
+        store.mark_funded(&hl);
+        assert_eq!(store.snapshot()[0].stage, SwapStage::Funded);
+        // Durable across a "crash".
+        let reloaded = StateStore::load(&path).unwrap();
+        assert_eq!(reloaded.snapshot()[0].stage, SwapStage::Funded);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // P2-2: the RetirePreLock disposition tombstones (does NOT silently delete) a
+    // PreLock entry whose lock never committed — it leaves in_flight (unwedging
+    // startup) and lands in quarantine with a pre-lock-abandoned reason.
+    #[test]
+    fn prelock_retire_tombstones_into_quarantine() {
+        let path = std::env::temp_dir()
+            .join(format!("maker-prelock-retire-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = StateStore::load(&path).unwrap();
+        let hl = "ab".repeat(32);
+        store
+            .record(InFlightSwap {
+                hashlock: hl.clone(),
+                swap_id: format!("0x{}", "cd".repeat(32)),
+                recorded_at: 1,
+                stage: SwapStage::PreLock,
+            })
+            .unwrap();
+        assert_eq!(classify_absent_escrow(store.snapshot()[0].stage), AbsentEscrowAction::RetirePreLock);
+        // The retire path: tombstone into quarantine (never a silent delete).
+        store.quarantine(&hl, "pre-lock-abandoned: no escrow ever appeared".into());
+        assert!(!store.has_in_flight(), "retired entry leaves in_flight — startup unwedged");
+        let q = store.quarantined_snapshot();
+        assert_eq!(q.len(), 1);
+        assert!(q[0].reason.contains("pre-lock-abandoned"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // P2-2 serde back-compat: a state file written before the `stage` field
+    // existed loads with stage = Funded (its entries were only ever persisted
+    // AFTER a confirmed lock), so it is retained on an absent read, not retired.
+    #[test]
+    fn legacy_state_file_without_stage_loads_as_funded() {
+        let path = std::env::temp_dir()
+            .join(format!("maker-legacy-stage-{}.json", std::process::id()));
+        let legacy = serde_json::json!({
+            "in_flight": [{
+                "hashlock": "ab".repeat(32),
+                "swap_id": format!("0x{}", "cd".repeat(32)),
+                "recorded_at": 42u64
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        let store = StateStore::load(&path).unwrap();
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].stage, SwapStage::Funded, "missing stage defaults to Funded");
+        assert_eq!(
+            classify_absent_escrow(snap[0].stage),
+            AbsentEscrowAction::RetainFunded
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     // P1-2: the balance reader returns `None` only when EVERY read failed, and
@@ -1530,6 +1898,7 @@ mod tests {
                 hashlock: hl.clone(),
                 swap_id: format!("0x{}", "cd".repeat(32)),
                 recorded_at: 1,
+                stage: SwapStage::PreLock,
             })
             .unwrap();
         assert!(store.has_in_flight(), "recorded entry is in-flight");
