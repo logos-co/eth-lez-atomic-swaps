@@ -36,6 +36,32 @@ ScrollView {
     property var acceptedOffer: null
     property bool swapCompleted: false
 
+    // Receipt context, captured in QML at the run boundaries (session-only,
+    // PR1): the accepted offer is snapshotted *before* it is cleared at
+    // completion, and wall-clock stamps bracket the run.
+    property var completedOffer: null
+    property double swapStartedMs: 0
+    property double swapFinishedMs: 0
+
+    readonly property var receiptContext: {
+        var ctx = {
+            startedMs: takerRoot.swapStartedMs,
+            finishedMs: takerRoot.swapFinishedMs
+        }
+        var offer = takerRoot.completedOffer
+        if (offer) {
+            ctx.lezAmount = String(offer.lez_amount || "")
+            ctx.ethAmountWei = String(offer.eth_amount || "")
+            ctx.counterpartyEth = String(offer.maker_eth_address || "")
+            ctx.counterpartyLez = String(offer.maker_lez_account || "")
+            ctx.ethHtlcAddress = String(offer.eth_htlc_address || "")
+            ctx.lezProgramId = String(offer.lez_htlc_program_id || "")
+            ctx.lezTimelockUnix = Number(offer.lez_timelock || 0)
+            ctx.ethTimelockUnix = Number(offer.eth_timelock || 0)
+        }
+        return ctx
+    }
+
     // Convert wei to ETH numeric string (for config fields, not display)
     function weiToEthValue(wei) {
         var n = Number(wei)
@@ -119,7 +145,21 @@ ScrollView {
                     }
                 }
                 function onTakerRunningChanged() {
-                    if (!swapBackend.takerRunning && takerRoot.acceptedOffer !== null) {
+                    if (swapBackend.takerRunning) {
+                        // A run is starting (offer swap or ETH refund):
+                        // stamp the wall clock and drop any stale snapshot
+                        // so the receipt never mixes contexts.
+                        takerRoot.swapStartedMs = Date.now()
+                        takerRoot.swapFinishedMs = 0
+                        takerRoot.completedOffer = null
+                        return
+                    }
+                    takerRoot.swapFinishedMs = Date.now()
+                    if (takerRoot.acceptedOffer !== null) {
+                        // Snapshot the offer context *before* clearing it —
+                        // the receipt renders amounts, counterparty and
+                        // timelocks from it.
+                        takerRoot.completedOffer = takerRoot.acceptedOffer
                         takerRoot.swapCompleted = true
                         takerRoot.acceptedOffer = null
                     }
@@ -451,9 +491,11 @@ ScrollView {
                 }
             }
 
-            // Result
-            ResultCard {
+            // Receipt — evidence surface for the just-completed swap
+            ReceiptCard {
+                role: "taker"
                 resultJson: swapBackend.takerResultJson
+                context: takerRoot.receiptContext
             }
 
             // --- Browse More Offers (post-swap) ---
