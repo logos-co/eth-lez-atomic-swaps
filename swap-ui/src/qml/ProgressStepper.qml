@@ -54,7 +54,7 @@ ColumnLayout {
                             if (stepper.completedSteps.indexOf(modelData.name) >= 0)
                                 return Theme.background
                             if (stepper.currentStep === modelData.name)
-                                return Theme.onAccent
+                                return Theme.accentForeground
                             return Theme.textMuted
                         }
                         font.pixelSize: Theme.fontDetail

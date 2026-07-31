@@ -17,7 +17,7 @@ Button {
     }
     contentItem: Text {
         text: control.text
-        color: control.enabled ? Theme.onAccent : Theme.textMuted
+        color: control.enabled ? Theme.accentForeground : Theme.textMuted
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         font: control.font

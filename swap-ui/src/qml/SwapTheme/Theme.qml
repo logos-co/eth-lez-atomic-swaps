@@ -16,7 +16,7 @@ QtObject {
     readonly property color error: "#e94560"
     readonly property color border: "#333333"
     readonly property color inputBackground: "#1A1A1A"
-    readonly property color onAccent: "#ffffff"
+    readonly property color accentForeground: "#ffffff"
 
     // Monospace is the app's "data/trust" voice: amounts, addresses,
     // hashes, countdowns. Everything else stays in the default UI face.

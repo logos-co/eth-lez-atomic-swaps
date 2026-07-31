@@ -221,7 +221,7 @@ ScrollView {
                             text: goLiveButton.text
                             color: swapBackend.autoAcceptRunning
                                    ? Theme.error
-                                   : (goLiveButton.enabled ? Theme.onAccent : Theme.textMuted)
+                                   : (goLiveButton.enabled ? Theme.accentForeground : Theme.textMuted)
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
                             font: goLiveButton.font
