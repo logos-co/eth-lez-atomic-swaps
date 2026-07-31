@@ -1,4 +1,7 @@
-mod bot;
+// Public: swap-ffi reuses the bot's crash-recovery journal (`StateStore`),
+// startup reconciliation and timelock-margin validation for the UI maker
+// loop, so the fund-safety machinery lives in exactly one place.
+pub mod bot;
 #[cfg(feature = "demo")]
 mod demo;
 #[cfg(feature = "demo")]

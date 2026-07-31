@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use swap_orchestrator::{
+    cli::bot::{StateStore, reconcile, validate_timelocks},
     config::{
         LezAuth, SwapConfig, account_id_to_base58, eth_to_wei, parse_base58_account_id,
         parse_program_id,
@@ -384,6 +385,9 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
             hashlock_opt,
             None,
             progress,
+            // Loop-only guards (timelock margin + crash journal) stay off for
+            // the single-shot UI swap, matching the CLI single-shot path.
+            None,
         )
         .await
         {
@@ -674,9 +678,75 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
         eth_timelock_minutes,
     };
 
+    // Timelock-margin startup guard, mirroring `swap-cli maker --loop`: honor
+    // the same TIMELOCK_MARGIN_MINUTES env knob and default to the CLI's 5
+    // minutes. The loop enforces this margin again at runtime against every
+    // matched ETH lock (P1-1), so validating here just fails fast on a config
+    // the loop would reject every lock for.
+    let margin_minutes: u64 = match std::env::var("TIMELOCK_MARGIN_MINUTES") {
+        Ok(v) => match v.trim().parse() {
+            Ok(m) => m,
+            Err(e) => return json_err(&format!("invalid TIMELOCK_MARGIN_MINUTES: {e}")),
+        },
+        Err(_) => 5,
+    };
+    if let Err(e) = validate_timelocks(lez_timelock_minutes, eth_timelock_minutes, margin_minutes) {
+        return json_err(&e.to_string());
+    }
+
+    // Durable crash-recovery journal (fund-safety, PR #40): an in-flight swap
+    // is recorded (fsync'd) BEFORE the LEZ lock and cleared only on a confirmed
+    // terminal state, so a crash cannot strand locked LEZ. The CLI's
+    // MAKER_STATE_FILE env knob wins; otherwise the journal is persisted under
+    // the module's wallet home (the per-module storage directory the FFI config
+    // carries in wallet-auth mode), falling back to the CLI's CWD default.
+    let state_file: std::path::PathBuf = match std::env::var("MAKER_STATE_FILE") {
+        Ok(p) if !p.trim().is_empty() => p.into(),
+        _ => match &base_config.lez_auth {
+            LezAuth::Wallet { home, .. } => home.join(".maker-state.json"),
+            LezAuth::RawKey(_) => ".maker-state.json".into(),
+        },
+    };
+
     runtime().block_on(async {
+        let store = match StateStore::load(&state_file) {
+            Ok(s) => Arc::new(s),
+            Err(e) => return json_err(&e.to_string()),
+        };
+
+        // Crash recovery FIRST, mirroring the CLI loop (P1-3): reconcile
+        // journaled in-flight swaps (refund / claim / resume) and fully RESOLVE
+        // them before accepting any new swap (P1-A), so the 256-block replay
+        // watcher can never rematch a still-OPEN lock and double-fund it.
+        let resume_handles = reconcile(&base_config, &store, /* json = */ true).await;
+        for handle in resume_handles {
+            let _ = handle.await;
+        }
+
+        // If entries remain unresolved (reconcile could not reach a terminal
+        // state — e.g. RPC/sequencer trouble), refuse to start, exactly like
+        // the CLI's stop-for-supervised-restart gate: running the loop past
+        // unresolved funds would let a fresh watcher rematch their locks.
+        let unresolved = store.snapshot().len();
+        if unresolved > 0 {
+            return json_err(&format!(
+                "{unresolved} in-flight swap(s) still unresolved after reconciliation; \
+                 not starting the maker loop — check RPC/sequencer connectivity and retry \
+                 (journal: {})",
+                state_file.display()
+            ));
+        }
+
         let (progress, progress_forwarder) = forward_progress(cb, user_data);
-        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress).await;
+        let result = run_maker_loop(
+            &base_config,
+            &auto_config,
+            &MAKER_LOOP_CANCEL,
+            progress,
+            store.as_ref(),
+            margin_minutes * 60,
+        )
+        .await;
         let json = serde_json::json!({
             "completed": result.total_completed,
             "failed": result.total_failed,
