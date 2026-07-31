@@ -27,15 +27,24 @@ ColumnLayout {
                 // Step indicator circle
                 Rectangle {
                     id: circle
-                    width: 28
-                    height: 28
-                    radius: 14
+                    width: 24
+                    height: 24
+                    radius: 12
                     color: {
                         if (stepper.completedSteps.indexOf(modelData.name) >= 0)
                             return Theme.success
                         if (stepper.currentStep === modelData.name)
                             return Theme.accent
                         return Theme.surfaceLight
+                    }
+
+                    // Pulse the active step (live-dot idiom)
+                    SequentialAnimation on opacity {
+                        running: stepper.currentStep === modelData.name && stepper.visible
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 1.0; to: 0.55; duration: 900 }
+                        NumberAnimation { from: 0.55; to: 1.0; duration: 900 }
+                        onRunningChanged: if (!running) circle.opacity = 1.0
                     }
 
                     Text {
@@ -45,11 +54,12 @@ ColumnLayout {
                             if (stepper.completedSteps.indexOf(modelData.name) >= 0)
                                 return Theme.background
                             if (stepper.currentStep === modelData.name)
-                                return "#ffffff"
+                                return Theme.onAccent
                             return Theme.textMuted
                         }
-                        font.pixelSize: 13
+                        font.pixelSize: Theme.fontDetail
                         font.bold: true
+                        font.family: Theme.monoFont
                     }
                 }
 
@@ -63,7 +73,8 @@ ColumnLayout {
                             return Theme.textPrimary
                         return Theme.textMuted
                     }
-                    font.pixelSize: Theme.fontNormal
+                    font.pixelSize: Theme.fontSmall
+                    font.bold: stepper.currentStep === modelData.name
                     Layout.fillWidth: true
                 }
             }
@@ -71,8 +82,8 @@ ColumnLayout {
             // Vertical connector line below the circle
             Item {
                 visible: index < stepper.steps.length - 1
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 16
+                Layout.preferredWidth: 24
+                Layout.preferredHeight: 14
 
                 Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
