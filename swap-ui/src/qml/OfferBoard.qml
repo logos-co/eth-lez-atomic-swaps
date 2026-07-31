@@ -29,6 +29,13 @@ Item {
     property bool accepting: false
     property string acceptError: ""
     property bool validationRequested: false
+    // True once a validateConfig round-trip has answered. The host inits
+    // validationErrorsJson to "{}" and the replica setter no-ops on equal
+    // values, so a valid config produces no change signal — the fallback
+    // timer below settles that case instead. Gating configReady on this
+    // (not on the request) stops the ready-chip flash and the spurious
+    // fetchOffers during the round-trip window on a fresh install.
+    property bool validationSettled: false
     property real bestRate: 0           // best LEZ-per-ETH on the board
 
     readonly property var validationErrors: {
@@ -36,7 +43,7 @@ Item {
         catch (e) { return {} }
     }
     readonly property int configIssueCount: Object.keys(validationErrors).length
-    readonly property bool configReady: validationRequested && configIssueCount === 0
+    readonly property bool configReady: validationSettled && configIssueCount === 0
     readonly property bool marketLive: swapBackend.ready
         && swapBackend.messagingConnected
         && configReady
@@ -58,6 +65,9 @@ Item {
         && swapBackend.messagingConnected
         && configReady
         && !swapBackend.running
+        // No accept while a fetch is in flight: a failing fetch would land
+        // in errorMessage mid-accept and be misread as an accept failure.
+        && !swapBackend.offersLoading
         && !accepting
 
     onMarketLiveChanged: {
@@ -85,9 +95,11 @@ Item {
         var nowSec = Math.floor(Date.now() / 1000)
         for (var j = 0; j < obj.offers.length; j++) {
             var o = obj.offers[j]
-            // Never surface offers that are already expired on arrival.
+            // Never surface offers that are already expired on arrival, nor
+            // malformed ones without a positive timelock — those would render
+            // permanently "expired" yet never satisfy sweep()'s prune guard.
             var expiry = Math.min(Number(o.lez_timelock || 0), Number(o.eth_timelock || 0))
-            if (expiry > 0 && nowSec >= expiry)
+            if (expiry <= 0 || nowSec >= expiry)
                 continue
             var key = offerKey(o)
             var exists = false
@@ -145,13 +157,17 @@ Item {
             if (r > best) best = r
         }
         board.bestRate = best
-        // Keep selection stable by key; fall back to the freshest offer
+        // Keep selection stable by key. Auto-select the freshest offer only
+        // when nothing was selected; if the selected offer was pruned, clear
+        // instead — silently swapping the detail pane (and an enabled Accept)
+        // to a different offer under the cursor invites a mis-click.
         var found = false
         for (var j = 0; j < offersModel.count; j++) {
             if (offersModel.get(j).key === board.selectedKey) { found = true; break }
         }
         if (!found)
-            board.selectedKey = offersModel.count > 0 ? offersModel.get(0).key : ""
+            board.selectedKey = (board.selectedKey === "" && offersModel.count > 0)
+                ? offersModel.get(0).key : ""
         board.modelRev++
     }
 
@@ -293,6 +309,38 @@ Item {
         onTriggered: {
             board.validationRequested = true
             swapBackend.validateConfig()
+            validationSettleFallback.start()
+        }
+    }
+
+    // Settles validation when the answer is "no errors": equal-value writes
+    // to validationErrorsJson emit no change signal, so a valid config would
+    // otherwise never flip validationSettled. The round-trip is local IPC
+    // (ms), so by 1.5s any error answer has long since landed.
+    Timer {
+        id: validationSettleFallback
+        interval: 1500
+        repeat: false
+        onTriggered: board.validationSettled = true
+    }
+
+    // Backstop for accept attempts that produce neither takerRunningChanged
+    // nor an errorMessage *change*: the host's startTaker early-returns
+    // silently when the replica's running state is stale, and repeated
+    // failures reuse identical error strings the replica setter won't
+    // re-emit. Without this, "Starting swap…" sticks forever and the
+    // !accepting guard halts offer polling for the session.
+    Timer {
+        id: acceptTimeout
+        interval: 20000
+        repeat: false
+        running: board.accepting
+        onTriggered: {
+            if (board.accepting && !swapBackend.takerRunning) {
+                board.accepting = false
+                board.acceptError = "The swap did not start. Check messaging and configuration, then try again."
+                takerView.acceptedOffer = null
+            }
         }
     }
 
@@ -314,6 +362,10 @@ Item {
 
         function onOffersFetched(offersJson) {
             board.mergeOffers(offersJson)
+        }
+
+        function onValidationErrorsJsonChanged() {
+            board.validationSettled = true
         }
 
         function onTakerRunningChanged() {
