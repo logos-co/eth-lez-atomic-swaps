@@ -1,0 +1,50 @@
+[package]
+name = "lez-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "MCP server exposing the LEZ public testnet (and the Sepolia EthHTLC) as typed agent tools"
+
+[[bin]]
+name = "lez-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# The app library — LezClient, EthHTLC sol types, config parsers. Pulling this
+# in transitively shares the workspace's single LEZ v0.2.0 pin.
+swap-orchestrator = { path = ".." }
+
+# LEZ crates — same tag as the workspace root (cargo unifies these with the
+# swap-orchestrator pins; a version bump is one coordinated edit).
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["host"] }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["client"] }
+sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["artifacts"] }
+authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+# Pinata (faucet) system account id — same repo, same tag.
+system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+
+# MCP server SDK (official Rust SDK; builds cleanly on the pinned Rust 1.93.0).
+rmcp = { version = "3.0.1", features = ["server", "transport-io"] }
+schemars = "1.0"
+
+# Ethereum (read-only Sepolia HTLC status).
+alloy = { version = "1", features = [
+    "provider-ws",
+    "contract",
+    "sol-types",
+    "network",
+    "rpc-types",
+] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+base58 = "0.2"
+url = "2"
+# CSPRNG for unforgeable, server-issued transfer preview tokens.
+getrandom = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
