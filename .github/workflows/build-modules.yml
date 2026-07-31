@@ -117,4 +117,8 @@ jobs:
           # Bare `nix build .#lgx-portable`, byte-for-byte the release command:
           # the PORTABLE bundle, not the dev one (`.#lgx`), which tags variants
           # with a "-dev" suffix Basecamp rejects.
-          nix build .#lgx-portable --print-out-paths --no-link
+          # --show-trace is diagnostics only — it changes error verbosity, not
+          # what gets built. Keep it: this stack evaluates through five layers
+          # of flakes, and the default four-frame trace is not enough to
+          # locate an evaluation failure from a log alone.
+          nix build .#lgx-portable --print-out-paths --no-link --show-trace
