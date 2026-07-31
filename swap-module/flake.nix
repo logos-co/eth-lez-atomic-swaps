@@ -4,8 +4,39 @@
   inputs = {
     logos-module-builder.url = "github:logos-co/logos-module-builder";
     nix-bundle-lgx.url = "github:logos-co/nix-bundle-lgx";
-    delivery_module.url = "github:logos-co/logos-delivery-module/v0.1.1";
+    delivery_module = {
+      url = "github:logos-co/logos-delivery-module/v0.1.1";
+      # crates.io answers HTTP 403 to the User-Agent nixpkgs' cargo vendor
+      # fetcher sends (`python-requests/*`; `curl/*` is blocked too — both
+      # measured, a custom UA gets 200). Upstream fixed it in
+      # NixOS/nixpkgs#512735 (2026-04-26) and later moved the download to
+      # static.crates.io; neither change was backported to release-25.05 or
+      # release-25.11.
+      #
+      # logos-delivery pins its OWN nixpkgs (`23d72dab`, release-25.11,
+      # 2026-02-07) outside this flake's follows graph, and that is the
+      # nixpkgs that vendors zerokit/rln — so every leg of every build died
+      # in `zerokit-0.9.0-vendor-staging` no matter what the rest of the
+      # graph did. This nested follows is the only lever a consumer has, and
+      # unlike `--override-input` it survives the bare `nix build
+      # .#lgx-portable` the shared release workflow runs.
+      #
+      # nixos-26.05 is the oldest *released* channel carrying the fix (a
+      # channel rev, not release-26.05 HEAD, so cache.nixos.org has the whole
+      # closure for cold CI runners). Verified locally that it keeps
+      # zerokit's committed `cargoHash = "sha256-WXxQ8mAPD/..."` valid: the
+      # 26.05 fetcher and a 23d72dab+User-Agent patch produce a
+      # byte-identical vendor-staging tree. Only the request changes.
+      #
+      # logos-delivery's own `zerokit.inputs.nixpkgs.follows = "nixpkgs"`
+      # carries this down to zerokit. Drop the whole thing once
+      # logos-messaging/logos-delivery advances its nixpkgs past 2026-04-26.
+      inputs.logos-delivery.inputs.nixpkgs.follows = "nixpkgs-crates-io";
+    };
     nixpkgs.follows = "logos-module-builder/nixpkgs";
+    # Used ONLY as the `follows` target above. Nothing in this flake's own
+    # outputs is built from it, so it does not move the module's toolchain.
+    nixpkgs-crates-io.url = "github:NixOS/nixpkgs/21ea275a7c46aef9d4d6ddc962e6d562e9d94183";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
