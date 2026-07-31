@@ -889,7 +889,7 @@ Item {
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
                                         font.bold: true
-                                        font.family: "Menlo, Courier New"
+                                        font.family: Theme.monoFont
                                     }
                                     Text {
                                         text: "⇄"
@@ -901,7 +901,7 @@ Item {
                                         text: board.weiToEth(model.ethAmountWei)
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
-                                        font.family: "Menlo, Courier New"
+                                        font.family: Theme.monoFont
                                         elide: Text.ElideRight
                                     }
                                 }
@@ -913,7 +913,7 @@ Item {
                                           + (offerRow.bestDeal ? " ★" : "")
                                     color: offerRow.bestDeal ? Theme.success : Theme.textSecondary
                                     font.pixelSize: Theme.fontSmall
-                                    font.family: "Menlo, Courier New"
+                                    font.family: Theme.monoFont
                                     font.bold: offerRow.bestDeal
                                 }
 
@@ -923,7 +923,7 @@ Item {
                                     text: board.shortHex(model.makerEth, 8, 4)
                                     color: Theme.textMuted
                                     font.pixelSize: 12
-                                    font.family: "Menlo, Courier New"
+                                    font.family: Theme.monoFont
                                     elide: Text.ElideRight
                                 }
 
@@ -937,7 +937,7 @@ Item {
                                     }
                                     color: Theme.textMuted
                                     font.pixelSize: 11
-                                    font.family: "Menlo, Courier New"
+                                    font.family: Theme.monoFont
                                 }
 
                                 // Expiry countdown
@@ -947,7 +947,7 @@ Item {
                                     text: board.fmtRemaining(offerRow.remain)
                                     color: board.rampColor(offerRow.remain)
                                     font.pixelSize: 11
-                                    font.family: "Menlo, Courier New"
+                                    font.family: Theme.monoFont
                                     font.strikeout: offerRow.remain <= 0
                                 }
                             }
@@ -1068,7 +1068,7 @@ Item {
                                     return best ? Theme.success : Theme.textMuted
                                 }
                                 font.pixelSize: Theme.fontSmall
-                                font.family: "Menlo, Courier New"
+                                font.family: Theme.monoFont
                             }
 
                             Rectangle {
@@ -1104,7 +1104,7 @@ Item {
                                                : Theme.textMuted
                                     }
                                     font.pixelSize: Theme.fontSmall
-                                    font.family: "Menlo, Courier New"
+                                    font.family: Theme.monoFont
                                 }
                             }
                             RowLayout {
@@ -1131,7 +1131,7 @@ Item {
                                                : Theme.textMuted
                                     }
                                     font.pixelSize: Theme.fontSmall
-                                    font.family: "Menlo, Courier New"
+                                    font.family: Theme.monoFont
                                 }
                             }
 
@@ -1268,7 +1268,7 @@ Item {
             text: parent.value !== "" ? parent.value : "—"
             color: Theme.textSecondary
             font.pixelSize: 11
-            font.family: "Menlo, Courier New"
+            font.family: Theme.monoFont
             elide: Text.ElideMiddle
         }
     }
