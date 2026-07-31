@@ -98,7 +98,7 @@
             version = "0.1.0";
 
             src = swapFfiSource;
-            cargoHash = "sha256-Xu7WL+0fdJBMGDby0frPQtawBH8Gb/pmj+JXHc5LGC8=";
+            cargoHash = "sha256-lADceazcOPwMkeBwUElibZ5oMPsLD1gIZdVGkGQfX0E=";
             # --no-default-features: the `demo` feature only adds the risc0
             # guest build (needs the rzup toolchain + a nested cargo build the
             # sandbox can't run) for the program-ID drift test. The canonical
