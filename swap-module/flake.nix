@@ -64,6 +64,92 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
+          # The same crates.io 403 the `delivery_module` input comment
+          # describes, on the *other* nixpkgs chain: swap-ffi is vendored by
+          # the nixpkgs this flake follows (`e9f00bd8`, 2025-09), which also
+          # predates NixOS/nixpkgs#512735, so
+          # `swap-ffi-0.1.0-vendor-staging` 403s on its first crate.
+          #
+          # Repinning is not an option here the way it is for logos-delivery:
+          # this nixpkgs is the module's entire Qt/C++ toolchain. So instead
+          # this is nixpkgs' `fetch-cargo-vendor.nix` re-expressed here, with
+          # its two helper scripts rebuilt from the pinned tree and one header
+          # line added to the fetching one. Only swap-ffi uses it; nixpkgs'
+          # own `rustPlatform` is untouched, so no other derivation in the
+          # graph moves and nothing loses its binary-cache hit. A request
+          # header cannot change the vendored tree, so `cargoDeps.hash` below
+          # is the same value a plain `cargoHash` takes.
+          #
+          # Deliberately re-expressed rather than generated with
+          # `builtins.toFile` from the original: a generated file has to embed
+          # `${nixpkgs}` store paths as text, and registering those as
+          # references made evaluation die with `path '…-source' is not valid`
+          # on CI's Determinate Nix (run 30618639995, all six legs) while
+          # evaluating clean on stock Nix. Reading the scripts with
+          # `builtins.readFile` keeps every store reference out of it.
+          #
+          # The substitution is asserted, so a nixpkgs bump that reshapes the
+          # fetcher fails evaluation loudly instead of silently going back to
+          # a 403. Delete all of this once logos-module-builder's nixpkgs
+          # carries the upstream fix (logos-co/logos-module-builder#173).
+          fetchCargoVendorUA =
+            let
+              rustBuildSupport = "${nixpkgs}/pkgs/build-support/rust";
+              subst = from: to: text:
+                let out = builtins.replaceStrings [ from ] [ to ] text; in
+                if out == text
+                then throw "swap-ffi: crates.io User-Agent workaround is stale — ${builtins.toJSON from} not found in nixpkgs' cargo vendor fetcher"
+                else out;
+              replaceWorkspaceValues = pkgs.writers.writePython3Bin "replace-workspace-values" {
+                libraries = with pkgs.python3Packages; [ tomli tomli-w ];
+                flakeIgnore = [ "E501" "W503" ];
+              } (builtins.readFile "${rustBuildSupport}/replace-workspace-values.py");
+              fetchCargoVendorUtil = pkgs.writers.writePython3Bin "fetch-cargo-vendor-util" {
+                libraries = with pkgs.python3Packages; [ requests ];
+                flakeIgnore = [ "E501" ];
+              } (subst
+                   "    session = requests.Session()\n"
+                   "    session = requests.Session()\n    session.headers[\"User-Agent\"] = \"nixpkgs-fetchCargoVendor/1 (https://github.com/NixOS/nixpkgs)\"\n"
+                   (builtins.readFile "${rustBuildSupport}/fetch-cargo-vendor-util.py"));
+            in
+            { name, hash, ... }@args:
+            let
+              vendorStaging = pkgs.stdenvNoCC.mkDerivation ({
+                name = "${name}-vendor-staging";
+
+                impureEnvVars = lib.fetchers.proxyImpureEnvVars;
+
+                nativeBuildInputs = [
+                  fetchCargoVendorUtil
+                  pkgs.cacert
+                  # break loop of nix-prefetch-git -> git-lfs -> asciidoctor ->
+                  # ruby (yjit) -> fetchCargoVendor -> nix-prefetch-git
+                  (pkgs.nix-prefetch-git.override { git-lfs = null; })
+                ];
+
+                buildPhase = ''
+                  runHook preBuild
+                  fetch-cargo-vendor-util create-vendor-staging ./Cargo.lock "$out"
+                  runHook postBuild
+                '';
+
+                strictDeps = true;
+                dontConfigure = true;
+                dontInstall = true;
+                dontFixup = true;
+
+                outputHash = hash;
+                outputHashMode = "recursive";
+              } // builtins.removeAttrs args [ "name" "hash" ]);
+            in
+            pkgs.runCommand "${name}-vendor"
+              {
+                inherit vendorStaging;
+                nativeBuildInputs = [ fetchCargoVendorUtil rustToolchain replaceWorkspaceValues ];
+              }
+              ''
+                fetch-cargo-vendor-util create-vendor "$vendorStaging" "$out"
+              '';
           # logos-blockchain-circuits prebuilt artifact. Version must match the
           # logos-blockchain-circuits-* crates in the workspace lock (v0.5.3 at
           # the LEZ v0.2.0 pin); their build scripts resolve it via
@@ -144,7 +230,25 @@
             version = "0.1.0";
 
             src = swapFfiSource;
-            cargoHash = "sha256-DePrHOfh7Ucu27FfPoQvn1Mu0StCtF6RcJJTEKqp2oA=";
+            # `cargoDeps` rather than `cargoHash` so vendoring goes through
+            # the User-Agent-carrying fetcher above.
+            #
+            # The value is the one master's `cargoHash` already carries.
+            # `cargoHash` covers only the fixed-output vendor-staging tree —
+            # the checksum-verified crate tarballs, git checkouts and
+            # Cargo.lock — so it tracks the lockfile, not the nixpkgs
+            # building it: measured cold twice, against e9f00bd8 and
+            # nixos-unstable 0954f7ee (10 months and two different drvPaths
+            # apart), and the `got:` was identical.
+            #
+            # Re-measure from a CLEAN checkout of the commit being pushed:
+            # `swap-source` is a `path:".."` input, so it silently vendors
+            # whatever lockfile happens to be on disk.
+            cargoDeps = fetchCargoVendorUA {
+              name = "swap-ffi-0.1.0";
+              src = swapFfiSource;
+              hash = "sha256-DePrHOfh7Ucu27FfPoQvn1Mu0StCtF6RcJJTEKqp2oA=";
+            };
             # --no-default-features: the `demo` feature only adds the risc0
             # guest build (needs the rzup toolchain + a nested cargo build the
             # sandbox can't run) for the program-ID drift test. The canonical
