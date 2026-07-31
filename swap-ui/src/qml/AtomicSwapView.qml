@@ -17,7 +17,7 @@ Item {
             background: Rectangle { color: Theme.surface }
 
             Repeater {
-                model: ["Config", "Maker", "Taker", "Refund"]
+                model: ["Market", "Config", "Maker", "Taker", "Refund"]
                 TabButton {
                     text: modelData
                     width: implicitWidth
@@ -186,9 +186,10 @@ Item {
             Layout.fillHeight: true
             currentIndex: tabBar.currentIndex
 
+            OfferBoard {}
             ConfigPanel {}
             MakerView {}
-            TakerView {}
+            TakerView { id: takerView }
             RefundView {}
         }
 
