@@ -277,9 +277,11 @@ ScrollView {
 
             // Results
             ResultCard {
+                role: "maker"
                 resultJson: swapBackend.makerResultJson
             }
             ResultCard {
+                role: "taker"
                 resultJson: swapBackend.takerResultJson
             }
         }
