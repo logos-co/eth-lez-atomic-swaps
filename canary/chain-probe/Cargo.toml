@@ -1,0 +1,33 @@
+# Standalone probe used by canary/leg-chain.sh. Kept OUT of the app workspace
+# (its own Cargo.lock) so it builds lean — no HTLC risc0 guest, no alloy — and
+# so the canary never perturbs the app's build. It pins the EXACT same v0.2.0
+# (a58fbce) LEZ deps as the app's Cargo.toml, so its client speaks the same
+# wire/program-id version as the app and the deployed testnet.
+# Empty [workspace] keeps this crate OUT of the app's Cargo workspace so the
+# app build never sees it (and vice-versa) — the probe is a standalone tool.
+[workspace]
+
+[package]
+name = "canary-chain-probe"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "canary-chain-probe"
+path = "src/main.rs"
+
+[dependencies]
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["host"] }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["client"] }
+sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["artifacts"] }
+authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+vault_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+serde = "1"
+url = "2"
+hex = "0.4"
+rand = "0.8"

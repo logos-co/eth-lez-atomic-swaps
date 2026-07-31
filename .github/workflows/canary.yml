@@ -1,0 +1,153 @@
+name: golden-path-canary
+
+# The golden-path canary continuously replays the real builder journey and
+# turns each stage into an assertion (see canary/README.md). A failing leg is an
+# ECOSYSTEM SIGNAL, not necessarily a canary bug — the chain leg is expected to
+# report a RED light today (logos-blockchain/logos-execution-zone#640).
+on:
+  schedule:
+    - cron: "0 7 * * *"   # nightly, 07:00 UTC
+  workflow_dispatch:
+    inputs:
+      run_localnet_legs:
+        description: "Also run the localnet legs (chain, swap). Slow: builds the LEZ v0.2.0 toolchain. Best on a self-hosted runner with a warm .scaffold — see TODO in this file."
+        type: boolean
+        default: false
+
+concurrency:
+  group: canary-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege: the canary only reads the repo and uploads artifacts (which
+# needs no extra scope). No writes to contents, PRs, issues, etc.
+permissions:
+  contents: read
+
+jobs:
+  # --- Cheap, portable, always-on: the release catalog chain -----------------
+  catalog:
+    name: catalog (live release chain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run catalog leg
+        env:
+          CANARY_STATUS_JSON: ${{ github.workspace }}/canary-status-catalog.json
+        run: bash canary/run-all.sh catalog
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-status-catalog
+          path: canary-status-catalog.json
+
+  # --- Module builds: darwin-arm64 ONLY --------------------------------------
+  # swap-module/swap-ui only have real pinned hashes for aarch64-darwin
+  # (other systems fall back to fakeSha256 — see swap-module/flake.nix, issue
+  # #32), so `nix build .#lgx-portable` genuinely only runs on macOS arm64.
+  modules:
+    name: modules (nix lgx-portable, darwin-arm64)
+    runs-on: macos-latest   # GitHub's macos-latest is Apple-silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main   # aggressive nix store cache
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run modules leg
+        env:
+          CANARY_STATUS_JSON: ${{ github.workspace }}/canary-status-modules.json
+        run: bash canary/run-all.sh modules
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-status-modules
+          path: canary-status-modules.json
+
+  # --- Localnet legs: chain (#640 red light) + full two-peer swap ------------
+  # HONEST FEASIBILITY NOTE (see PR body + canary/README.md):
+  #   * The chain-probe CLIENT is pure Rust on the v0.2.0 deps and builds on
+  #     Linux OR macOS with a warm cargo cache in a few minutes.
+  #   * But BOOTING a localnet needs the `sequencer_service` binary built from
+  #     the logos-execution-zone v0.2.0 repo (a 20–30 min cold Rust build; the
+  #     risc0 guest ELFs are checked in so there's no guest compile, but it is
+  #     still heavy). The swap leg additionally needs risc0 + Anvil and the app's
+  #     `--features demo` HTLC guest build.
+  #   * GitHub-hosted runners are ephemeral: a cold toolchain build every night
+  #     is wasteful and flaky. These legs really want a SELF-HOSTED runner that
+  #     keeps `.scaffold/lez-cache` warm (or a prebuilt sequencer_service the
+  #     canary can reuse — canary/lib/localnet.sh already supports both).
+  #
+  # TODO(self-hosted): move this job to `runs-on: [self-hosted, macos, arm64]`
+  # with a persistent .scaffold cache, then flip it on by default. Until then it
+  # is opt-in via workflow_dispatch and does not gate the canary.
+  localnet-legs:
+    name: localnet legs (chain + swap) [opt-in]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_localnet_legs }}
+    runs-on: macos-latest
+    # NOTE: no job-level continue-on-error. That would swallow real failures
+    # (fail=20, broken=30) alongside the one exit code we mean to tolerate (a
+    # RED light, exit 10). The run step below special-cases ONLY exit 10 and
+    # propagates every other nonzero, so a broken canary still turns the job red.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            canary/chain-probe
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bring up the LEZ toolchain (slow; cached where possible)
+        run: make setup
+      - name: Run chain + swap legs (boot a throwaway localnet)
+        env:
+          CANARY_START_LOCALNET: "1"
+          CANARY_TARGET_DIR: /tmp/canary-target
+          CANARY_STATUS_JSON: ${{ github.workspace }}/canary-status-localnet.json
+        # Exit 10 is the EXPECTED ecosystem red light (e.g. #640): record it as a
+        # notice and let the step (and job) succeed. Every other nonzero — 20
+        # (fail) and 30 (broken) especially — must propagate so a genuinely
+        # untrustworthy canary run turns the job red.
+        run: |
+          set +e
+          bash canary/run-all.sh chain swap
+          rc=$?
+          if [ "$rc" -eq 10 ]; then
+            echo "::notice title=Canary red light::A leg reported the expected ecosystem RED light (exit 10, e.g. logos-execution-zone#640). Not failing the workflow."
+            exit 0
+          fi
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-status-localnet
+          path: canary-status-localnet.json
+
+  # --- Roll the per-job artifacts into one job summary -----------------------
+  summary:
+    name: canary summary
+    runs-on: ubuntu-latest
+    # Include localnet-legs so its results are summarized when the opt-in
+    # dispatch runs it. `if: always()` keeps the summary running even when that
+    # job is skipped (default schedule) or a leg turns the job red.
+    needs: [catalog, modules, localnet-legs]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: canary-artifacts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Combine into job summary
+        run: python3 canary/summarize.py canary-artifacts >> "$GITHUB_STEP_SUMMARY"

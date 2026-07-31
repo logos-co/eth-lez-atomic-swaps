@@ -50,7 +50,13 @@ seed_default_wallet() {
     echo "scaffold-setup: could not seed a default wallet account (wallet list returned none)" >&2
     return 1
   fi
-  logos-scaffold wallet default set "$addr"
+  # No `set -e` here, so an unchecked failure would be masked by the echo below
+  # and leave wallet.state without a default_address — silently breaking
+  # `lgs run`'s topup step later. Propagate it explicitly.
+  if ! logos-scaffold wallet default set "$addr"; then
+    echo "scaffold-setup: FAILED to set default wallet address ${addr} — 'lgs run' topup will have no default_address; inspect the wallet at ${LEE_WALLET_HOME_DIR}" >&2
+    return 1
+  fi
   echo "scaffold-setup: seeded default wallet address ${addr} (v0.2.0 seeding bridge)"
 }
 

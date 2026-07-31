@@ -1,0 +1,135 @@
+# Golden-path canary (stage 1: in-repo)
+
+A continuously-run pipeline that replays the **real builder journey** on the LEZ
+↔ ETH atomic-swaps stack and turns each stage into an assertion. It is the
+smoke alarm for the whole golden path: boot a localnet → prove a valid tx
+reaches finality → prove a deliberately-invalid tx is loudly rejected → build
+the shippable modules → verify the live release catalog → (on macOS) confirm the
+module install artifact.
+
+> **Stage 1** lives inside `logos-co/eth-lez-atomic-swaps` on purpose: zero new
+> repos, zero new permissions. It graduates to its own repo later (see
+> [Graduation plan](#graduation-plan)).
+
+## The legs
+
+Each leg is a self-contained script under `canary/` that emits exactly one
+machine-readable result line:
+
+```
+CANARY_RESULT {"leg":"chain","status":"red","evidence":"…","duration_s":42}
+```
+
+| Leg | Script | What it proves | Cost / platform |
+|-----|--------|----------------|-----------------|
+| **chain** | `leg-chain.sh` | On a LEZ localnet: a **valid** typed transfer is accepted, included, and (funded) actually moves balance; and a **deliberately-invalid** `bare-u128` transfer is **loudly rejected**. | localnet + v0.2.0 toolchain |
+| **swap** | `leg-swap.sh` | The full **two-peer atomic swap** completes: both peers report `Completed` with the **same preimage** (the atomicity invariant). Wraps `make demo`. | heaviest: localnet + risc0 + Anvil |
+| **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64 only** (see below) |
+| **catalog** | `leg-catalog.sh` | The **live** release catalog chain is intact: `logos-repo.json → index.json →` each `.lgx` asset URL, with names/versions cross-checked against each module's `metadata.json`. | cheap, network-only, any OS |
+
+Run them all (or a subset) with the orchestrator, which prints a summary table
+and writes a status JSON:
+
+```sh
+canary/run-all.sh                 # all legs
+canary/run-all.sh catalog modules # the cheap+fast subset
+```
+
+## Red-light policy — a failing leg is a *signal*, not a canary bug
+
+The canary is **born with a legitimate red light.** The chain leg asserts that a
+malformed instruction is *loudly rejected*; today the LEZ v0.2.0 sequencer
+**silently accepts and drops it**
+([logos-blockchain/logos-execution-zone#640](https://github.com/logos-blockchain/logos-execution-zone/issues/640)).
+That assertion fails **on purpose** — it is the canary doing its job, surfacing a
+real upstream bug the atomic-swaps team lost hours to during the v0.2.0
+migration (fixed on our side in commit `df93c67` by switching to the typed
+`authenticated_transfer_core::Instruction::Transfer { amount }`).
+
+So the exit codes distinguish **"the ecosystem changed"** from **"the canary
+broke"**:
+
+| Status | Exit | Meaning | CI treatment |
+|--------|------|---------|--------------|
+| `pass` | 0 | The leg proved its property. | green |
+| `red` | 10 | An **expected ecosystem red light** — a known upstream bug reproduced (e.g. #640). | surfaced, **not** a hard failure |
+| `fail` | 20 | The assertion failed **unexpectedly** — a real regression to investigate. | fail |
+| `broken` | 30 | The canary **could not run** the check (no localnet, missing toolchain, network down). | fix the canary/infra |
+
+`run-all.sh` exits with the worst severity seen. A `red` light must never page
+someone as if it were `broken` or `fail`: when #640 is fixed upstream, the chain
+leg flips to `pass` and the canary tells you the golden path got *better*.
+
+## Running the chain leg locally (the money shot)
+
+The chain leg's heavy lifting is `canary/chain-probe`, a standalone Rust binary
+pinned to the **same v0.2.0 (`a58fbce`) LEZ deps** as the app, so its client
+speaks the same wire/program-id version as the sequencer and the public testnet.
+It:
+
+1. checks sequencer health and **program-id compatibility** (client v0.2.0 vs the
+   running sequencer's pin — a mismatch means the localnet is a different LEZ
+   version and the experiment would be confounded, so it reports `broken`);
+2. funds two debug-genesis accounts from the vault and initializes them under
+   `authenticated_transfer`;
+3. submits a **valid** typed transfer → asserts accepted + included + balance
+   moved;
+4. submits the **`bare-u128`** transfer (#640's exact payload) → asserts it is
+   loudly rejected.
+
+Point it at any running localnet:
+
+```sh
+# fastest path: reuse a prebuilt sequencer_service + the checked-in debug config
+CANARY_START_LOCALNET=1 canary/run-all.sh chain
+# or target an already-running sequencer:
+CANARY_LEZ_RPC=http://127.0.0.1:3040 canary/run-all.sh chain
+```
+
+`canary/lib/localnet.sh` boots a **throwaway** localnet without touching any
+developer's `.scaffold` state: it runs a prebuilt `sequencer_service` (found via
+`$CANARY_SEQ_BIN`, a sibling scaffold cache, or this repo's own cache) against
+the checked-in debug genesis config in a fresh `/tmp` home, in `RISC0_DEV_MODE`,
+on a free port. If no prebuilt binary exists it falls back to
+`logos-scaffold localnet start` (canonical, but requires the full toolchain).
+
+## CI
+
+`.github/workflows/canary.yml` — nightly cron + `workflow_dispatch`:
+
+- **`catalog`** on `ubuntu-latest`: cheap, portable, always on.
+- **`modules`** on `macos-latest` (Apple-silicon): `nix build .#lgx-portable`.
+  This is **genuinely darwin-arm64-bound** — `swap-module`/`swap-ui` only carry
+  real pinned hashes for `aarch64-darwin` (other systems fall back to
+  `fakeSha256`; see `swap-module/flake.nix` and issue #32).
+- **`localnet-legs`** (chain + swap): **opt-in** via `workflow_dispatch`, and
+  `continue-on-error`. Honest reason: booting a localnet needs the
+  `sequencer_service` binary built from the LEZ v0.2.0 repo (a 20–30 min cold
+  Rust build), and the swap leg also needs risc0 + Anvil + the app's HTLC guest.
+  GitHub-hosted runners are ephemeral, so a cold toolchain build every night is
+  wasteful and flaky. **TODO(self-hosted):** move this job to a self-hosted
+  `[macos, arm64]` runner that keeps `.scaffold/lez-cache` warm (or ships a
+  prebuilt `sequencer_service` the canary reuses — `lib/localnet.sh` already
+  supports both), then enable it by default.
+
+All jobs cache aggressively (magic-nix-cache for the nix store, `rust-cache` for
+cargo) and upload a `canary-status-*.json` artifact; a final `summary` job rolls
+them into one job-summary table via `canary/summarize.py`.
+
+## Graduation plan
+
+Stage 1 proves the concept in-repo. Next:
+
+1. **Own repo** (`logos-co/golden-path-canary`): move `canary/` out, keep the
+   `chain-probe` crate, add the app + toolchain as pinned inputs. The legs are
+   already repo-relative and status-JSON-driven, so the lift is mechanical.
+2. **Release-gate wiring**: make the `catalog` + `modules` legs a required check
+   before publishing a new `.lgx` release — the canary becomes the gate that
+   stops a broken catalog or unbuildable module from shipping.
+3. **Self-hosted runner** with a warm `.scaffold` so the localnet legs run
+   nightly by default (see the CI TODO above).
+4. **Discord webhook** — **TODO (needs a secret).** On a status *transition*
+   (e.g. chain leg `red → pass` when #640 lands, or any leg → `fail`/`broken`),
+   POST the summary table to a Discord channel. Requires a `DISCORD_WEBHOOK_URL`
+   repo/org secret; left as a documented TODO so no secret is invented here. The
+   status JSON already carries everything the webhook payload needs.
