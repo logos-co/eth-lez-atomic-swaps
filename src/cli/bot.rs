@@ -474,42 +474,79 @@ fn classify_wedge_reread(
     }
 }
 
-/// What reconciliation does with a journal entry whose escrow reads
-/// conclusively ABSENT (every bounded read was `None`) — decided by the journal
-/// STAGE (P2-2). Pure so the PreLock-retire vs Funded-retain decision is
-/// unit-testable without a live sequencer.
+/// What reconciliation does with a journal entry whose escrow reads absent on
+/// every bounded read — decided by the journal STAGE (P2-2) and by whether the
+/// absence was AUTHORITATIVE (round 6): only `Ok(None)` reads (the sequencer
+/// answered and reported no account) are authoritative; an `Err` read (RPC
+/// outage) says nothing about the escrow. Pure so the decision is unit-testable
+/// without a live sequencer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AbsentEscrowAction {
-    /// `PreLock` entry + no escrow ever appeared ⇒ the LEZ lock failed
-    /// pre-commit; nothing was ever locked. RETIRE it (tombstone into quarantine
-    /// with `pre-lock-abandoned`) so it stops wedging startup — but never reuse
-    /// the hashlock/secret.
+    /// `PreLock` entry + every read was an authoritative `Ok(None)` ⇒ the LEZ
+    /// lock failed pre-commit; nothing was ever locked. RETIRE it (tombstone
+    /// into quarantine with `pre-lock-abandoned`) so it stops wedging startup —
+    /// but never reuse the hashlock/secret.
     RetirePreLock,
     /// `Funded` entry ⇒ an escrow DID exist on-chain; an all-`None` read is an
     /// ambiguous phantom/short read (the LEZ HTLC program never deletes an
     /// account). RETAIN and retry so locked LEZ is never stranded.
     RetainFunded,
+    /// At least one read attempt ERRORED (sequencer unreachable), so the
+    /// all-absent result is an outage artifact, not authoritative absence.
+    /// RETAIN regardless of stage (round-6 P2): a `PreLock` entry whose lock
+    /// DID commit (crash before `mark_funded` persisted) would otherwise be
+    /// retired during an outage, nobody would watch the funded escrow, and the
+    /// taker's claim would reveal the preimage with no maker ETH claim —
+    /// fund loss. The genuinely never-locked entry still retires on the next
+    /// reconcile once the sequencer is reachable and reports absence.
+    RetainInconclusive,
 }
 
-/// Classify a conclusively-absent escrow read by journal stage (P2-2).
-fn classify_absent_escrow(stage: SwapStage) -> AbsentEscrowAction {
+/// Classify an all-absent escrow read by journal stage and read conclusiveness
+/// (P2-2, round 6).
+fn classify_absent_escrow(stage: SwapStage, any_read_errored: bool) -> AbsentEscrowAction {
+    if any_read_errored {
+        return AbsentEscrowAction::RetainInconclusive;
+    }
     match stage {
         SwapStage::PreLock => AbsentEscrowAction::RetirePreLock,
         SwapStage::Funded => AbsentEscrowAction::RetainFunded,
     }
 }
 
+/// Outcome of a bounded escrow read (round 6): the escrow, if any read
+/// succeeded, plus enough about the failed attempts for the caller to tell an
+/// AUTHORITATIVE all-absent result (every read `Ok(None)` — the sequencer
+/// answered and reported no account) apart from an outage-tainted one (some
+/// read `Err` — the sequencer may simply have been unreachable).
+#[derive(Debug)]
+struct BoundedEscrowRead {
+    /// The escrow from the first conclusive read, or `None` when every read
+    /// was absent/errored.
+    escrow: Option<HTLCEscrow>,
+    /// `true` iff at least one read attempt returned `Err`. When `escrow` is
+    /// `None` and this is set, the absence is NOT authoritative and the caller
+    /// must RETAIN the journal entry.
+    any_err: bool,
+    /// Number of authoritative `Ok(None)` reads observed (for operator-facing
+    /// messages).
+    absent_reads: u32,
+}
+
 /// Re-read an escrow up to a bounded number of times, tolerating ambiguous
 /// reads (P1-2, principle i). `get_escrow` returns `Ok(None)` for
 /// missing/short/phantom data — which is NOT conclusive absence (the LEZ HTLC
 /// program never deletes an account; refund leaves it `Refunded` with intact
-/// data). A transient sequencer error is equally ambiguous. Returns:
+/// data). A transient sequencer error is equally ambiguous. Returns a
+/// [`BoundedEscrowRead`] whose `escrow` is:
 /// - `Some(escrow)` on the first conclusive read of an existing escrow.
 /// - `None` only when EVERY read was absent/errored — the caller must RETAIN the
 ///   journal entry, never drop it (a phantom/short read while the escrow exists
-///   would otherwise strand locked LEZ). A never-locked entry that reads `None`
-///   forever costs only a redundant idempotent reconcile each restart.
-async fn read_escrow_bounded(lez: &LezClient, hashlock: &[u8; 32]) -> Option<HTLCEscrow> {
+///   would otherwise strand locked LEZ), UNLESS every read was an authoritative
+///   `Ok(None)` (`any_err == false`) AND the caller's own state says nothing was
+///   ever locked (the `PreLock` retire path). A never-locked entry that reads
+///   `None` forever costs only a redundant idempotent reconcile each restart.
+async fn read_escrow_bounded(lez: &LezClient, hashlock: &[u8; 32]) -> BoundedEscrowRead {
     let hl = *hashlock;
     read_escrow_bounded_with(|| lez.get_escrow(&hl), lez.poll_interval(), hashlock).await
 }
@@ -521,22 +558,32 @@ async fn read_escrow_bounded_with<F, Fut>(
     mut fetch: F,
     poll: std::time::Duration,
     hashlock: &[u8; 32],
-) -> Option<HTLCEscrow>
+) -> BoundedEscrowRead
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Option<HTLCEscrow>>>,
 {
     const MAX_READS: u32 = 5;
+    let mut any_err = false;
+    let mut absent_reads = 0u32;
     for attempt in 1..=MAX_READS {
         match fetch().await {
-            Ok(Some(escrow)) => return Some(escrow),
+            Ok(Some(escrow)) => {
+                return BoundedEscrowRead {
+                    escrow: Some(escrow),
+                    any_err,
+                    absent_reads,
+                }
+            }
             Ok(None) => {
+                absent_reads += 1;
                 debug!(
                     hashlock = %hex::encode(hashlock),
                     "reconcile: escrow read absent ({attempt}/{MAX_READS}) — ambiguous, retrying"
                 );
             }
             Err(e) => {
+                any_err = true;
                 warn!(
                     hashlock = %hex::encode(hashlock),
                     "reconcile: escrow read error ({attempt}/{MAX_READS}): {e} — retrying"
@@ -547,7 +594,11 @@ where
             tokio::time::sleep(poll).await;
         }
     }
-    None
+    BoundedEscrowRead {
+        escrow: None,
+        any_err,
+        absent_reads,
+    }
 }
 
 /// Highest escrow-PDA balance observed across bounded re-reads, short-circuiting
@@ -837,7 +888,8 @@ pub async fn reconcile(
             continue;
         };
 
-        match read_escrow_bounded(&lez_client, &hashlock).await {
+        let bounded_read = read_escrow_bounded(&lez_client, &hashlock).await;
+        match bounded_read.escrow {
             Some(escrow) => {
                 // P2-2: an on-chain escrow exists for this hashlock, so the lock
                 // DID commit. If the entry is still `PreLock` (crash between the
@@ -908,14 +960,14 @@ pub async fn reconcile(
                         // balance closes that hole. If the taker claimed, recover
                         // the ETH; quarantine only if BOTH state reads are still
                         // Locked and the escrow is still underfunded.
-                        let pre = read_escrow_bounded(&lez_client, &hashlock).await;
+                        let pre = read_escrow_bounded(&lez_client, &hashlock).await.escrow;
                         let pre_state = pre.as_ref().map(|e| e.state);
                         let pre_amount = pre.as_ref().map_or(escrow.amount, |e| e.amount);
                         let pre_timelock = pre.as_ref().map_or(escrow.timelock, |e| e.timelock);
                         let fresh_balance =
                             max_escrow_balance(&lez_client, &pda, pre_amount).await;
                         // FINAL state read AFTER the balance observation.
-                        let post = read_escrow_bounded(&lez_client, &hashlock).await;
+                        let post = read_escrow_bounded(&lez_client, &hashlock).await.escrow;
                         let post_state = post.as_ref().map(|e| e.state);
                         let fresh_amount = post.as_ref().map_or(pre_amount, |e| e.amount);
                         let fresh_timelock = post.as_ref().map_or(pre_timelock, |e| e.timelock);
@@ -1020,29 +1072,53 @@ pub async fn reconcile(
             }
             None => {
                 // Every read was absent/errored after bounded retries. What this
-                // means depends on the journal STAGE (P2-2):
-                match classify_absent_escrow(entry.stage) {
+                // means depends on the journal STAGE (P2-2) and on whether the
+                // absence was AUTHORITATIVE (round 6): an errored read means the
+                // sequencer may have been unreachable, so an all-None result is
+                // an outage artifact, never grounds to retire.
+                match classify_absent_escrow(entry.stage, bounded_read.any_err) {
                     AbsentEscrowAction::RetirePreLock => {
-                    // The entry was written just BEFORE the lock and the lock
-                    // never produced an on-chain escrow — the lock failed
-                    // pre-commit (RPC failure/rejection). Nothing was ever locked,
-                    // so no funds are at risk; but a `Funded`-style retain would
-                    // keep an all-None entry forever and wedge sequential startup
-                    // on every restart. RETIRE it. Per the no-secret-reuse rule it
-                    // is tombstoned into quarantine (not silently deleted) so the
-                    // operator can see the hashlock must not be reused.
+                    // The entry was written just BEFORE the lock, and every read
+                    // was an authoritative `Ok(None)`: the sequencer answered and
+                    // reported no escrow account, so the lock most plausibly
+                    // failed pre-commit (RPC failure/rejection). A `Funded`-style
+                    // retain would keep an all-None entry forever and wedge
+                    // sequential startup on every restart. RETIRE it. Per the
+                    // no-secret-reuse rule it is tombstoned into quarantine (not
+                    // silently deleted) so the operator can see the hashlock must
+                    // not be reused.
                     warn!(
                         hashlock = %entry.hashlock,
-                        "reconcile: PreLock entry with no on-chain escrow after retries — lock never \
-                         committed; retiring (pre-lock-abandoned). Nothing was locked, but do NOT \
-                         reuse the hashlock/secret."
+                        "reconcile: PreLock entry — no escrow observed on the sequencer ({n} \
+                         authoritative absent reads, no errors); retiring (pre-lock-abandoned). \
+                         Do NOT reuse the hashlock/secret.",
+                        n = bounded_read.absent_reads,
                     );
                     store.quarantine(
                         &entry.hashlock,
-                        "pre-lock-abandoned: journaled PreLock but no on-chain escrow ever appeared \
-                         (LEZ lock failed before commit). No funds locked; hashlock retired and must \
-                         NOT be reused."
-                            .to_string(),
+                        format!(
+                            "pre-lock-abandoned: journaled PreLock but no escrow observed on the \
+                             sequencer ({} authoritative absent reads, no read errors); hashlock \
+                             retired and must NOT be reused.",
+                            bounded_read.absent_reads
+                        ),
+                    );
+                    }
+                    AbsentEscrowAction::RetainInconclusive => {
+                    // Round-6 P2: at least one read ERRORED, so absence is not
+                    // authoritative — this may be a sequencer outage while a
+                    // committed lock sits on-chain (crash between the lock and
+                    // the `mark_funded` journal upgrade). Retiring here would
+                    // leave that funded escrow unwatched: the taker claims LEZ
+                    // (revealing the preimage) and the maker never claims the
+                    // ETH. Retain and retry; a genuinely never-locked entry
+                    // still retires once the sequencer is reachable and
+                    // authoritatively reports absence.
+                    warn!(
+                        hashlock = %entry.hashlock,
+                        stage = ?entry.stage,
+                        "reconcile: escrow read absent but at least one read errored (LEZ \
+                         outage?) — absence not authoritative; retaining for next reconcile"
                     );
                     }
                     AbsentEscrowAction::RetainFunded => {
@@ -1477,8 +1553,16 @@ mod tests {
         )
         .await;
         assert!(
-            result.is_none(),
+            result.escrow.is_none(),
             "all-ambiguous reads must return None (retain)"
+        );
+        assert!(
+            !result.any_err,
+            "all-`Ok(None)` reads carry no error taint — absence is authoritative"
+        );
+        assert_eq!(
+            result.absent_reads, 5,
+            "every authoritative absent read is counted"
         );
         assert_eq!(
             calls.load(Ordering::Relaxed),
@@ -1504,8 +1588,99 @@ mod tests {
             &[0xABu8; 32],
         )
         .await;
-        assert!(result.is_some(), "a conclusive read after retries must win");
+        assert!(
+            result.escrow.is_some(),
+            "a conclusive read after retries must win"
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    // Round-6 P2: the bounded reader must distinguish an RPC outage (`Err`)
+    // from authoritative absence (`Ok(None)`) — an all-errored or mixed result
+    // carries `any_err = true` so the caller RETAINS a PreLock entry instead of
+    // retiring it while a committed lock may sit unwatched on-chain.
+    #[tokio::test(start_paused = true)]
+    async fn all_errored_reads_are_not_authoritative_absence() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // (a) EVERY read errors (sequencer unreachable) → escrow None, but
+        // `any_err` is set: absence is an outage artifact, PreLock is RETAINED.
+        let calls = AtomicU32::new(0);
+        let result = read_escrow_bounded_with(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Err(SwapError::LezSequencer("outage".into())) }
+            },
+            std::time::Duration::from_millis(10),
+            &[0xABu8; 32],
+        )
+        .await;
+        assert!(result.escrow.is_none());
+        assert!(result.any_err, "errored reads must taint the result");
+        assert_eq!(result.absent_reads, 0, "no authoritative absent read seen");
+        assert_eq!(calls.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            classify_absent_escrow(SwapStage::PreLock, result.any_err),
+            AbsentEscrowAction::RetainInconclusive,
+            "all-errored PreLock must be retained, never retired"
+        );
+
+        // (b) mixed Err + Ok(None) → still tainted; PreLock is RETAINED.
+        let calls = AtomicU32::new(0);
+        let result = read_escrow_bounded_with(
+            || {
+                let n = calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if n % 2 == 0 {
+                        Err(SwapError::LezSequencer("transient".into()))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            },
+            std::time::Duration::from_millis(10),
+            &[0xABu8; 32],
+        )
+        .await;
+        assert!(result.escrow.is_none());
+        assert!(
+            result.any_err,
+            "one errored read is enough to make absence inconclusive"
+        );
+        assert_eq!(result.absent_reads, 2);
+        assert_eq!(
+            classify_absent_escrow(SwapStage::PreLock, result.any_err),
+            AbsentEscrowAction::RetainInconclusive,
+            "mixed err+absent PreLock must be retained, never retired"
+        );
+    }
+
+    // Round-6 P2 (wedge fix preserved): when EVERY read is an authoritative
+    // `Ok(None)` — the sequencer answered and reported no account — a PreLock
+    // entry IS retired, so a genuinely never-locked entry cannot wedge
+    // sequential startup forever.
+    #[tokio::test(start_paused = true)]
+    async fn all_authoritative_absent_prelock_is_retired() {
+        let result = read_escrow_bounded_with(
+            || async { Ok(None) },
+            std::time::Duration::from_millis(10),
+            &[0xABu8; 32],
+        )
+        .await;
+        assert!(result.escrow.is_none());
+        assert!(!result.any_err);
+        assert_eq!(result.absent_reads, 5);
+        assert_eq!(
+            classify_absent_escrow(SwapStage::PreLock, result.any_err),
+            AbsentEscrowAction::RetirePreLock,
+            "authoritative all-absent PreLock retires — the startup-wedge fix is preserved"
+        );
+        // A Funded entry stays retained even on authoritative absence (phantom
+        // reads; the program never deletes accounts).
+        assert_eq!(
+            classify_absent_escrow(SwapStage::Funded, result.any_err),
+            AbsentEscrowAction::RetainFunded
+        );
     }
 
     // P1-4: the partial-lock wedge predicate — an EXPIRED Locked escrow with
@@ -1723,20 +1898,30 @@ mod tests {
         );
     }
 
-    // P2-2: a conclusively-absent escrow read is retired vs retained purely by
-    // journal stage — a PreLock entry (lock never committed) is retired, a Funded
-    // entry (escrow existed, read phantom) is retained.
+    // P2-2 / round 6: an all-absent escrow read is retired vs retained by
+    // journal stage AND conclusiveness — a PreLock entry retires only on
+    // authoritative absence (no errored reads); any errored read retains
+    // regardless of stage; a Funded entry is always retained.
     #[test]
     fn classify_absent_escrow_by_stage() {
         assert_eq!(
-            classify_absent_escrow(SwapStage::PreLock),
+            classify_absent_escrow(SwapStage::PreLock, false),
             AbsentEscrowAction::RetirePreLock,
-            "a PreLock entry with no on-chain escrow was never locked — retire it"
+            "a PreLock entry with authoritatively-absent escrow was never locked — retire it"
         );
         assert_eq!(
-            classify_absent_escrow(SwapStage::Funded),
+            classify_absent_escrow(SwapStage::Funded, false),
             AbsentEscrowAction::RetainFunded,
             "a Funded entry that reads absent is an ambiguous phantom read — retain it"
+        );
+        assert_eq!(
+            classify_absent_escrow(SwapStage::PreLock, true),
+            AbsentEscrowAction::RetainInconclusive,
+            "an errored read makes absence outage-ambiguous — retain even a PreLock entry"
+        );
+        assert_eq!(
+            classify_absent_escrow(SwapStage::Funded, true),
+            AbsentEscrowAction::RetainInconclusive,
         );
     }
 
@@ -1786,7 +1971,7 @@ mod tests {
                 stage: SwapStage::PreLock,
             })
             .unwrap();
-        assert_eq!(classify_absent_escrow(store.snapshot()[0].stage), AbsentEscrowAction::RetirePreLock);
+        assert_eq!(classify_absent_escrow(store.snapshot()[0].stage, false), AbsentEscrowAction::RetirePreLock);
         // The retire path: tombstone into quarantine (never a silent delete).
         store.quarantine(&hl, "pre-lock-abandoned: no escrow ever appeared".into());
         assert!(!store.has_in_flight(), "retired entry leaves in_flight — startup unwedged");
@@ -1816,7 +2001,7 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].stage, SwapStage::Funded, "missing stage defaults to Funded");
         assert_eq!(
-            classify_absent_escrow(snap[0].stage),
+            classify_absent_escrow(snap[0].stage, false),
             AbsentEscrowAction::RetainFunded
         );
         let _ = std::fs::remove_file(&path);
