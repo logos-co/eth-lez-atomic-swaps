@@ -636,6 +636,42 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
 static MAKER_LOOP_CANCEL: AtomicBool = AtomicBool::new(false);
 
+/// Resolve where the maker loop's crash-recovery journal lives.
+///
+/// The CLI's `MAKER_STATE_FILE` env knob wins; otherwise the journal is
+/// persisted under the module's LEZ wallet home (the per-module storage
+/// directory the FFI config carries in wallet-auth mode). Raw-key auth with no
+/// explicit path is REFUSED rather than defaulted to the CLI's CWD-relative
+/// `.maker-state.json`: a ui-host's working directory is not stable across
+/// launch methods (Finder launches at `/`, launchers vary), so a CWD-relative
+/// journal written before a crash may resolve to a different directory on the
+/// next launch — reconcile would then see an empty journal, stranding the
+/// locked LEZ, and the 256-block replay watcher could rematch the still-OPEN
+/// ETH lock with an empty journal-skip belt (double-fund). A journal that can
+/// silently go missing voids the crash-recovery guarantee (PR #40), so the
+/// loop must not start with one.
+fn resolve_maker_state_file(
+    env_state_file: Option<&str>,
+    lez_auth: &LezAuth,
+) -> std::result::Result<std::path::PathBuf, String> {
+    if let Some(p) = env_state_file
+        && !p.trim().is_empty()
+    {
+        return Ok(p.into());
+    }
+    match lez_auth {
+        LezAuth::Wallet { home, .. } => Ok(home.join(".maker-state.json")),
+        LezAuth::RawKey(_) => Err(
+            "maker loop requires a stable crash-recovery journal location, but raw-key auth \
+             has no wallet home and the process working directory is not stable across \
+             launches. Either set MAKER_STATE_FILE to an absolute path, or configure a LEZ \
+             wallet home (lez_wallet_home + lez_account_id, env LEZ_WALLET_HOME + \
+             LEZ_ACCOUNT_ID) so the journal can live there."
+            .into(),
+        ),
+    }
+}
+
 /// Run the maker in an auto-accept loop. Blocks until cancelled, out of funds,
 /// or an unrecoverable error. Returns JSON: `{ "completed": N, "failed": M }`.
 ///
@@ -696,16 +732,13 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
 
     // Durable crash-recovery journal (fund-safety, PR #40): an in-flight swap
     // is recorded (fsync'd) BEFORE the LEZ lock and cleared only on a confirmed
-    // terminal state, so a crash cannot strand locked LEZ. The CLI's
-    // MAKER_STATE_FILE env knob wins; otherwise the journal is persisted under
-    // the module's wallet home (the per-module storage directory the FFI config
-    // carries in wallet-auth mode), falling back to the CLI's CWD default.
-    let state_file: std::path::PathBuf = match std::env::var("MAKER_STATE_FILE") {
-        Ok(p) if !p.trim().is_empty() => p.into(),
-        _ => match &base_config.lez_auth {
-            LezAuth::Wallet { home, .. } => home.join(".maker-state.json"),
-            LezAuth::RawKey(_) => ".maker-state.json".into(),
-        },
+    // terminal state, so a crash cannot strand locked LEZ.
+    let state_file = match resolve_maker_state_file(
+        std::env::var("MAKER_STATE_FILE").ok().as_deref(),
+        &base_config.lez_auth,
+    ) {
+        Ok(p) => p,
+        Err(e) => return json_err(&e),
     };
 
     runtime().block_on(async {
@@ -857,5 +890,45 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
             std::env::temp_dir().join(format!("swap-ffi-missing-{}.env", std::process::id()));
         let err = dotenv_config_json(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("failed to read env file"));
+    }
+
+    /// 32 zero bytes in base58 — a syntactically valid LEZ account ID.
+    const TEST_ACCOUNT_B58: &str = "11111111111111111111111111111111";
+
+    fn wallet_auth(home: &str) -> LezAuth {
+        LezAuth::Wallet {
+            home: std::path::PathBuf::from(home),
+            account_id: parse_base58_account_id(TEST_ACCOUNT_B58).unwrap(),
+        }
+    }
+
+    #[test]
+    fn maker_state_file_env_knob_wins_over_auth_mode() {
+        for auth in [wallet_auth("/data/wallet"), LezAuth::RawKey("aa".into())] {
+            let path = resolve_maker_state_file(Some("/data/journal.json"), &auth).unwrap();
+            assert_eq!(path, std::path::PathBuf::from("/data/journal.json"));
+        }
+    }
+
+    #[test]
+    fn maker_state_file_defaults_under_wallet_home() {
+        // A blank env value counts as unset, mirroring the empty-string guard.
+        for env in [None, Some(""), Some("  ")] {
+            let path = resolve_maker_state_file(env, &wallet_auth("/data/wallet")).unwrap();
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/data/wallet/.maker-state.json")
+            );
+        }
+    }
+
+    #[test]
+    fn maker_state_file_refused_for_raw_key_without_env() {
+        // Fund-safety: a CWD-relative journal can silently go missing across
+        // ui-host launches (unstable CWD), voiding crash recovery — refuse to
+        // start rather than default, and name both remedies.
+        let err = resolve_maker_state_file(None, &LezAuth::RawKey("aa".into())).unwrap_err();
+        assert!(err.contains("MAKER_STATE_FILE"), "missing env remedy: {err}");
+        assert!(err.contains("lez_wallet_home"), "missing wallet remedy: {err}");
     }
 }
