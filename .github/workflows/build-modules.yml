@@ -1,0 +1,120 @@
+name: Build modules
+
+# Actually COMPILES both Basecamp modules with Nix on every supported runner
+# architecture — the thing no CI here has ever done for Linux.
+#
+# WHY THIS EXISTS
+#   Until issue #32 the Linux circuit/rapidsnark hashes in swap-module/flake.nix
+#   were `lib.fakeSha256` placeholders. Fake hashes EVALUATE cleanly and only
+#   blow up at realisation time, so `nix eval` (and `nix flake check`) went green
+#   while the Linux legs had never once been built. The release workflows
+#   (release-swap.yml / release-swap-ui.yml) are `workflow_dispatch`-only, so
+#   nothing exercised them on push either, and canary.yml's `modules` leg is
+#   hard-gated to darwin-arm64 (canary/leg-modules.sh emits `broken` elsewhere).
+#   Result: "the derivation graph resolves" was being mistaken for "it builds".
+#   This job removes that blind spot by running the real build on real runners.
+#
+# RELATION TO THE RELEASE PIPELINE
+#   Deliberately mirrors the build leg of
+#   logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+#   (the `build:` job, ~line 220) so a green run here means the release
+#   dispatch will build too:
+#     * same runner per variant (macos-latest / ubuntu-latest / ubuntu-24.04-arm)
+#     * same Nix install (nix-installer-action pinned to the same v22 SHA, same
+#       extra-conf)
+#     * same command: a bare `nix build .#lgx-portable` inside the module dir
+#     * same full clone / no-submodule checkout
+#   No magic-nix-cache here on purpose: the release pipeline has none, and a
+#   warm cache would hide exactly the cold-build cost we want to measure.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - danisharora099/linux-variants
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-modules-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this job only reads the repo and builds. No release, no
+# artifact publication, no index writes.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.module }} (${{ matrix.variant }})
+    strategy:
+      # One leg's failure must not cancel the others — the whole point is to
+      # learn how far EACH architecture gets, independently.
+      fail-fast: false
+      matrix:
+        # Both modules. swap-ui has no fixed-output hashes of its own but it
+        # builds the backend through its `swap` flake input (`path:../swap-module`),
+        # so it inherits every per-variant constraint swap-module has — and can
+        # additionally fail on the Qt/QML side.
+        module: [swap-module, swap-ui]
+        # darwin-arm64 is included even though it is the one platform already
+        # known to build, so a Linux fix that regresses macOS is caught here
+        # instead of at release time.
+        variant: [darwin-arm64, linux-amd64, linux-arm64]
+        include:
+          - variant: darwin-arm64
+            runs-on: macos-latest          # Apple silicon
+          - variant: linux-amd64
+            runs-on: ubuntu-latest         # x86_64
+          - variant: linux-arm64
+            runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner (GA'd 2025)
+    runs-on: ${{ matrix.runs-on }}
+    # 90 min. Justification: GitHub's 360-minute default is a death sentence for
+    # a leg that is genuinely wedged, and this stack (LEZ / risc0 / zerokit /
+    # Qt) can compile for hours from source with no shared binary cache. The
+    # known failure modes below all surface inside ~10 min, and the last real
+    # release attempt (run 29956868665) failed its slowest leg at 8m38s, so 90
+    # min leaves ~9x headroom to reach genuine compilation on a leg that gets
+    # past vendoring while still failing fast enough to keep 6 legs affordable.
+    # Raise it once we know what a full cold Linux build actually costs.
+    timeout-minutes: 90
+    steps:
+      # Full clone, no submodules — exactly what the release workflow does.
+      # Nix flake inputs that reference the local working tree (swap-module's
+      # `swap-source.url = "path:.."`) refuse a shallow clone, hence
+      # fetch-depth: 0. contracts/lib/forge-std is Solidity-test-only and the
+      # release pipeline never checks it out, so neither do we — initialising
+      # it here would build something the release does not.
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+      # Pinned to the same immutable v22 SHA the shared release action uses, so
+      # CI and release run on identical Nix. Bump the two together.
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: nix build .#lgx-portable (${{ matrix.module }}, ${{ matrix.variant }})
+        shell: bash
+        # NO `continue-on-error` and NO soft-failure handling, deliberately.
+        # Two pre-existing upstream blockers are expected to turn the Linux (and
+        # possibly darwin) legs red right now:
+        #   1. crates.io returns 403 to nixpkgs' vendor fetcher at the pinned
+        #      revs (it sends a `python-requests/*` UA against
+        #      crates.io/api/v1/...). Fix in flight: logos-co/logos-module-builder#173.
+        #      Note that PR does NOT cover the second nixpkgs chain this repo
+        #      pulls in via logos-delivery -> zerokit, which is outside the
+        #      `follows` graph.
+        #   2. swap-module/flake.nix's committed `cargoHash` may be stale.
+        # A red job carrying that real error text is the useful outcome; a
+        # green-but-meaningless job is precisely the failure mode this workflow
+        # was written to end. If these ever need to stop gating merges, mark the
+        # job non-required in branch protection — do not hide the failure here.
+        run: |
+          set -euo pipefail
+          cd "${{ matrix.module }}"
+          # Bare `nix build .#lgx-portable`, byte-for-byte the release command:
+          # the PORTABLE bundle, not the dev one (`.#lgx`), which tags variants
+          # with a "-dev" suffix Basecamp rejects.
+          nix build .#lgx-portable --print-out-paths --no-link
