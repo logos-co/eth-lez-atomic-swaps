@@ -38,17 +38,28 @@
           # the LEZ v0.2.0 pin); their build scripts resolve it via
           # LBC_ROOT_DIR (the pre-0.5 LOGOS_BLOCKCHAIN_CIRCUITS env is gone)
           # and would otherwise try to download it inside the sandbox.
-          circuitsPlatform = {
-            aarch64-darwin = "macos-aarch64";
-            x86_64-linux = "linux-x86_64";
-            aarch64-linux = "linux-aarch64";
+          #
+          # Platform tag and hash live in one attrset so the two can't drift.
+          # x86_64-darwin is absent on purpose: upstream publishes no
+          # macos-x86_64 bundle for v0.5.3, so Intel macOS is unsupportable
+          # here (README "Prerequisites" says the same).
+          circuitsAsset = {
+            aarch64-darwin = {
+              platform = "macos-aarch64";
+              sha256 = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
+            };
+            x86_64-linux = {
+              platform = "linux-x86_64";
+              sha256 = "1mwy3g9dyjvlwykzs62gzf79rrnm20sy7c587nv26c1y9bm71wfv";
+            };
+            aarch64-linux = {
+              platform = "linux-aarch64";
+              sha256 = "14r4vghipk66k8g22kymy2gpfa1ghwwa74v57a230yk0pm9zvgp7";
+            };
           }.${system} or (throw "logos-blockchain-circuits is not published for ${system}");
-          circuitsHash = {
-            aarch64-darwin = "0w3i0phgzjswsk1q2k6cr3001jjc55a82z79zw9w5p3x9hwaqljq";
-          }.${system} or lib.fakeSha256;
           circuits = pkgs.fetchzip {
-            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.3/logos-blockchain-circuits-v0.5.3-${circuitsPlatform}.tar.gz";
-            sha256 = circuitsHash;
+            url = "https://github.com/logos-blockchain/logos-blockchain-circuits/releases/download/v0.5.3/logos-blockchain-circuits-v0.5.3-${circuitsAsset.platform}.tar.gz";
+            inherit (circuitsAsset) sha256;
           };
           # Prebuilt rapidsnark static libs for rust-rapidsnark's build.rs
           # (pulled in at the v0.2.0 pin via logos-blockchain-circuits-prover,
@@ -57,23 +68,27 @@
           # logos-blockchain-rust-rapidsnark); the sandbox has no network, so
           # we prefetch the same per-target release asset and point
           # RAPIDSNARK_LIB_DIR at its lib/ dir.
+          #
+          # The Linux legs point at logos-blockchain's `-pic` rebuilds rather
+          # than iden3's stock linux archives (which do exist): swap_ffi is a
+          # cdylib, and the static libs linked into a Linux shared object have
+          # to be position-independent. These archives carry only `lib/`, which
+          # is all RAPIDSNARK_LIB_DIR needs — no `bin/` or `include/` like the
+          # macOS one. x86_64-darwin is absent for the same reason as
+          # circuitsAsset above.
           rapidsnarkVersion = "v0.0.8";
           rapidsnarkAsset = {
             aarch64-darwin = {
               url = "https://github.com/iden3/rapidsnark/releases/download/${rapidsnarkVersion}/rapidsnark-macOS-arm64-${rapidsnarkVersion}.zip";
               sha256 = "1600dzr7hjg6lc5r0cdh189l7019djvy4cz2qyn75z5vrac4qs0f";
             };
-            x86_64-darwin = {
-              url = "https://github.com/iden3/rapidsnark/releases/download/${rapidsnarkVersion}/rapidsnark-macOS-x86_64-${rapidsnarkVersion}.zip";
-              sha256 = lib.fakeSha256;
-            };
             x86_64-linux = {
               url = "https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark/releases/download/rapidsnark-pic-${rapidsnarkVersion}/rapidsnark-linux-x86_64-pic-${rapidsnarkVersion}.zip";
-              sha256 = lib.fakeSha256;
+              sha256 = "07qdnh4lm99alkmmg3av916bma7s86s616s56y0j4q4h82897kzk";
             };
             aarch64-linux = {
               url = "https://github.com/logos-blockchain/logos-blockchain-rust-rapidsnark/releases/download/rapidsnark-pic-${rapidsnarkVersion}/rapidsnark-linux-aarch64-pic-${rapidsnarkVersion}.zip";
-              sha256 = lib.fakeSha256;
+              sha256 = "15f4iqy2szqpp84v8584s5b86vw8rfz60wx7h7ylp34r0m7qii4i";
             };
           }.${system} or (throw "no rapidsnark asset mapping for ${system}");
           rapidsnark = pkgs.fetchzip {
