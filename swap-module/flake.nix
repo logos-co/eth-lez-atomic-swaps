@@ -88,17 +88,55 @@
           # evaluating clean on stock Nix. Reading the scripts with
           # `builtins.readFile` keeps every store reference out of it.
           #
-          # The substitution is asserted, so a nixpkgs bump that reshapes the
+          # The substitutions are asserted, so a nixpkgs bump that reshapes the
           # fetcher fails evaluation loudly instead of silently going back to
           # a 403. Delete all of this once logos-module-builder's nixpkgs
           # carries the upstream fix (logos-co/logos-module-builder#173).
+          #
+          # SECOND substitution: crates.io 429. Once the 403 was fixed and the
+          # build-modules matrix started fanning six legs out at once, each
+          # vendoring ~850 crates from one runner IP range, crates.io began
+          # throttling: `Failed to fetch file from
+          # https://crates.io/api/v1/crates/rustc-hash/2.1.2/download. Status
+          # code: 429` (run 30657933051 — 3 of 6 legs; whichever leg won the
+          # race finished). Upstream ALREADY mounts a urllib3 `Retry`, but its
+          # `status_forcelist` is 5xx-only, so the one status that explicitly
+          # means "back off and come back" is the one status it does not retry.
+          # Widen it, and make the backoff suit a shared throttle:
+          #   * 429 added; 5xx kept. 403 deliberately NOT retried — that is a
+          #     policy answer (the User-Agent block above), and retrying it
+          #     would just burn the 90-minute timeout to reach the same error.
+          #   * jitter, so six legs that all trip the limit in the same second
+          #     do not then retry in lockstep and re-trip it together.
+          #   * `respect_retry_after_header` (urllib3's default, pinned
+          #     explicitly) so a `Retry-After` from crates.io wins over our
+          #     own backoff curve.
+          #   * bounded: 12 attempts, backoff capped at 60s => ~7 min of wait
+          #     per URL worst case. A genuinely down registry still fails, it
+          #     just fails after minutes instead of hanging out to 90.
+          # `backoff_jitter`/`backoff_max` are urllib3 >= 2.0 kwargs; the
+          # pinned tree has urllib3 2.5.0.
+          #
+          # This is the retry that the RELEASE workflow needs too — it fans out
+          # the same way over the same registry, so the fix belongs in the
+          # build, not in the CI matrix. Kept as a scoped `replaceStrings` on
+          # our private copy of the script rather than an `applyPatches` of the
+          # shared `fetch-cargo-vendor-util`: patching the real one moves the
+          # `outPath` of every Rust package in nixpkgs (measured:
+          # `qt6.qtdeclarative`, `python3Packages.cryptography` and
+          # `cargo-auditable` all shift), which would cost this build its
+          # binary-cache hits on exactly the cold CI runners it is meant to
+          # help. The scoped form leaves every other outPath untouched.
+          #
+          # Neither substitution can change the bytes that get downloaded, so
+          # `cargoDeps.hash` below is unaffected by both.
           fetchCargoVendorUA =
             let
               rustBuildSupport = "${nixpkgs}/pkgs/build-support/rust";
-              subst = from: to: text:
+              subst = what: from: to: text:
                 let out = builtins.replaceStrings [ from ] [ to ] text; in
                 if out == text
-                then throw "swap-ffi: crates.io User-Agent workaround is stale — ${builtins.toJSON from} not found in nixpkgs' cargo vendor fetcher"
+                then throw "swap-ffi: crates.io ${what} workaround is stale — ${builtins.toJSON from} not found in nixpkgs' cargo vendor fetcher"
                 else out;
               replaceWorkspaceValues = pkgs.writers.writePython3Bin "replace-workspace-values" {
                 libraries = with pkgs.python3Packages; [ tomli tomli-w ];
@@ -107,10 +145,13 @@
               fetchCargoVendorUtil = pkgs.writers.writePython3Bin "fetch-cargo-vendor-util" {
                 libraries = with pkgs.python3Packages; [ requests ];
                 flakeIgnore = [ "E501" ];
-              } (subst
+              } (subst "User-Agent"
                    "    session = requests.Session()\n"
                    "    session = requests.Session()\n    session.headers[\"User-Agent\"] = \"nixpkgs-fetchCargoVendor/1 (https://github.com/NixOS/nixpkgs)\"\n"
-                   (builtins.readFile "${rustBuildSupport}/fetch-cargo-vendor-util.py"));
+                (subst "429 retry"
+                   "        total=5,\n        backoff_factor=0.5,\n        status_forcelist=[500, 502, 503, 504]\n"
+                   "        total=12,\n        backoff_factor=1.5,\n        backoff_jitter=1.0,\n        backoff_max=60,\n        respect_retry_after_header=True,\n        status_forcelist=[429, 500, 502, 503, 504]\n"
+                   (builtins.readFile "${rustBuildSupport}/fetch-cargo-vendor-util.py")));
             in
             { name, hash, ... }@args:
             let
