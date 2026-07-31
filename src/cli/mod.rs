@@ -1,3 +1,4 @@
+mod bot;
 #[cfg(feature = "demo")]
 mod demo;
 #[cfg(feature = "demo")]
@@ -22,6 +23,12 @@ use crate::swap::refund::now_unix;
 /// Default LEZ sequencer URL used when neither the CLI flag nor the
 /// `LEZ_SEQUENCER_URL` env var is set (standalone/localnet).
 const DEFAULT_LEZ_SEQUENCER_URL: &str = "http://127.0.0.1:3040";
+
+/// Single-shot timelock defaults (minutes) when unset. The standing `maker
+/// --loop` bot applies its own longer defaults instead (`bot::LOOP_DEFAULT_*`);
+/// these keep single-shot / demo flows fast and unchanged.
+const DEFAULT_LEZ_TIMELOCK_MINUTES: u64 = 5;
+const DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 10;
 
 /// Resolve the effective sequencer URL and whether it was explicitly provided.
 /// An explicit value (CLI flag or env var) is distinguishable from the default
@@ -108,12 +115,16 @@ pub struct ConfigArgs {
     eth_amount: String,
 
     /// LEZ timelock duration in minutes (from now). Shorter — maker locks second.
-    #[arg(long, env = "LEZ_TIMELOCK_MINUTES", default_value = "5")]
-    lez_timelock_minutes: u64,
+    /// Unset defaults to 5 for single-shot flows; the standing `maker --loop`
+    /// bot applies its own longer default (20) so the mode's safety margin is not
+    /// silently understated (see `bot::LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES`).
+    #[arg(long, env = "LEZ_TIMELOCK_MINUTES")]
+    lez_timelock_minutes: Option<u64>,
 
     /// ETH timelock duration in minutes (from now). Longer — taker locks first.
-    #[arg(long, env = "ETH_TIMELOCK_MINUTES", default_value = "10")]
-    eth_timelock_minutes: u64,
+    /// Unset defaults to 10 for single-shot flows; `maker --loop` defaults to 40.
+    #[arg(long, env = "ETH_TIMELOCK_MINUTES")]
+    eth_timelock_minutes: Option<u64>,
 
     /// Polling interval in milliseconds
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "2000")]
@@ -181,8 +192,16 @@ impl ConfigArgs {
             lez_htlc_program_id,
             lez_amount: self.lez_amount,
             eth_amount: eth_to_wei(&self.eth_amount).map_err(SwapError::InvalidConfig)?,
-            lez_timelock: now + self.lez_timelock_minutes * 60,
-            eth_timelock: now + self.eth_timelock_minutes * 60,
+            lez_timelock: now
+                + self
+                    .lez_timelock_minutes
+                    .unwrap_or(DEFAULT_LEZ_TIMELOCK_MINUTES)
+                    * 60,
+            eth_timelock: now
+                + self
+                    .eth_timelock_minutes
+                    .unwrap_or(DEFAULT_ETH_TIMELOCK_MINUTES)
+                    * 60,
             eth_recipient_address,
             lez_taker_account_id,
             poll_interval: Duration::from_millis(self.poll_interval_ms),
@@ -250,10 +269,18 @@ pub async fn run() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    // The loop mode needs the timelock *durations* (SwapConfig only keeps
+    // absolute timestamps) to mint fresh timelocks per iteration. Pass the raw
+    // Options so `maker --loop` can apply its own longer defaults when unset
+    // while single-shot keeps 5/10 — an explicit value (Some) always wins.
+    let timelock_minutes = (
+        cli.config.lez_timelock_minutes,
+        cli.config.eth_timelock_minutes,
+    );
     let config = cli.config.into_swap_config()?;
 
     match cli.command {
-        Commands::Maker(args) => maker::cmd_maker(args, &config, cli.json).await,
+        Commands::Maker(args) => maker::cmd_maker(args, &config, timelock_minutes, cli.json).await,
         Commands::Taker(args) => taker::cmd_taker(args, &config, cli.json).await,
         Commands::Refund(args) => refund::cmd_refund(args, &config, cli.json).await,
         Commands::Status(args) => status::cmd_status(args, &config, cli.json).await,

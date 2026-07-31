@@ -19,6 +19,14 @@ pub enum SwapError {
     #[error("failed to decode escrow data: {0}")]
     EscrowDecode(String),
 
+    #[error("LEZ escrow state unknown (not a confirmed terminal state): {0}")]
+    EscrowStateUnknown(String),
+
+    #[error(
+        "ETH claim unresolved after retries — taker holds the LEZ; stopping for supervised restart so reconcile retries: {0}"
+    )]
+    EthClaimUnresolved(String),
+
     // --- Swap logic ---
     #[error("invalid swap state: expected {expected}, got {actual}")]
     InvalidState { expected: String, actual: String },

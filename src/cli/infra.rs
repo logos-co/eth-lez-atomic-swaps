@@ -6,11 +6,11 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use common::transaction::LeeTransaction;
-use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use lee::{
     ProgramDeploymentTransaction,
     program_deployment_transaction::Message as ProgramDeploymentMessage,
 };
+use lez_htlc_methods::{LEZ_HTLC_PROGRAM_ELF, LEZ_HTLC_PROGRAM_ID};
 use sequencer_service_rpc::RpcClient as _;
 use tokio::io::{AsyncBufReadExt, BufReader};
 

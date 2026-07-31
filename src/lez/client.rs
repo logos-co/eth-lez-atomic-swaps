@@ -1,4 +1,3 @@
-use lez_htlc_program::{HTLCEscrow, HTLCInstruction};
 use lee::{
     AccountId, PrivateKey, PublicKey, PublicTransaction,
     public_transaction::{Message, WitnessSet},
@@ -7,6 +6,7 @@ use lee_core::{
     account::Nonce,
     program::{PdaSeed, ProgramId},
 };
+use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
 use sequencer_service_protocol::LeeTransaction;
 use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use tracing::{debug, info};
@@ -17,6 +17,19 @@ use crate::{
     error::{Result, SwapError},
     scaffold,
 };
+
+/// Terminal outcome of a confirmed LEZ refund attempt.
+///
+/// See [`LezClient::refund_confirmed`].
+#[derive(Debug)]
+pub enum RefundOutcome {
+    /// Escrow observed in the `Refunded` state. Carries the submit tx hash when
+    /// this call issued the refund (empty if it was already refunded).
+    Refunded(String),
+    /// A taker claim won the race: the escrow is `Claimed` and carries the
+    /// revealed 32-byte preimage. The maker must claim the ETH side.
+    ClaimedByTaker([u8; 32]),
+}
 
 enum LezBackend {
     Standalone {
@@ -37,6 +50,64 @@ pub struct LezClient {
     account_id: AccountId,
     program_id: ProgramId,
     poll_interval: std::time::Duration,
+}
+
+/// Classification of one escrow read during refund confirmation.
+///
+/// Extracted (and unit-tested) to pin the P1-C invariant: an absent (`None`)
+/// read is `Absent`, never `Refunded`. The LEZ HTLC program's refund leaves the
+/// account with `state == Refunded` and intact data — it never deletes it — so
+/// `get_escrow` returning `None` means a missing/short/phantom read, which is
+/// NOT a terminal refund and must be retried, not acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefundReadClass {
+    Refunded,
+    ClaimedByTaker,
+    StillLocked,
+    Absent,
+}
+
+fn classify_refund_read(state: Option<HTLCState>) -> RefundReadClass {
+    match state {
+        None => RefundReadClass::Absent,
+        Some(HTLCState::Refunded) => RefundReadClass::Refunded,
+        Some(HTLCState::Claimed) => RefundReadClass::ClaimedByTaker,
+        Some(HTLCState::Locked) => RefundReadClass::StillLocked,
+    }
+}
+
+/// Whether a fresh [`LezClient::lock`] must REFUSE because an escrow already
+/// exists for this hashlock. Any existing escrow — in ANY state — means the
+/// hashlock is already in flight (a replayed/retained swap, or a partially
+/// completed prior lock). Funding a fresh transfer would strand the excess, so
+/// there is exactly one legitimate funder per hashlock and a pre-existing PDA
+/// means we are not it (P1-A suspenders / check-before-fund).
+fn existing_escrow_blocks_fresh_lock(existing: Option<HTLCState>) -> bool {
+    existing.is_some()
+}
+
+/// Whether an escrow observed during [`LezClient::lock`]'s confirmation poll is
+/// conclusively OUR just-submitted lock (principle i): state `Locked` and
+/// maker/taker/amount/timelock exactly as submitted. Any other escrow at this
+/// PDA is pre-existing (the single-read check-before-fund can be defeated by one
+/// phantom `None`) and funding it would strand the transfer.
+///
+/// The `maker_id == self` check (P1-3) is load-bearing: a different maker's
+/// escrow sharing our hashlock/taker/amount/timelock would otherwise pass, and
+/// Step 2 would fund THEIR escrow — one only they can refund. Confirmation
+/// requires that WE are the recorded maker.
+fn escrow_confirms_our_lock(
+    escrow: &HTLCEscrow,
+    maker_id: &AccountId,
+    taker_id: &AccountId,
+    amount: u128,
+    timelock_ms: u64,
+) -> bool {
+    escrow.state == HTLCState::Locked
+        && escrow.maker_id == *maker_id
+        && escrow.taker_id == *taker_id
+        && escrow.amount == amount
+        && escrow.timelock == timelock_ms
 }
 
 impl LezClient {
@@ -107,9 +178,8 @@ impl LezClient {
         // config's sequencer_addr, so users can retarget a hosted/public
         // sequencer via env. Falls back to the wallet's own client otherwise.
         let sequencer_override = if config.lez_sequencer_url_explicit {
-            let url = Url::parse(&config.lez_sequencer_url).map_err(|e| {
-                SwapError::InvalidConfig(format!("invalid sequencer URL: {e}"))
-            })?;
+            let url = Url::parse(&config.lez_sequencer_url)
+                .map_err(|e| SwapError::InvalidConfig(format!("invalid sequencer URL: {e}")))?;
             let client = SequencerClientBuilder::default()
                 .build(url)
                 .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
@@ -242,6 +312,27 @@ impl LezClient {
     ) -> Result<String> {
         let pda = self.escrow_pda(&hashlock);
 
+        // Check-before-fund (P1-A suspenders): refuse to fund an escrow whose PDA
+        // already exists. A pre-existing escrow for this hashlock means it is
+        // already being processed (a replayed/retained in-flight swap, or a
+        // partially-completed prior lock) — the confirmation poll below would see
+        // the existing PDA immediately and Step 2 would transfer `amount` into it
+        // a SECOND time, stranding the excess. There is exactly one legitimate
+        // funder per hashlock; if the PDA is already there, we are not it.
+        let existing = self.get_escrow(&hashlock).await?;
+        if existing_escrow_blocks_fresh_lock(existing.as_ref().map(|e| e.state)) {
+            let balance = self.get_balance(&pda).await.unwrap_or(0);
+            return Err(SwapError::InvalidState {
+                expected: "uninitialized escrow PDA before lock".into(),
+                actual: format!(
+                    "escrow PDA {} already exists (state {:?}, balance {balance}) — refusing to \
+                     re-fund; this hashlock is already in flight",
+                    hex::encode(pda.value()),
+                    existing.map(|e| e.state),
+                ),
+            });
+        }
+
         // Step 1: Lock — claims the uninitialized PDA and stores escrow data.
         let instruction = HTLCInstruction::Lock {
             hashlock,
@@ -257,9 +348,40 @@ impl LezClient {
 
         // Wait for the lock to be committed before funding. Public-testnet
         // blocks can be a minute or more apart, so allow several blocks.
+        //
+        // Principle (i) hardening: "an escrow appeared" is NOT conclusive
+        // confirmation of OUR lock. If the single-read check-before-fund above
+        // hit a phantom `None` for a PRE-EXISTING escrow, treating any existing
+        // PDA here as our own confirmation would transfer `amount` into an
+        // escrow we do not control (or a terminal one) and strand it. Only an
+        // escrow whose state/taker/amount/timelock match EXACTLY what we just
+        // submitted confirms our lock; any mismatch refuses to fund.
+        let expected_timelock_ms = timelock_secs * 1000;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
-            if self.get_escrow(&hashlock).await?.is_some() {
+            if let Some(escrow) = self.get_escrow(&hashlock).await? {
+                if !escrow_confirms_our_lock(
+                    &escrow,
+                    &self.account_id,
+                    &taker_id,
+                    amount,
+                    expected_timelock_ms,
+                ) {
+                    return Err(SwapError::InvalidState {
+                        expected: format!(
+                            "our just-submitted Locked escrow (amount {amount}, timelock \
+                             {expected_timelock_ms}ms)"
+                        ),
+                        actual: format!(
+                            "pre-existing/mismatched escrow at PDA {} (state {:?}, amount {}, \
+                             timelock {}ms) — refusing to fund",
+                            hex::encode(pda.value()),
+                            escrow.state,
+                            escrow.amount,
+                            escrow.timelock,
+                        ),
+                    });
+                }
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -326,8 +448,113 @@ impl LezClient {
         Ok(tx_hash)
     }
 
+    /// Refund LEZ and wait until the escrow reaches a terminal on-chain state.
+    ///
+    /// The bare [`refund`](Self::refund) returns as soon as the transaction is
+    /// *submitted* — it is not yet committed and can still lose a race to a
+    /// last-moment taker claim, or be rejected during execution. Callers that
+    /// journal in-flight swaps must not drop the entry until the escrow is
+    /// confirmed terminal, otherwise a rejected refund strands locked LEZ (and,
+    /// if the taker actually claimed, the maker still owes itself an ETH claim
+    /// with the revealed preimage). This mirrors the confirmation polling in
+    /// [`lock`](Self::lock).
+    ///
+    /// Returns:
+    /// - [`RefundOutcome::Refunded`] once the escrow is observed `Refunded`.
+    /// - [`RefundOutcome::ClaimedByTaker`] if a taker claim won the race (the
+    ///   escrow is `Claimed` and carries the revealed preimage) — the caller
+    ///   should claim the ETH side instead of treating this as a plain refund.
+    /// - `Err` if neither terminal state is reached before the deadline (the
+    ///   caller must keep the journal entry and retry on the next restart).
+    pub async fn refund_confirmed(&self, hashlock: &[u8; 32]) -> Result<RefundOutcome> {
+        // Max consecutive absent/phantom reads to tolerate before surfacing
+        // Unknown. `get_escrow` returns `None` for missing/short/mismatched data
+        // — which, critically, is NOT a refund: the LEZ HTLC program leaves the
+        // account in place with `state == Refunded` on refund (it does not delete
+        // it, see programs/lez-htlc execute_refund). So a `None` read is a
+        // phantom/stale sequencer response and must NEVER be treated as terminal
+        // — doing so during a refund-vs-claim race would drop the journal entry
+        // and lose the preimage/ETH path (P1-C).
+        const MAX_ABSENT_READS: u32 = 5;
+
+        let mut submitted = false;
+        let mut submit_tx: Option<String> = None;
+        let mut submit_err: Option<String> = None;
+        let mut absent_reads: u32 = 0;
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            let escrow = self.get_escrow(hashlock).await?;
+            match classify_refund_read(escrow.as_ref().map(|e| e.state)) {
+                RefundReadClass::Refunded => {
+                    return Ok(RefundOutcome::Refunded(submit_tx.unwrap_or_default()));
+                }
+                RefundReadClass::ClaimedByTaker => {
+                    // Safe: classify only returns this for Some(Claimed).
+                    return Self::claimed_outcome(escrow.as_ref().expect("claimed escrow present"));
+                }
+                RefundReadClass::StillLocked => {
+                    absent_reads = 0;
+                    // Submit the refund exactly once; a concurrent taker claim can
+                    // still make it revert, so we keep polling for the terminal
+                    // state regardless of the submit result.
+                    if !submitted {
+                        let submit = self.refund(hashlock).await;
+                        submit_tx = submit.as_ref().ok().cloned();
+                        submit_err = submit.as_ref().err().map(|e| e.to_string());
+                        submitted = true;
+                    }
+                }
+                RefundReadClass::Absent => {
+                    absent_reads += 1;
+                    debug!(
+                        hashlock = %hex::encode(hashlock),
+                        "refund_confirmed: escrow read absent ({absent_reads}/{MAX_ABSENT_READS}) \
+                         — NOT terminal (refunds keep the account); retrying"
+                    );
+                    if absent_reads >= MAX_ABSENT_READS {
+                        return Err(SwapError::EscrowStateUnknown(format!(
+                            "escrow {} read absent {absent_reads}x (never a confirmed refund) — \
+                             retaining journal for retry",
+                            hex::encode(hashlock),
+                        )));
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SwapError::EscrowStateUnknown(match &submit_err {
+                    Some(m) => {
+                        format!("LEZ refund not confirmed before deadline (submit failed: {m})")
+                    }
+                    None => {
+                        "LEZ refund not confirmed before deadline (escrow state unknown)".into()
+                    }
+                }));
+            }
+            tokio::time::sleep(self.poll_interval).await;
+        }
+    }
+
+    /// Extract the revealed preimage from a `Claimed` escrow.
+    fn claimed_outcome(escrow: &HTLCEscrow) -> Result<RefundOutcome> {
+        let preimage = escrow
+            .preimage
+            .clone()
+            .and_then(|p| <[u8; 32]>::try_from(p).ok())
+            .ok_or_else(|| SwapError::InvalidState {
+                expected: "revealed 32-byte preimage on claimed escrow".into(),
+                actual: "missing or malformed preimage".into(),
+            })?;
+        Ok(RefundOutcome::ClaimedByTaker(preimage))
+    }
+
     pub fn account_id(&self) -> AccountId {
         self.account_id
+    }
+
+    /// The configured polling interval (used by reconcile's bounded re-reads).
+    pub fn poll_interval(&self) -> std::time::Duration {
+        self.poll_interval
     }
 
     pub fn program_id(&self) -> ProgramId {
@@ -397,5 +624,89 @@ mod tests {
         let pda_a = AccountId::for_public_pda(&program_id, &PdaSeed::new([0xAAu8; 32]));
         let pda_b = AccountId::for_public_pda(&program_id, &PdaSeed::new([0xBBu8; 32]));
         assert_ne!(pda_a, pda_b);
+    }
+
+    // P1-C: a `None` (absent/phantom/short) escrow read is NEVER a confirmed
+    // refund — refunds leave the account with `state == Refunded` and intact
+    // data. Only an OBSERVED `Refunded` state is terminal; `None` must be
+    // retried (surfaced as Unknown), never treated as a completed refund.
+    // P1-A suspenders: a fresh lock must refuse to fund whenever an escrow
+    // already exists for the hashlock (any state) — otherwise the confirmation
+    // poll sees the existing PDA immediately and Step 2 double-transfers.
+    #[test]
+    fn existing_escrow_refuses_fresh_lock() {
+        assert!(!existing_escrow_blocks_fresh_lock(None));
+        assert!(existing_escrow_blocks_fresh_lock(Some(HTLCState::Locked)));
+        assert!(existing_escrow_blocks_fresh_lock(Some(HTLCState::Claimed)));
+        assert!(existing_escrow_blocks_fresh_lock(Some(HTLCState::Refunded)));
+    }
+
+    // Principle (i): the lock-confirmation poll only accepts an escrow that is
+    // conclusively OUR submitted lock. A pre-existing escrow (different taker,
+    // amount, timelock, or terminal state) observed after a phantom `None`
+    // pre-check must NOT be treated as confirmation — funding it would strand
+    // the transfer.
+    #[test]
+    fn lock_confirmation_requires_exact_match() {
+        let program_id = test_program_id();
+        let me = AccountId::for_public_pda(&program_id, &PdaSeed::new([0x00u8; 32]));
+        let taker = AccountId::for_public_pda(&program_id, &PdaSeed::new([0x01u8; 32]));
+        let other = AccountId::for_public_pda(&program_id, &PdaSeed::new([0x02u8; 32]));
+        // Our escrow: WE are the maker.
+        let make = |state: HTLCState| HTLCEscrow {
+            hashlock: [0xAAu8; 32],
+            maker_id: me,
+            taker_id: taker,
+            amount: 150,
+            state,
+            timelock: 1_000_000,
+            preimage: None,
+        };
+        let escrow = make(HTLCState::Locked);
+
+        assert!(escrow_confirms_our_lock(&escrow, &me, &taker, 150, 1_000_000));
+        // Wrong taker / amount / timelock — someone else's escrow.
+        assert!(!escrow_confirms_our_lock(&escrow, &me, &other, 150, 1_000_000));
+        assert!(!escrow_confirms_our_lock(&escrow, &me, &taker, 151, 1_000_000));
+        assert!(!escrow_confirms_our_lock(&escrow, &me, &taker, 150, 999_999));
+        // P1-3: a DIFFERENT maker's escrow with our exact hashlock/taker/amount/
+        // timelock must NOT confirm — funding it would land our transfer in an
+        // escrow only they can refund.
+        let foreign = HTLCEscrow {
+            maker_id: other,
+            ..make(HTLCState::Locked)
+        };
+        assert!(
+            !escrow_confirms_our_lock(&foreign, &me, &taker, 150, 1_000_000),
+            "foreign-maker escrow must never confirm our lock"
+        );
+        // Terminal states never confirm a fresh lock.
+        for state in [HTLCState::Claimed, HTLCState::Refunded] {
+            assert!(!escrow_confirms_our_lock(
+                &make(state),
+                &me,
+                &taker,
+                150,
+                1_000_000
+            ));
+        }
+    }
+
+    #[test]
+    fn absent_escrow_read_is_not_a_refund() {
+        assert_eq!(classify_refund_read(None), RefundReadClass::Absent);
+        assert_ne!(classify_refund_read(None), RefundReadClass::Refunded);
+        assert_eq!(
+            classify_refund_read(Some(HTLCState::Refunded)),
+            RefundReadClass::Refunded
+        );
+        assert_eq!(
+            classify_refund_read(Some(HTLCState::Claimed)),
+            RefundReadClass::ClaimedByTaker
+        );
+        assert_eq!(
+            classify_refund_read(Some(HTLCState::Locked)),
+            RefundReadClass::StillLocked
+        );
     }
 }

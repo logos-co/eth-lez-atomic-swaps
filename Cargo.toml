@@ -42,7 +42,7 @@ authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "process"] }
 
 # Crypto
 sha2 = "0.10"
