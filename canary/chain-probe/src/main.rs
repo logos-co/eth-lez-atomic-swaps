@@ -519,23 +519,83 @@ async fn main() {
                 BalancePoll::BelowThreshold
             };
 
+            // POST-malformed-submission chain-progress probe. The PRE-submit
+            // control facts cannot rule out a block-production stall that
+            // BEGINS around the malformed submission (pre-controls landed, then
+            // everything stalls — which would fake the not-included signature).
+            // So, when the malformed tx never included, submit ONE more tiny
+            // same-sender typed control and require ITS inclusion: the chain
+            // demonstrably progressing through the full sequencer path while
+            // the malformed tx vanished => conclusive silent drop. If this
+            // post-control also fails to include => a stall => broken.
+            // NOTE: runs strictly AFTER `bad_poll` is captured, so the
+            // post-control's own balance effect cannot pollute that reading.
+            let (post_control_included, post_note) = if bad_included {
+                // Malformed tx included — the pre-inclusion-drop shape is off
+                // the table and the post-probe is unnecessary; sentinel `true`
+                // is ignored by every reachable classifier cell.
+                (true, String::new())
+            } else {
+                let pn = nonces_for(&client, bad_id).await;
+                let post_tx = build_transfer(
+                    at_program,
+                    bad_id,
+                    &bad_sk,
+                    recipient_invalid,
+                    pn,
+                    Instruction::Transfer { amount: args.amount },
+                );
+                match client.send_transaction(post_tx).await {
+                    Ok(ph) => {
+                        let inc = poll_included(&client, ph, 15).await;
+                        log(&format!(
+                            "post-malformed chain-progress control {ph}: included={inc}"
+                        ));
+                        (
+                            inc,
+                            format!(
+                                "; post-malformed same-sender control {ph} included={inc} \
+                                 (chain-progress probe)"
+                            ),
+                        )
+                    }
+                    Err(e) => {
+                        log(&format!("post-malformed control submission failed: {e}"));
+                        (
+                            false,
+                            format!(
+                                "; post-malformed same-sender control could not be submitted ({e})"
+                            ),
+                        )
+                    }
+                }
+            };
+
             // CONCLUSIVENESS GATE (P1): a `red` verdict asserts #640 reproduced.
             // It is trustworthy in exactly two shapes: (a) confirmed INCLUSION
             // plus (funded) a successful balance read showing the recipient
             // stayed at baseline (included-but-no-op), or (b) NEVER INCLUDED
-            // while the same session's controls included healthily and reads
-            // worked (silently dropped PRE-inclusion — a stall would delay the
-            // control too; an outage would fail the reads). Anything else is
-            // `broken`, never a false `red`.
-            match classify_malformed(args.funded, bad_included, control_included, bad_poll) {
+            // while the session's pre-submit controls included healthily, the
+            // POST-malformed control also included (chain demonstrably
+            // progressing around the vanished tx), and reads worked (silently
+            // dropped PRE-inclusion). Anything else is `broken`, never a false
+            // `red`.
+            match classify_malformed(
+                args.funded,
+                bad_included,
+                control_included,
+                post_control_included,
+                bad_poll,
+            ) {
                 MalformedVerdict::NotIncluded => verdict(
                     "broken",
                     &format!(
                         "INCONCLUSIVE: the malformed bare-u128 transfer (hash={bad_hash}) was \
                          ACCEPTED at submit but was NEVER INCLUDED within the poll window, and the \
-                         session's control was also delayed/not-included (control_included=\
-                         {control_included}) — indistinguishable from a sequencer stall/backlog, \
-                         so this is NOT evidence #640 reproduced. \
+                         sequencer was not demonstrably progressing around it (pre-submit \
+                         control_included={control_included}, post-malformed control included=\
+                         {post_control_included}{post_note}) — indistinguishable from a sequencer \
+                         stall/backlog, so this is NOT evidence #640 reproduced. \
                          (control valid tx {valid_hash} included={valid_included}{effect_note})"
                     ),
                 ),
@@ -596,11 +656,14 @@ async fn main() {
                     )
                 }
                 // Accepted at submit, then NEVER INCLUDED — while this same
-                // session's well-formed controls included promptly and (funded)
-                // balance reads worked and showed no effect. Not a stall (that
-                // would delay the control too), not an outage (reads worked):
-                // this IS #640's silent drop, one stage earlier than the
-                // included-no-op shape.
+                // session's pre-submit controls included promptly, a
+                // POST-malformed control also included (the sequencer path was
+                // demonstrably landing txs around the vanished one), and
+                // (funded) balance reads worked and showed no effect. Not a
+                // pre-existing stall (pre-controls landed), not a stall that
+                // began around the submit (the post-control landed), not an
+                // outage (reads worked): this IS #640's silent drop, one stage
+                // earlier than the included-no-op shape.
                 MalformedVerdict::SilentDropPreInclusion => {
                     let reads_note = if args.funded {
                         format!(
@@ -618,8 +681,10 @@ async fn main() {
                              (hash={bad_hash}) with no error and then silently dropped pre-inclusion \
                              (control included normally): it was NEVER INCLUDED within the generous \
                              poll window while the session's well-formed control transfers included \
-                             promptly (control_included={control_included}){reads_note} — a \
-                             deliberately-invalid instruction was NOT loudly rejected. \
+                             promptly BOTH before and after the malformed submission (pre-submit \
+                             control_included={control_included}{post_note}) — the sequencer was \
+                             demonstrably landing txs around the vanished malformed tx{reads_note} \
+                             — a deliberately-invalid instruction was NOT loudly rejected. \
                              See logos-blockchain/logos-execution-zone#640. \
                              (general control: valid typed transfer {valid_hash} included={valid_included}{effect_note})"
                         ),
@@ -705,17 +770,20 @@ async fn poll_balance_at_least(
 ///       balance read actually succeeded and showed the recipient stayed at
 ///       baseline (the included-but-no-op shape), OR
 ///   (b) the malformed tx was accepted at submit but NEVER INCLUDED within a
-///       generous window while the SAME SESSION's well-formed control txs
-///       demonstrably included healthily and (funded) balance reads were
-///       working — the silently-dropped-PRE-INCLUSION shape. A sequencer stall
-///       would have delayed the control too, and an RPC outage would have made
-///       the reads fail, so neither can masquerade as this.
+///       generous window while the SAME SESSION's pre-submit control txs
+///       included healthily, a POST-malformed-submission control tx ALSO
+///       demonstrably included, and (funded) balance reads were working — the
+///       silently-dropped-PRE-INCLUSION shape. A stall that predates the
+///       malformed submit would delay the pre-controls; a stall that BEGINS
+///       around the malformed submit would delay the post-control; an RPC
+///       outage would fail the reads — none can masquerade as this.
 /// Anything short of that is `broken`, not `red`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MalformedVerdict {
-    /// broken(30): accepted at submit but never included, AND the session's
-    /// control was ALSO delayed/not-included — indistinguishable from a
-    /// sequencer stall, so not evidence about #640.
+    /// broken(30): accepted at submit but never included, AND the sequencer was
+    /// not demonstrably progressing around it (a pre-submit control was
+    /// delayed, or the post-malformed control also failed to include) —
+    /// indistinguishable from a stall, so not evidence about #640.
     NotIncluded,
     /// broken(30): every post-submit balance read failed (RPC unobservable) —
     /// no conclusive funded-mode verdict is possible, included or not.
@@ -726,22 +794,32 @@ enum MalformedVerdict {
     /// baseline — the silent no-op at the heart of #640.
     SilentNoOp,
     /// red(10): never included within the generous window while the session's
-    /// control included normally (and, funded, reads worked and showed no
-    /// effect) — #640's silent drop, one stage earlier: dropped PRE-inclusion.
+    /// pre-submit controls included normally AND a POST-malformed-submission
+    /// control demonstrably included (and, funded, reads worked and showed no
+    /// effect) — #640's silent drop, one stage earlier: dropped PRE-inclusion
+    /// while the sequencer path was demonstrably landing txs around it.
     SilentDropPreInclusion,
 }
 
 /// Classify the accepted-at-submit malformed tx. Pure so it is unit-testable.
 /// `funded` selects whether a balance observation is required for a conclusive
 /// verdict; in unfunded mode `bad_poll` is a sentinel (no balances observed).
-/// `control_included` is the session's control-inclusion fact (the general
-/// valid control AND, in funded mode, the same-sender control) — it
-/// disambiguates a pre-inclusion silent drop (control healthy => red) from a
-/// sequencer stall (control also delayed => broken).
+/// `control_included` is the session's PRE-submit control-inclusion fact (the
+/// general valid control AND, in funded mode, the same-sender control).
+/// `post_control_included` is the POST-malformed-submission chain-progress
+/// fact: a fresh same-sender typed control submitted AFTER the malformed
+/// inclusion window expired, and whether IT included. The pre-submit fact
+/// alone cannot rule out a block-production stall that BEGINS around the
+/// malformed submission (pre-controls healthy, then everything stalls); the
+/// post-control proves the sequencer path was still landing txs while the
+/// malformed one vanished. BOTH are required for the pre-inclusion-drop red.
+/// `post_control_included` is only meaningful when `bad_included == false`
+/// (main passes a `true` sentinel otherwise — no post-probe is run or needed).
 fn classify_malformed(
     funded: bool,
     bad_included: bool,
     control_included: bool,
+    post_control_included: bool,
     bad_poll: BalancePoll,
 ) -> MalformedVerdict {
     if funded {
@@ -758,7 +836,7 @@ fn classify_malformed(
     if bad_included {
         return MalformedVerdict::SilentNoOp;
     }
-    if control_included {
+    if control_included && post_control_included {
         return MalformedVerdict::SilentDropPreInclusion;
     }
     MalformedVerdict::NotIncluded
@@ -773,38 +851,56 @@ mod tests {
     #[test]
     fn included_observed_baseline_is_red() {
         assert_eq!(
-            classify_malformed(true, true, true, BalancePoll::BelowThreshold),
+            classify_malformed(true, true, true, true, BalancePoll::BelowThreshold),
             MalformedVerdict::SilentNoOp
         );
     }
 
-    // Shape (b): accepted-at-submit + NEVER included + the session's control
-    // included healthily + balance reads working => red(10), the pre-inclusion
-    // silent drop (this is how #640 manifests on the real v0.2.0 localnet).
+    // Shape (b): accepted-at-submit + NEVER included + pre-submit controls
+    // healthy + the POST-malformed control ALSO included + reads working =>
+    // red(10), the pre-inclusion silent drop (this is how #640 manifests on
+    // the real v0.2.0 localnet).
     #[test]
-    fn not_included_control_healthy_is_red_pre_inclusion_drop() {
+    fn not_included_post_control_included_is_red_pre_inclusion_drop() {
         assert_eq!(
-            classify_malformed(true, false, true, BalancePoll::BelowThreshold),
+            classify_malformed(true, false, true, true, BalancePoll::BelowThreshold),
             MalformedVerdict::SilentDropPreInclusion
         );
         // Unfunded mode: no balances observed (sentinel BelowThreshold); the
-        // acceptance-then-drop with a healthy control is still the red shape.
+        // acceptance-then-drop bracketed by healthy controls is still red.
         assert_eq!(
-            classify_malformed(false, false, true, BalancePoll::BelowThreshold),
+            classify_malformed(false, false, true, true, BalancePoll::BelowThreshold),
             MalformedVerdict::SilentDropPreInclusion
         );
     }
 
-    // Stall disambiguation: never included AND the control was ALSO delayed/
-    // not-included => broken(30) — a stall, not evidence about #640.
+    // Gate-4 cell: never included, pre-submit controls healthy, but the
+    // POST-malformed control ALSO failed to include => a stall that began
+    // around the malformed submission => broken(30), NOT red.
     #[test]
-    fn both_not_included_is_broken_stall() {
+    fn not_included_post_control_not_included_is_broken() {
         for funded in [true, false] {
             assert_eq!(
-                classify_malformed(funded, false, false, BalancePoll::BelowThreshold),
+                classify_malformed(funded, false, true, false, BalancePoll::BelowThreshold),
                 MalformedVerdict::NotIncluded,
                 "funded={funded}"
             );
+        }
+    }
+
+    // Pre-existing-stall disambiguation: never included AND a pre-submit
+    // control was delayed/not-included => broken(30), regardless of the
+    // post-control.
+    #[test]
+    fn both_not_included_is_broken_stall() {
+        for funded in [true, false] {
+            for post in [true, false] {
+                assert_eq!(
+                    classify_malformed(funded, false, false, post, BalancePoll::BelowThreshold),
+                    MalformedVerdict::NotIncluded,
+                    "funded={funded} post={post}"
+                );
+            }
         }
     }
 
@@ -812,11 +908,13 @@ mod tests {
     // regardless of inclusion or control health.
     #[test]
     fn reads_all_failed_is_broken() {
-        for (bad_included, control_included) in [(true, true), (false, true), (false, false)] {
+        for (bad_included, ctrl, post) in
+            [(true, true, true), (false, true, true), (false, true, false), (false, false, false)]
+        {
             assert_eq!(
-                classify_malformed(true, bad_included, control_included, BalancePoll::Unobservable),
+                classify_malformed(true, bad_included, ctrl, post, BalancePoll::Unobservable),
                 MalformedVerdict::BalanceUnobservable,
-                "bad_included={bad_included} control_included={control_included}"
+                "bad_included={bad_included} ctrl={ctrl} post={post}"
             );
         }
     }
@@ -826,11 +924,11 @@ mod tests {
     #[test]
     fn included_observed_increase_is_fail() {
         assert_eq!(
-            classify_malformed(true, true, true, BalancePoll::Reached),
+            classify_malformed(true, true, true, true, BalancePoll::Reached),
             MalformedVerdict::Executed
         );
         assert_eq!(
-            classify_malformed(true, false, true, BalancePoll::Reached),
+            classify_malformed(true, false, true, true, BalancePoll::Reached),
             MalformedVerdict::Executed
         );
     }
@@ -845,7 +943,7 @@ mod tests {
             BalancePoll::Unobservable,
         ] {
             assert_eq!(
-                classify_malformed(false, true, true, poll),
+                classify_malformed(false, true, true, true, poll),
                 MalformedVerdict::SilentNoOp,
                 "poll={poll:?}"
             );
