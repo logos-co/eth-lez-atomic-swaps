@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use swap_orchestrator::{
+    cli::bot::{StateStore, reconcile, validate_timelocks},
     config::{
         LezAuth, SwapConfig, account_id_to_base58, eth_to_wei, parse_base58_account_id,
         parse_program_id,
@@ -384,6 +385,9 @@ pub unsafe extern "C" fn swap_ffi_run_maker(
             hashlock_opt,
             None,
             progress,
+            // Loop-only guards (timelock margin + crash journal) stay off for
+            // the single-shot UI swap, matching the CLI single-shot path.
+            None,
         )
         .await
         {
@@ -632,6 +636,42 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
 static MAKER_LOOP_CANCEL: AtomicBool = AtomicBool::new(false);
 
+/// Resolve where the maker loop's crash-recovery journal lives.
+///
+/// The CLI's `MAKER_STATE_FILE` env knob wins; otherwise the journal is
+/// persisted under the module's LEZ wallet home (the per-module storage
+/// directory the FFI config carries in wallet-auth mode). Raw-key auth with no
+/// explicit path is REFUSED rather than defaulted to the CLI's CWD-relative
+/// `.maker-state.json`: a ui-host's working directory is not stable across
+/// launch methods (Finder launches at `/`, launchers vary), so a CWD-relative
+/// journal written before a crash may resolve to a different directory on the
+/// next launch — reconcile would then see an empty journal, stranding the
+/// locked LEZ, and the 256-block replay watcher could rematch the still-OPEN
+/// ETH lock with an empty journal-skip belt (double-fund). A journal that can
+/// silently go missing voids the crash-recovery guarantee (PR #40), so the
+/// loop must not start with one.
+fn resolve_maker_state_file(
+    env_state_file: Option<&str>,
+    lez_auth: &LezAuth,
+) -> std::result::Result<std::path::PathBuf, String> {
+    if let Some(p) = env_state_file
+        && !p.trim().is_empty()
+    {
+        return Ok(p.into());
+    }
+    match lez_auth {
+        LezAuth::Wallet { home, .. } => Ok(home.join(".maker-state.json")),
+        LezAuth::RawKey(_) => Err(
+            "maker loop requires a stable crash-recovery journal location, but raw-key auth \
+             has no wallet home and the process working directory is not stable across \
+             launches. Either set MAKER_STATE_FILE to an absolute path, or configure a LEZ \
+             wallet home (lez_wallet_home + lez_account_id, env LEZ_WALLET_HOME + \
+             LEZ_ACCOUNT_ID) so the journal can live there."
+            .into(),
+        ),
+    }
+}
+
 /// Run the maker in an auto-accept loop. Blocks until cancelled, out of funds,
 /// or an unrecoverable error. Returns JSON: `{ "completed": N, "failed": M }`.
 ///
@@ -674,9 +714,72 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
         eth_timelock_minutes,
     };
 
+    // Timelock-margin startup guard, mirroring `swap-cli maker --loop`: honor
+    // the same TIMELOCK_MARGIN_MINUTES env knob and default to the CLI's 5
+    // minutes. The loop enforces this margin again at runtime against every
+    // matched ETH lock (P1-1), so validating here just fails fast on a config
+    // the loop would reject every lock for.
+    let margin_minutes: u64 = match std::env::var("TIMELOCK_MARGIN_MINUTES") {
+        Ok(v) => match v.trim().parse() {
+            Ok(m) => m,
+            Err(e) => return json_err(&format!("invalid TIMELOCK_MARGIN_MINUTES: {e}")),
+        },
+        Err(_) => 5,
+    };
+    if let Err(e) = validate_timelocks(lez_timelock_minutes, eth_timelock_minutes, margin_minutes) {
+        return json_err(&e.to_string());
+    }
+
+    // Durable crash-recovery journal (fund-safety, PR #40): an in-flight swap
+    // is recorded (fsync'd) BEFORE the LEZ lock and cleared only on a confirmed
+    // terminal state, so a crash cannot strand locked LEZ.
+    let state_file = match resolve_maker_state_file(
+        std::env::var("MAKER_STATE_FILE").ok().as_deref(),
+        &base_config.lez_auth,
+    ) {
+        Ok(p) => p,
+        Err(e) => return json_err(&e),
+    };
+
     runtime().block_on(async {
+        let store = match StateStore::load(&state_file) {
+            Ok(s) => Arc::new(s),
+            Err(e) => return json_err(&e.to_string()),
+        };
+
+        // Crash recovery FIRST, mirroring the CLI loop (P1-3): reconcile
+        // journaled in-flight swaps (refund / claim / resume) and fully RESOLVE
+        // them before accepting any new swap (P1-A), so the 256-block replay
+        // watcher can never rematch a still-OPEN lock and double-fund it.
+        let resume_handles = reconcile(&base_config, &store, /* json = */ true).await;
+        for handle in resume_handles {
+            let _ = handle.await;
+        }
+
+        // If entries remain unresolved (reconcile could not reach a terminal
+        // state — e.g. RPC/sequencer trouble), refuse to start, exactly like
+        // the CLI's stop-for-supervised-restart gate: running the loop past
+        // unresolved funds would let a fresh watcher rematch their locks.
+        let unresolved = store.snapshot().len();
+        if unresolved > 0 {
+            return json_err(&format!(
+                "{unresolved} in-flight swap(s) still unresolved after reconciliation; \
+                 not starting the maker loop — check RPC/sequencer connectivity and retry \
+                 (journal: {})",
+                state_file.display()
+            ));
+        }
+
         let (progress, progress_forwarder) = forward_progress(cb, user_data);
-        let result = run_maker_loop(&base_config, &auto_config, &MAKER_LOOP_CANCEL, progress).await;
+        let result = run_maker_loop(
+            &base_config,
+            &auto_config,
+            &MAKER_LOOP_CANCEL,
+            progress,
+            store.as_ref(),
+            margin_minutes * 60,
+        )
+        .await;
         let json = serde_json::json!({
             "completed": result.total_completed,
             "failed": result.total_failed,
@@ -787,5 +890,45 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
             std::env::temp_dir().join(format!("swap-ffi-missing-{}.env", std::process::id()));
         let err = dotenv_config_json(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("failed to read env file"));
+    }
+
+    /// 32 zero bytes in base58 — a syntactically valid LEZ account ID.
+    const TEST_ACCOUNT_B58: &str = "11111111111111111111111111111111";
+
+    fn wallet_auth(home: &str) -> LezAuth {
+        LezAuth::Wallet {
+            home: std::path::PathBuf::from(home),
+            account_id: parse_base58_account_id(TEST_ACCOUNT_B58).unwrap(),
+        }
+    }
+
+    #[test]
+    fn maker_state_file_env_knob_wins_over_auth_mode() {
+        for auth in [wallet_auth("/data/wallet"), LezAuth::RawKey("aa".into())] {
+            let path = resolve_maker_state_file(Some("/data/journal.json"), &auth).unwrap();
+            assert_eq!(path, std::path::PathBuf::from("/data/journal.json"));
+        }
+    }
+
+    #[test]
+    fn maker_state_file_defaults_under_wallet_home() {
+        // A blank env value counts as unset, mirroring the empty-string guard.
+        for env in [None, Some(""), Some("  ")] {
+            let path = resolve_maker_state_file(env, &wallet_auth("/data/wallet")).unwrap();
+            assert_eq!(
+                path,
+                std::path::PathBuf::from("/data/wallet/.maker-state.json")
+            );
+        }
+    }
+
+    #[test]
+    fn maker_state_file_refused_for_raw_key_without_env() {
+        // Fund-safety: a CWD-relative journal can silently go missing across
+        // ui-host launches (unstable CWD), voiding crash recovery — refuse to
+        // start rather than default, and name both remedies.
+        let err = resolve_maker_state_file(None, &LezAuth::RawKey("aa".into())).unwrap_err();
+        assert!(err.contains("MAKER_STATE_FILE"), "missing env remedy: {err}");
+        assert!(err.contains("lez_wallet_home"), "missing wallet remedy: {err}");
     }
 }
