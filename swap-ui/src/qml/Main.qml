@@ -99,6 +99,8 @@ Item {
         readonly property string coordinationEventsJson: root.backend ? root.backend.coordinationEventsJson : "[]"
         readonly property string coordinationLastResultJson: root.backend ? root.backend.coordinationLastResultJson : ""
 
+        readonly property string receiptsJson: root.backend ? root.backend.receiptsJson : "[]"
+
         signal offersFetched(string offersJson)
         signal offerPublished(string resultJson)
 
@@ -171,6 +173,16 @@ Item {
         function stopAutoAccept() {
             if (!root.ready) return
             root.watch(root.backend.stopAutoAccept())
+        }
+
+        function refreshHistory() {
+            if (!root.ready) return
+            root.watch(root.backend.refreshHistory())
+        }
+
+        function clearHistory() {
+            if (!root.ready) return
+            root.watch(root.backend.clearHistory())
         }
     }
 
