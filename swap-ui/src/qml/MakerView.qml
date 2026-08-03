@@ -65,6 +65,45 @@ ScrollView {
         return hr + "h " + (min % 60) + "m ago"
     }
 
+    // --- Receipt capture (session-only, PR1) ---------------------------
+    // The auto-accept loop reports per-swap completions without a result
+    // JSON (the backend discards the outcome until a later PR), so the
+    // receipt is assembled from what is in memory at completion time:
+    // config amounts/contracts/timelocks plus the taker's Delivery
+    // SwapAccept (hashlock, ETH swap ID, taker identities) surfaced in
+    // coordinationEventsJson.
+    property double swapEngagedMs: 0
+    property var loopReceipt: null
+    property int seenCompleted: 0
+
+    function buildLoopReceipt() {
+        var ctx = {
+            status: "completed",
+            lezAmount: swapBackend.lezAmount,
+            ethAmountEth: swapBackend.ethAmount,
+            ethHtlcAddress: swapBackend.ethHtlcAddress,
+            lezProgramId: swapBackend.lezHtlcProgramId,
+            lezTimelockMinutes: swapBackend.lezTimelockMinutes,
+            ethTimelockMinutes: swapBackend.ethTimelockMinutes,
+            startedMs: makerRoot.swapEngagedMs,
+            finishedMs: Date.now()
+        }
+        try {
+            var events = JSON.parse(swapBackend.coordinationEventsJson || "[]")
+            for (var i = events.length - 1; i >= 0; i--) {
+                var ev = events[i]
+                if (ev && ev.eth_swap_id) {
+                    ctx.hashlock = String(ev.hashlock || "")
+                    ctx.ethSwapId = String(ev.eth_swap_id || "")
+                    ctx.counterpartyEth = String(ev.taker_eth_address || "")
+                    ctx.counterpartyLez = String(ev.taker_lez_account || "")
+                    break
+                }
+            }
+        } catch (e) {}
+        return ctx
+    }
+
     Flickable {
         contentHeight: makerCol.implicitHeight + Theme.spacingXLarge * 2
         boundsBehavior: Flickable.StopAtBounds
@@ -78,6 +117,41 @@ ScrollView {
                 margins: Theme.spacingXLarge
             }
             spacing: Theme.spacingLarge
+
+            Connections {
+                target: swapBackend
+
+                function onAutoAcceptRunningChanged() {
+                    if (swapBackend.autoAcceptRunning) {
+                        // Fresh live session: the moment-of-completion card belongs
+                        // to the previous session — drop it.
+                        makerRoot.loopReceipt = null
+                        makerRoot.swapEngagedMs = 0
+                        makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                    }
+                }
+
+                function onMakerCurrentStepChanged() {
+                    // First step past idle marks the moment a buyer engaged.
+                    if (swapBackend.autoAcceptRunning
+                            && makerRoot.swapEngagedMs === 0
+                            && swapBackend.makerCurrentStep !== ""
+                            && swapBackend.makerCurrentStep !== "WaitingForEthLock"
+                            && swapBackend.makerCurrentStep !== "AutoAcceptStarted") {
+                        makerRoot.swapEngagedMs = Date.now()
+                    }
+                }
+
+                function onAutoAcceptCompletedChanged() {
+                    if (swapBackend.autoAcceptCompleted <= makerRoot.seenCompleted) {
+                        makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                        return
+                    }
+                    makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                    makerRoot.loopReceipt = makerRoot.buildLoopReceipt()
+                    makerRoot.swapEngagedMs = 0
+                }
+            }
 
             RowLayout {
                 Layout.fillWidth: true
@@ -277,6 +351,7 @@ ScrollView {
                     }
                 }
             }
+
 
             // --- Completed Swaps ---
             Rectangle {

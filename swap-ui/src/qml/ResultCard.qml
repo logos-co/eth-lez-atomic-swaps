@@ -6,6 +6,10 @@ Rectangle {
     id: card
 
     required property string resultJson
+    // "taker" | "maker" — the backend's `eth_tx` is role-dependent
+    // (src/swap/types.rs): the maker's ETH claim *tx hash* but the
+    // taker's ETH lock *swap ID*. Label it accordingly.
+    property string role: ""
 
     readonly property var parsed: {
         if (!resultJson) return null
@@ -73,8 +77,14 @@ Rectangle {
             model: card.isCompleted ? [
                 { label: "Hashlock", value: card.parsed.hashlock || "" },
                 { label: "Preimage", value: card.parsed.preimage || "" },
-                { label: "ETH Tx", value: card.parsed.eth_tx || "" },
-                { label: "LEZ Tx", value: card.parsed.lez_tx || "" },
+                { label: card.role === "taker" ? "ETH swap ID (lock)"
+                       : card.role === "maker" ? "ETH claim tx"
+                                               : "ETH tx",
+                  value: card.parsed.eth_tx || "" },
+                { label: card.role === "taker" ? "LEZ claim tx"
+                       : card.role === "maker" ? "LEZ lock tx"
+                                               : "LEZ tx",
+                  value: card.parsed.lez_tx || "" },
             ] : []
 
             TrustRow {
