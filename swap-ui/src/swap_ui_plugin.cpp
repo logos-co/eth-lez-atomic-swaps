@@ -179,7 +179,10 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setLezAmount(QStringLiteral("1"));
     setEthAmount(QStringLiteral("1"));
     setLezTimelockMinutes(QStringLiteral("5"));
-    setEthTimelockMinutes(QStringLiteral("10"));
+    // 15, not 10: the maker-loop runtime gate needs LEZ (5) + margin (5) +
+    // transit slack — 10 sits exactly on the margin boundary and rejects every
+    // taker lock by the tx-transit delta (see bot::validate_timelocks).
+    setEthTimelockMinutes(QStringLiteral("15"));
     setEthRecipientAddress(QString{});
     setLezTakerAccountId(QString{});
     setPollIntervalMs(QStringLiteral("2000"));
@@ -1364,6 +1367,19 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
     } else {
         setMakerCurrentStep(step);
         addMakerProgressStep(step);
+        // Mirror the single-shot maker.progress hook: the auto-accept loop
+        // forwards the per-swap EthLockDetected through maker_loop.progress,
+        // and without subscribing here the board-path maker never joins the
+        // per-swap coordination topic — the taker's SwapAccept reaches the
+        // maker's waku node and is dropped ("no subscribed peers found"), so
+        // coordination events never show on the board path.
+        if (step == QStringLiteral("EthLockDetected")) {
+            const auto hashlock = normaliseHashlock(
+                valueString(data, QStringLiteral("hashlock")));
+            if (!hashlock.isEmpty()) {
+                coordinationStart(QStringLiteral("maker"), hashlock);
+            }
+        }
     }
 }
 

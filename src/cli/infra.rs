@@ -245,7 +245,7 @@ LEZ_AMOUNT={lez_amount}
 ETH_AMOUNT={eth_amount}
 
 # Timelocks (absolute Unix timestamps)
-ETH_TIMELOCK_MINUTES=10
+ETH_TIMELOCK_MINUTES=15
 LEZ_TIMELOCK_MINUTES=5
 
 # Counterparty

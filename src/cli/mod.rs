@@ -29,9 +29,13 @@ const DEFAULT_LEZ_SEQUENCER_URL: &str = "http://127.0.0.1:3040";
 
 /// Single-shot timelock defaults (minutes) when unset. The standing `maker
 /// --loop` bot applies its own longer defaults instead (`bot::LOOP_DEFAULT_*`);
-/// these keep single-shot / demo flows fast and unchanged.
+/// these keep single-shot / demo flows fast. ETH is 15 (not 10): 10 sits
+/// exactly on the LEZ (5) + margin (5) boundary that the maker-loop runtime
+/// gate rejects for every taker lock (`bot::validate_timelocks` demands 2min
+/// transit slack on top), and the GUI ships the same 5/15 pair — one
+/// consistent default everywhere.
 const DEFAULT_LEZ_TIMELOCK_MINUTES: u64 = 5;
-const DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 10;
+const DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 15;
 
 /// Resolve the effective sequencer URL and whether it was explicitly provided.
 /// An explicit value (CLI flag or env var) is distinguishable from the default

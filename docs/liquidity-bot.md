@@ -14,7 +14,7 @@ swap-cli --env-file maker.env maker --loop
 
 | Piece | Behaviour |
 |---|---|
-| Startup timelock guard | Refuses to start unless `ETH_TIMELOCK_MINUTES >= LEZ_TIMELOCK_MINUTES + margin` (margin `--timelock-margin-minutes`, default 5, min 5 — EthHTLC enforces `minTimelockDelta = 300s`). Taker locks first with the long timelock; maker locks second with the short one. **In `--loop` these default to `LEZ_TIMELOCK_MINUTES=20` / `ETH_TIMELOCK_MINUTES=40` when unset** — longer than the single-shot maker's 5/10, because LEZ lock *confirmation alone* can take up to 300s on the public testnet and a 5-minute LEZ window would leave the maker almost no margin. An explicit env/flag value overrides the default. |
+| Startup timelock guard | Refuses to start unless `ETH_TIMELOCK_MINUTES >= LEZ_TIMELOCK_MINUTES + margin + 2` (margin `--timelock-margin-minutes`, default 5, min 5 — EthHTLC enforces `minTimelockDelta = 300s`; the extra 2 minutes is transit slack — the runtime gate re-anchors the LEZ expiry at match time, so a margin-exact config would pass startup and then reject every taker lock by the tx-transit delta). Taker locks first with the long timelock; maker locks second with the short one. **In `--loop` these default to `LEZ_TIMELOCK_MINUTES=20` / `ETH_TIMELOCK_MINUTES=40` when unset** — longer than the single-shot maker's 5/15, because LEZ lock *confirmation alone* can take up to 300s on the public testnet and a 5-minute LEZ window would leave the maker almost no margin. An explicit env/flag value overrides the default. |
 | Startup inventory guard | Refuses to start if LEZ balance < `LEZ_AMOUNT`. |
 | Heartbeat offer republish | Spawns `node offer-publisher/publish-offer.mjs` (override: `--publisher-script` / `OFFER_PUBLISHER_SCRIPT`), which republishes the offer every `--heartbeat-secs` (default 45, env `OFFER_HEARTBEAT_SECS`) with fresh timelocks. Needed because the fleet runs `store=false` — late-joining subscribers only see live messages. Supervised: restarted with 30s backoff if it dies. This is a **headless Node.js daemon dependency of `--loop`** (not browser tech): requires `node` >= 20 + `npm install` in `offer-publisher/`. See [Offer-publisher sidecar](#offer-publisher-sidecar-node-dependency) below. |
 | Crash recovery | In-flight swaps are journaled to `--state-file` (default `.maker-state.json`, env `MAKER_STATE_FILE`). On startup each journaled escrow is checked on-chain: expired → LEZ refunded (feeless); taker already claimed → ETH claimed with the revealed preimage (profit recovered); still live → resumed in a background watcher; terminal → dropped. |
@@ -69,7 +69,7 @@ LEZ_TAKER_ACCOUNT_ID=<designated taker's LEZ account, base58>   # the ONE counte
 LEZ_AMOUNT=150
 ETH_AMOUNT=0.001
 LEZ_TIMELOCK_MINUTES=20                 # --loop default when unset (single-shot: 5)
-ETH_TIMELOCK_MINUTES=40                 # --loop default when unset (single-shot: 10)
+ETH_TIMELOCK_MINUTES=40                 # --loop default when unset (single-shot: 15)
 OFFER_HEARTBEAT_SECS=45
 MAKER_STATE_FILE=/var/lib/lez-maker/state.json
 RESTRICT_COUNTERPARTY=true              # required to start --loop; accepts 1/0/true/false/yes/no (see below)
