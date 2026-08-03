@@ -104,41 +104,6 @@ ScrollView {
         return ctx
     }
 
-    Connections {
-        target: swapBackend
-
-        function onAutoAcceptRunningChanged() {
-            if (swapBackend.autoAcceptRunning) {
-                // Fresh live session: the moment-of-completion card belongs
-                // to the previous session — drop it.
-                makerRoot.loopReceipt = null
-                makerRoot.swapEngagedMs = 0
-                makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
-            }
-        }
-
-        function onMakerCurrentStepChanged() {
-            // First step past idle marks the moment a buyer engaged.
-            if (swapBackend.autoAcceptRunning
-                    && makerRoot.swapEngagedMs === 0
-                    && swapBackend.makerCurrentStep !== ""
-                    && swapBackend.makerCurrentStep !== "WaitingForEthLock"
-                    && swapBackend.makerCurrentStep !== "AutoAcceptStarted") {
-                makerRoot.swapEngagedMs = Date.now()
-            }
-        }
-
-        function onAutoAcceptCompletedChanged() {
-            if (swapBackend.autoAcceptCompleted <= makerRoot.seenCompleted) {
-                makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
-                return
-            }
-            makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
-            makerRoot.loopReceipt = makerRoot.buildLoopReceipt()
-            makerRoot.swapEngagedMs = 0
-        }
-    }
-
     Flickable {
         contentHeight: makerCol.implicitHeight + Theme.spacingXLarge * 2
         boundsBehavior: Flickable.StopAtBounds
@@ -152,6 +117,41 @@ ScrollView {
                 margins: Theme.spacingXLarge
             }
             spacing: Theme.spacingLarge
+
+            Connections {
+                target: swapBackend
+
+                function onAutoAcceptRunningChanged() {
+                    if (swapBackend.autoAcceptRunning) {
+                        // Fresh live session: the moment-of-completion card belongs
+                        // to the previous session — drop it.
+                        makerRoot.loopReceipt = null
+                        makerRoot.swapEngagedMs = 0
+                        makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                    }
+                }
+
+                function onMakerCurrentStepChanged() {
+                    // First step past idle marks the moment a buyer engaged.
+                    if (swapBackend.autoAcceptRunning
+                            && makerRoot.swapEngagedMs === 0
+                            && swapBackend.makerCurrentStep !== ""
+                            && swapBackend.makerCurrentStep !== "WaitingForEthLock"
+                            && swapBackend.makerCurrentStep !== "AutoAcceptStarted") {
+                        makerRoot.swapEngagedMs = Date.now()
+                    }
+                }
+
+                function onAutoAcceptCompletedChanged() {
+                    if (swapBackend.autoAcceptCompleted <= makerRoot.seenCompleted) {
+                        makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                        return
+                    }
+                    makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                    makerRoot.loopReceipt = makerRoot.buildLoopReceipt()
+                    makerRoot.swapEngagedMs = 0
+                }
+            }
 
             RowLayout {
                 Layout.fillWidth: true
@@ -352,11 +352,6 @@ ScrollView {
                 }
             }
 
-            // --- Receipt for the just-completed swap (session-only) ---
-            ReceiptCard {
-                role: "maker"
-                context: makerRoot.loopReceipt
-            }
 
             // --- Completed Swaps ---
             Rectangle {
