@@ -51,11 +51,31 @@ use crate::swap::refund::now_unix;
 pub const LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES: u64 = 20;
 pub const LOOP_DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 40;
 
+/// Transit slack (minutes) the startup timelock guard demands ON TOP of the
+/// safety margin. The runtime gate compares the taker's *absolute* on-chain ETH
+/// expiry (anchored when the TAKER parsed its config: `taker_now + eth_minutes`)
+/// against a *fresh* LEZ expiry the maker computes at match time
+/// (`match_now + lez_minutes`). So the gate effectively requires
+/// `eth_minutes >= lez_minutes + margin + (match_now - taker_now)` — and that
+/// last delta (taker config-parse → lock tx signed → mined on Sepolia →
+/// delivered by the event watcher) is never zero. A config that only satisfies
+/// `eth >= lez + margin` exactly therefore passes startup validation but loses
+/// the runtime race on EVERY candidate, wedging the loop at WaitingForEthLock
+/// (live-repro'd 2026-08-03 with the shipped 10/5/5 defaults). Two minutes
+/// comfortably covers Sepolia inclusion under congestion (~12s blocks, a few
+/// blocks of mempool delay) plus watcher polling, while keeping demo configs
+/// fast.
+pub const TIMELOCK_TRANSIT_SLACK_MINUTES: u64 = 2;
+
 /// Validate the maker-safety timelock invariant before the first offer:
 /// the ETH (taker, long) timelock must exceed the LEZ (maker, short) timelock
-/// by at least `margin_minutes`. A margin below 5 minutes is rejected — the
-/// EthHTLC contract enforces `minTimelockDelta = 300s` and the maker needs
-/// room to observe the preimage and claim.
+/// by at least `margin_minutes` PLUS [`TIMELOCK_TRANSIT_SLACK_MINUTES`]. A
+/// margin below 5 minutes is rejected — the EthHTLC contract enforces
+/// `minTimelockDelta = 300s` and the maker needs room to observe the preimage
+/// and claim. The extra slack accounts for the taker's lock-transit delay: the
+/// runtime gate re-anchors the LEZ expiry at match time, so a boundary-exact
+/// config would start cleanly and then reject every single ETH lock (see the
+/// slack constant's doc for the arithmetic).
 pub fn validate_timelocks(lez_minutes: u64, eth_minutes: u64, margin_minutes: u64) -> Result<()> {
     if margin_minutes < 5 {
         return Err(SwapError::InvalidConfig(format!(
@@ -63,12 +83,19 @@ pub fn validate_timelocks(lez_minutes: u64, eth_minutes: u64, margin_minutes: u6
              EthHTLC minTimelockDelta is 300s and the maker needs claim headroom"
         )));
     }
-    if eth_minutes < lez_minutes + margin_minutes {
+    let required = lez_minutes
+        .saturating_add(margin_minutes)
+        .saturating_add(TIMELOCK_TRANSIT_SLACK_MINUTES);
+    if eth_minutes < required {
         return Err(SwapError::InvalidConfig(format!(
             "unsafe timelocks: ETH_TIMELOCK_MINUTES ({eth_minutes}) must be >= \
-             LEZ_TIMELOCK_MINUTES ({lez_minutes}) + margin ({margin_minutes}). \
+             LEZ_TIMELOCK_MINUTES ({lez_minutes}) + margin ({margin_minutes}) + \
+             transit slack ({TIMELOCK_TRANSIT_SLACK_MINUTES}) = {required}. \
              The taker locks first with the LONG timelock; the maker locks second \
-             with the SHORT one."
+             with the SHORT one, and the maker's runtime gate re-anchors the LEZ \
+             expiry at match time — without the slack, every taker lock loses the \
+             transit race and is rejected. Raise ETH_TIMELOCK_MINUTES to at least \
+             {required} (or lower LEZ_TIMELOCK_MINUTES / the margin)."
         )));
     }
     Ok(())
@@ -1373,7 +1400,10 @@ mod tests {
     #[test]
     fn timelock_guard_accepts_safe_margins() {
         assert!(validate_timelocks(20, 40, 5).is_ok());
-        assert!(validate_timelocks(5, 10, 5).is_ok());
+        // The shipped GUI defaults (LEZ 5 / ETH 15 / margin 5): 15 >= 5+5+2.
+        assert!(validate_timelocks(5, 15, 5).is_ok());
+        // Exactly on the strict boundary (margin + transit slack) passes.
+        assert!(validate_timelocks(5, 12, 5).is_ok());
     }
 
     #[test]
@@ -1386,6 +1416,22 @@ mod tests {
         assert!(validate_timelocks(20, 40, 2).is_err());
         // Delta smaller than requested margin.
         assert!(validate_timelocks(20, 24, 5).is_err());
+    }
+
+    // The old shipped defaults (LEZ 5 / ETH 10 / margin 5) sit exactly on the
+    // margin boundary: they used to pass startup validation but the runtime
+    // gate — which re-anchors the LEZ expiry at match time — then rejected
+    // every taker lock by the tx-transit delta, silently wedging the maker
+    // loop at WaitingForEthLock (live-repro'd 2026-08-03). The strict guard
+    // must fail fast on any config without transit slack.
+    #[test]
+    fn timelock_guard_rejects_margin_boundary_without_transit_slack() {
+        // The exact old-default wedge case.
+        assert!(validate_timelocks(5, 10, 5).is_err());
+        // One minute of slack is still short of the required two.
+        assert!(validate_timelocks(5, 11, 5).is_err());
+        // Same boundary at loop-scale values.
+        assert!(validate_timelocks(20, 25, 5).is_err());
     }
 
     #[test]
