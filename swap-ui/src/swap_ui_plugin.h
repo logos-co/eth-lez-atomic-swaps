@@ -1,6 +1,7 @@
 #ifndef SWAP_UI_PLUGIN_H
 #define SWAP_UI_PLUGIN_H
 
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -55,6 +56,9 @@ public:
     void startAutoAccept() override;
     void stopAutoAccept() override;
 
+    void refreshHistory() override;
+    void clearHistory() override;
+
 private:
     QString configJson() const;
     QString messagingConfigJson() const;
@@ -89,6 +93,29 @@ private:
     void handleProgressEvent(const QString& eventName, const QJsonObject& payload);
     void handleFinishedEvent(const QString& eventName, const QJsonObject& payload);
     void addValidationError(QJsonObject& errors, const QString& key, const QString& message) const;
+
+    // Receipt capture + durable JSONL journal (receipt cards, PR2).
+    // Evidence objects accumulate per-swap data from the progress events the
+    // plugin already receives; a receipt is assembled and journaled at each
+    // completion point (finished events, maker-loop per-swap completions,
+    // successful manual refunds).
+    void snapshotEvidenceFromConfig(QJsonObject& evidence) const;
+    void beginTakerEvidence(const QJsonObject& offerContext);
+    void beginMakerEvidence(bool stampStart);
+    void captureTakerProgressEvidence(const QString& step,
+                                      const QJsonObject& data,
+                                      const QJsonObject& payload);
+    void captureMakerProgressEvidence(const QString& step,
+                                      const QJsonObject& data,
+                                      const QJsonObject& payload);
+    QJsonObject buildReceipt(const QString& role,
+                             const QJsonObject& result,
+                             const QJsonObject& evidence) const;
+    void journalReceipt(const QJsonObject& receipt);
+    void loadReceiptsFromDisk();
+    void publishReceiptsProp();
+    static QString receiptsFilePath();
+    static qint64 eventTimestampMs(const QJsonObject& payload);
 
     // Per-swap Delivery coordination helpers (M2). See delivery-dogfooding.md.
     void coordinationStart(const QString& role, const QString& hashlockHex);
@@ -125,6 +152,15 @@ private:
     QString m_coordinationRole;
     bool m_coordinationTakerPublished = false;
     bool m_swapEventsSubscribed = false;
+
+    // Receipt journal state. m_receipts is the surfaced in-memory list
+    // (newest first, capped); the evidence objects hold the in-flight swap's
+    // accumulated context per role. m_pendingOfferContext carries the
+    // accepted offer from acceptOfferAndStartTaker into startTaker.
+    QJsonArray m_receipts;
+    QJsonObject m_takerEvidence;
+    QJsonObject m_makerEvidence;
+    QJsonObject m_pendingOfferContext;
 };
 
 #endif // SWAP_UI_PLUGIN_H

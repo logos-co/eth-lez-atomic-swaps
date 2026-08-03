@@ -17,7 +17,11 @@ Item {
             background: Rectangle { color: Theme.surface }
 
             Repeater {
-                model: ["Market", "Config", "Maker", "Taker", "Refund"]
+                // Order is load-bearing: OfferBoard navigates by index
+                // (tabConfig=1 / tabMaker=2 / tabTaker=3), so new tabs are
+                // appended, never inserted. Must stay in lockstep with the
+                // StackLayout below.
+                model: ["Market", "Config", "Maker", "Taker", "Refund", "History"]
                 TabButton {
                     text: modelData
                     width: implicitWidth
@@ -191,6 +195,7 @@ Item {
             MakerView {}
             TakerView { id: takerView }
             RefundView {}
+            HistoryView {}
         }
 
         // Status bar

@@ -15,6 +15,7 @@
 #include <QMetaType>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QVariant>
 #include <QDebug>
 
@@ -23,6 +24,11 @@
 namespace {
 
 constexpr const char* kSwapModuleName = "swap";
+
+// Receipt journal caps. The surfaced QML property carries at most this many
+// receipts (newest first); the on-disk JSONL keeps everything. One line per
+// swap keeps growth modest — rotation is deliberately future work.
+constexpr int kMaxSurfacedReceipts = 200;
 
 // Out-of-band trace logger. Basecamp installs a Qt message handler that
 // swallows qInfo/qWarning/qCritical, so plugin-side diagnostics never reach
@@ -227,6 +233,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setCoordinationEventsJson(QStringLiteral("[]"));
     setCoordinationLastResultJson(QString{});
 
+    setReceiptsJson(QStringLiteral("[]"));
+
     m_messagingPollTimer.setInterval(2000);
     connect(&m_messagingPollTimer, &QTimer::timeout,
             this, &SwapUiPlugin::pollMessagingStatus);
@@ -276,6 +284,7 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     });
 
     swapUiTrace(QStringLiteral("initLogos: starting"));
+    loadReceiptsFromDisk();
     const bool subscribed = subscribeToSwapEvents();
     swapUiTrace(QStringLiteral("initLogos: subscribeToSwapEvents=%1").arg(subscribed ? "ok" : "failed"));
     m_messagingPollTimer.start();
@@ -857,6 +866,12 @@ void SwapUiPlugin::fetchBalances()
 
 void SwapUiPlugin::handleMakerFinished(const QString& resultJson)
 {
+    // Journal before any state resets: the receipt merges the authoritative
+    // result JSON with the evidence accumulated from progress events.
+    journalReceipt(buildReceipt(QStringLiteral("maker"),
+                                parseObject(resultJson), m_makerEvidence));
+    m_makerEvidence = QJsonObject{};
+
     setMakerResultJson(resultJson);
     if (!isErrorResult(resultJson)) {
         addMakerProgressStep(QStringLiteral("EthClaimed"));
@@ -876,6 +891,11 @@ void SwapUiPlugin::handleMakerFinished(const QString& resultJson)
 
 void SwapUiPlugin::handleTakerFinished(const QString& resultJson)
 {
+    // Journal before any state resets (see handleMakerFinished).
+    journalReceipt(buildReceipt(QStringLiteral("taker"),
+                                parseObject(resultJson), m_takerEvidence));
+    m_takerEvidence = QJsonObject{};
+
     setTakerResultJson(resultJson);
     if (!isErrorResult(resultJson)) {
         addTakerProgressStep(QStringLiteral("LezClaimed"));
@@ -990,6 +1010,7 @@ void SwapUiPlugin::startMaker(const QString& hashlockHex)
     setMakerRunning(true);
     setMakerJobId(QString{});
     clearMakerProgress();
+    beginMakerEvidence(true);
     setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
     addMakerProgressStep(QStringLiteral("WaitingForEthLock"));
     setStatus(QStringLiteral("Starting maker swap..."));
@@ -1002,6 +1023,12 @@ void SwapUiPlugin::startMaker(const QString& hashlockHex)
 
 void SwapUiPlugin::startTaker(const QString& preimageHex)
 {
+    // Consume the accepted-offer context up front (set by
+    // acceptOfferAndStartTaker just before this call) so a rejected start
+    // can never leak a stale offer into a later manual run.
+    const QJsonObject offerContext = m_pendingOfferContext;
+    m_pendingOfferContext = QJsonObject{};
+
     if (!m_swap || takerRunning() || makerRunning() || autoAcceptRunning()) {
         return;
     }
@@ -1017,6 +1044,7 @@ void SwapUiPlugin::startTaker(const QString& preimageHex)
     setTakerRunning(true);
     setTakerJobId(QString{});
     clearTakerProgress();
+    beginTakerEvidence(offerContext);
     setTakerCurrentStep(QStringLiteral("PreimageGenerated"));
     addTakerProgressStep(QStringLiteral("PreimageGenerated"));
     setStatus(QStringLiteral("Starting taker swap..."));
@@ -1036,6 +1064,10 @@ void SwapUiPlugin::acceptOfferAndStartTaker(const QString& offerJson)
         return;
     }
     applyOfferObject(offer);
+    // Hand the full offer to startTaker's evidence capture: it carries the
+    // exact wei amount, the maker's LEZ account and the absolute timelocks,
+    // none of which survive applyOfferObject's config-field mapping.
+    m_pendingOfferContext = offer;
     startTaker(QString{});
 }
 
@@ -1051,12 +1083,34 @@ void SwapUiPlugin::refundLez(const QString& hashlockHex)
     setMakerRunning(true);
     setRefundsLoading(true);
     clearMakerProgress();
+    // Minimal evidence for a manual recovery: only what is actually known
+    // about the refunded swap. Config amounts/counterparty describe the
+    // *current* rate, not the (possibly older) swap being refunded, so a
+    // truthful receipt omits them.
+    m_makerEvidence = QJsonObject{};
+    m_makerEvidence.insert(QStringLiteral("started_ms"),
+                           static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    m_makerEvidence.insert(QStringLiteral("hashlock"), normaliseHashlock(hashlockHex));
+    m_makerEvidence.insert(QStringLiteral("lez_program_id"), lezHtlcProgramId());
+    m_makerEvidence.insert(QStringLiteral("lez_sequencer"), lezSequencerUrl());
     setMakerCurrentStep(QStringLiteral("Refunding"));
     addMakerProgressStep(QStringLiteral("Refunding"));
     setStatus(QStringLiteral("Refunding LEZ..."));
     setBusyState();
 
     m_swap->refundLezAsync(configJson(), hashlockHex, [this](QString result) {
+        // Journal successful manual refunds only: failed attempts are
+        // usually premature retries against an unexpired timelock, not swap
+        // outcomes, and would spam the history.
+        if (!isErrorResult(result)) {
+            QJsonObject refundResult;
+            refundResult.insert(QStringLiteral("status"), QStringLiteral("refunded"));
+            refundResult.insert(QStringLiteral("lez_refund_tx"),
+                                valueString(parseObject(result), QStringLiteral("tx_hash")));
+            journalReceipt(buildReceipt(QStringLiteral("maker"),
+                                        refundResult, m_makerEvidence));
+        }
+        m_makerEvidence = QJsonObject{};
         setMakerResultJson(result);
         setMakerRunning(false);
         setRefundsLoading(false);
@@ -1080,12 +1134,29 @@ void SwapUiPlugin::refundEth(const QString& swapIdHex)
     setTakerRunning(true);
     setRefundsLoading(true);
     clearTakerProgress();
+    // Minimal evidence for a manual recovery — see refundLez.
+    m_takerEvidence = QJsonObject{};
+    m_takerEvidence.insert(QStringLiteral("started_ms"),
+                           static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    m_takerEvidence.insert(QStringLiteral("eth_swap_id"), swapIdHex.trimmed());
+    m_takerEvidence.insert(QStringLiteral("eth_htlc_address"), ethHtlcAddress());
+    m_takerEvidence.insert(QStringLiteral("lez_sequencer"), lezSequencerUrl());
     setTakerCurrentStep(QStringLiteral("Refunding"));
     addTakerProgressStep(QStringLiteral("Refunding"));
     setStatus(QStringLiteral("Refunding ETH..."));
     setBusyState();
 
     m_swap->refundEthAsync(configJson(), swapIdHex, [this](QString result) {
+        // Successful manual refunds only — see refundLez.
+        if (!isErrorResult(result)) {
+            QJsonObject refundResult;
+            refundResult.insert(QStringLiteral("status"), QStringLiteral("refunded"));
+            refundResult.insert(QStringLiteral("eth_refund_tx"),
+                                valueString(parseObject(result), QStringLiteral("tx_hash")));
+            journalReceipt(buildReceipt(QStringLiteral("taker"),
+                                        refundResult, m_takerEvidence));
+        }
+        m_takerEvidence = QJsonObject{};
         setTakerResultJson(result);
         setTakerRunning(false);
         setRefundsLoading(false);
@@ -1282,6 +1353,7 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         }
         setMakerCurrentStep(step);
         addMakerProgressStep(step);
+        captureMakerProgressEvidence(step, data, payload);
         if (step == QStringLiteral("EthLockDetected")) {
             const auto hashlock = normaliseHashlock(
                 valueString(data, QStringLiteral("hashlock")));
@@ -1298,6 +1370,7 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         }
         setTakerCurrentStep(step);
         addTakerProgressStep(step);
+        captureTakerProgressEvidence(step, data, payload);
         if (step == QStringLiteral("PreimageGenerated")) {
             const auto hashlock = normaliseHashlock(
                 valueString(data, QStringLiteral("hashlock")));
@@ -1330,6 +1403,10 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         if (m_coordinationRole == QStringLiteral("maker")) {
             coordinationStop();
         }
+        // Fresh iteration, fresh evidence: any per-swap data still held
+        // belongs to the previous iteration's swap and was journaled at its
+        // completion event.
+        beginMakerEvidence(false);
     } else if (step == QStringLiteral("AutoAcceptSwapCompleted")) {
         setAutoAcceptCompleted(autoAcceptCompleted() + 1);
         QJsonObject entry;
@@ -1341,6 +1418,21 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         auto history = swapHistory();
         history.prepend(compactJson(entry));
         setSwapHistory(history);
+        // Journal the per-swap completion. AutoAcceptSwapCompleted itself
+        // carries only {iteration, status} (outcome enrichment is PR3), but
+        // the loop forwards the per-swap progress steps through
+        // maker_loop.progress, so the accumulated evidence already holds
+        // hashlock, LEZ lock tx, preimage and ETH claim tx.
+        {
+            QJsonObject result;
+            result.insert(QStringLiteral("status"), QStringLiteral("completed"));
+            QJsonObject receipt = buildReceipt(QStringLiteral("maker"),
+                                               result, m_makerEvidence);
+            receipt.insert(QStringLiteral("iteration"),
+                           data.value(QStringLiteral("iteration")).toInt(autoAcceptIteration()));
+            journalReceipt(receipt);
+            beginMakerEvidence(false);
+        }
         clearMakerProgress();
         setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
     } else if (step == QStringLiteral("AutoAcceptSwapFailed")) {
@@ -1353,6 +1445,19 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         auto history = swapHistory();
         history.prepend(compactJson(entry));
         setSwapHistory(history);
+        // Journal the per-swap failure — the history is a truthful log.
+        {
+            QJsonObject result;
+            result.insert(QStringLiteral("status"), QStringLiteral("failed"));
+            result.insert(QStringLiteral("error"),
+                          valueString(data, QStringLiteral("error")));
+            QJsonObject receipt = buildReceipt(QStringLiteral("maker"),
+                                               result, m_makerEvidence);
+            receipt.insert(QStringLiteral("iteration"),
+                           data.value(QStringLiteral("iteration")).toInt(autoAcceptIteration()));
+            journalReceipt(receipt);
+            beginMakerEvidence(false);
+        }
         clearMakerProgress();
         setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
     } else if (step == QStringLiteral("AutoAcceptInsufficientFunds")) {
@@ -1367,6 +1472,10 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
     } else {
         setMakerCurrentStep(step);
         addMakerProgressStep(step);
+        // The loop forwards the per-swap maker steps through
+        // maker_loop.progress — capture their evidence exactly like the
+        // single-shot path so loop receipts carry tx hashes too.
+        captureMakerProgressEvidence(step, data, payload);
         // Mirror the single-shot maker.progress hook: the auto-accept loop
         // forwards the per-swap EthLockDetected through maker_loop.progress,
         // and without subscribing here the board-path maker never joins the
@@ -1403,6 +1512,313 @@ void SwapUiPlugin::handleFinishedEvent(const QString& eventName, const QJsonObje
     } else if (eventName == QStringLiteral("maker_loop.finished")) {
         handleAutoAcceptFinished(resultJson);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Receipt capture + durable JSONL journal (receipt cards, PR2)
+// ---------------------------------------------------------------------------
+
+// Durable per-profile journal location. Basecamp 0.2.x resolves its whole
+// data tree from LOGOS_USER_DIR (app/utils/LogosBasecampPaths.h
+// baseDirectory()), with module state under <base>/module_data/<name>/ —
+// mirror that so the journal sits beside the host's own per-profile state.
+// When the override is absent (bare launch), fall back to Qt's
+// AppDataLocation, which is also Basecamp's own fallback. Per-profile
+// isolation falls out of the launch harness: each profile gets its own
+// absolute LOGOS_USER_DIR and runs at most one Basecamp instance, so no
+// cross-process append interleaving is expected (single-writer assumption).
+QString SwapUiPlugin::receiptsFilePath()
+{
+    QString base = qEnvironmentVariable("LOGOS_USER_DIR");
+    if (base.isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
+    return QDir(base).filePath(QStringLiteral("module_data/swap_ui/receipts.jsonl"));
+}
+
+qint64 SwapUiPlugin::eventTimestampMs(const QJsonObject& payload)
+{
+    const auto ts = static_cast<qint64>(
+        payload.value(QStringLiteral("timestamp_ms")).toDouble(0));
+    return ts > 0 ? ts : QDateTime::currentMSecsSinceEpoch();
+}
+
+// Config values every receipt wants regardless of role. Snapshotted at run
+// start so a mid-swap config edit cannot corrupt the receipt.
+void SwapUiPlugin::snapshotEvidenceFromConfig(QJsonObject& evidence) const
+{
+    evidence.insert(QStringLiteral("lez_amount"), lezAmount());
+    evidence.insert(QStringLiteral("eth_amount"), ethAmount());
+    evidence.insert(QStringLiteral("eth_htlc_address"), ethHtlcAddress());
+    evidence.insert(QStringLiteral("lez_program_id"), lezHtlcProgramId());
+    evidence.insert(QStringLiteral("lez_timelock_minutes"), lezTimelockMinutes());
+    evidence.insert(QStringLiteral("eth_timelock_minutes"), ethTimelockMinutes());
+    evidence.insert(QStringLiteral("lez_sequencer"), lezSequencerUrl());
+}
+
+// Taker evidence starts at startTaker/refundEth. After applyOfferObject the
+// recipient field holds the maker's ETH address, so it doubles as the
+// counterparty for both the board flow and a manually configured run. The
+// offer context (when the run came from an accepted offer) adds the exact
+// wei amount, the maker's LEZ account and the absolute timelocks.
+void SwapUiPlugin::beginTakerEvidence(const QJsonObject& offerContext)
+{
+    m_takerEvidence = QJsonObject{};
+    snapshotEvidenceFromConfig(m_takerEvidence);
+    m_takerEvidence.insert(QStringLiteral("started_ms"),
+                           QDateTime::currentMSecsSinceEpoch());
+    m_takerEvidence.insert(QStringLiteral("counterparty_eth"), ethRecipientAddress());
+    if (offerContext.isEmpty()) {
+        return;
+    }
+    m_takerEvidence.insert(QStringLiteral("eth_amount_wei"),
+                           valueString(offerContext, QStringLiteral("eth_amount")));
+    m_takerEvidence.insert(QStringLiteral("counterparty_lez"),
+                           valueString(offerContext, QStringLiteral("maker_lez_account")));
+    const auto lezUnix = offerContext.value(QStringLiteral("lez_timelock")).toDouble(0);
+    const auto ethUnix = offerContext.value(QStringLiteral("eth_timelock")).toDouble(0);
+    if (lezUnix > 0) {
+        m_takerEvidence.insert(QStringLiteral("lez_timelock_unix"), lezUnix);
+    }
+    if (ethUnix > 0) {
+        m_takerEvidence.insert(QStringLiteral("eth_timelock_unix"), ethUnix);
+    }
+}
+
+// Maker evidence starts at startMaker/refundLez/startAutoAccept and resets
+// on every AutoAcceptIteration. Loop iterations pass stampStart=false: the
+// swap's wall clock starts when a buyer engages (EthLockDetected), not when
+// the listener goes live.
+void SwapUiPlugin::beginMakerEvidence(bool stampStart)
+{
+    m_makerEvidence = QJsonObject{};
+    snapshotEvidenceFromConfig(m_makerEvidence);
+    if (stampStart) {
+        m_makerEvidence.insert(QStringLiteral("started_ms"),
+                               QDateTime::currentMSecsSinceEpoch());
+    }
+    // Config's preconfigured taker recipient; overwritten by the Delivery
+    // SwapAccept when board-path coordination supplies the real identity.
+    m_makerEvidence.insert(QStringLiteral("counterparty_lez"), lezTakerAccountId());
+}
+
+void SwapUiPlugin::captureTakerProgressEvidence(const QString& step,
+                                                const QJsonObject& data,
+                                                const QJsonObject& payload)
+{
+    Q_UNUSED(payload);
+    if (step == QStringLiteral("PreimageGenerated")) {
+        m_takerEvidence.insert(QStringLiteral("hashlock"),
+                               valueString(data, QStringLiteral("hashlock")));
+    } else if (step == QStringLiteral("EthLocked")) {
+        m_takerEvidence.insert(QStringLiteral("eth_swap_id"),
+                               valueString(data, QStringLiteral("swap_id")));
+    } else if (step == QStringLiteral("LezClaimed")) {
+        m_takerEvidence.insert(QStringLiteral("lez_claim_tx"),
+                               valueString(data, QStringLiteral("tx_hash")));
+    }
+}
+
+void SwapUiPlugin::captureMakerProgressEvidence(const QString& step,
+                                                const QJsonObject& data,
+                                                const QJsonObject& payload)
+{
+    if (step == QStringLiteral("EthLockDetected")) {
+        if (!m_makerEvidence.contains(QStringLiteral("started_ms"))) {
+            m_makerEvidence.insert(QStringLiteral("started_ms"),
+                                   static_cast<double>(eventTimestampMs(payload)));
+        }
+        m_makerEvidence.insert(QStringLiteral("eth_swap_id"),
+                               valueString(data, QStringLiteral("swap_id")));
+        m_makerEvidence.insert(QStringLiteral("hashlock"),
+                               valueString(data, QStringLiteral("hashlock")));
+    } else if (step == QStringLiteral("LezLocked")) {
+        m_makerEvidence.insert(QStringLiteral("lez_lock_tx"),
+                               valueString(data, QStringLiteral("tx_hash")));
+    } else if (step == QStringLiteral("PreimageRevealed")) {
+        m_makerEvidence.insert(QStringLiteral("preimage"),
+                               valueString(data, QStringLiteral("preimage")));
+    } else if (step == QStringLiteral("EthClaimed")) {
+        m_makerEvidence.insert(QStringLiteral("eth_claim_tx"),
+                               valueString(data, QStringLiteral("tx_hash")));
+    }
+}
+
+// Assemble a swap-receipt/1 object (dossier §3b; field-compatible with the
+// PR1 copy-JSON receipt, extended additively with `network`). The result
+// JSON is authoritative where present; accumulated evidence fills the rest.
+// The role-dependent `eth_tx`/`lez_tx` semantics from src/swap/types.rs are
+// resolved here once, so consumers never see the mislabel: eth_tx is the
+// maker's ETH *claim tx* but the taker's ETH lock *swap id*; lez_tx is the
+// maker's LEZ *lock tx* but the taker's LEZ *claim tx*.
+QJsonObject SwapUiPlugin::buildReceipt(const QString& role,
+                                       const QJsonObject& result,
+                                       const QJsonObject& evidence) const
+{
+    const auto str = [](const QJsonObject& obj, const char* key) {
+        return valueString(obj, QString::fromLatin1(key));
+    };
+    const auto pick = [](const QString& a, const QString& b) {
+        return !a.isEmpty() ? a : b;
+    };
+    const auto jstr = [](const QString& s) {
+        return s.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(s);
+    };
+    const auto jnum = [&evidence](const char* key) {
+        const auto v = evidence.value(QString::fromLatin1(key)).toDouble(0);
+        return v > 0 ? QJsonValue(v) : QJsonValue(QJsonValue::Null);
+    };
+
+    const bool maker = role == QStringLiteral("maker");
+    const QString error = str(result, "error");
+    QString status = str(result, "status");
+    if (status.isEmpty()) {
+        status = error.isEmpty() ? QStringLiteral("unknown") : QStringLiteral("failed");
+    }
+
+    const QString resultEthTx = str(result, "eth_tx");
+    const QString resultLezTx = str(result, "lez_tx");
+
+    QJsonObject eth;
+    eth.insert(QStringLiteral("swap_id"),
+               jstr(maker ? str(evidence, "eth_swap_id")
+                          : pick(resultEthTx, str(evidence, "eth_swap_id"))));
+    // ETH lock tx hash is not on the wire yet — PR3 adds it to EthLocked.
+    eth.insert(QStringLiteral("lock_tx"), QJsonValue::Null);
+    eth.insert(QStringLiteral("claim_tx"),
+               jstr(maker ? pick(resultEthTx, str(evidence, "eth_claim_tx"))
+                          : QString{}));
+    eth.insert(QStringLiteral("refund_tx"), jstr(str(result, "eth_refund_tx")));
+    eth.insert(QStringLiteral("htlc_address"), jstr(str(evidence, "eth_htlc_address")));
+    eth.insert(QStringLiteral("counterparty"), jstr(str(evidence, "counterparty_eth")));
+
+    QJsonObject lez;
+    lez.insert(QStringLiteral("lock_tx"),
+               jstr(maker ? pick(resultLezTx, str(evidence, "lez_lock_tx"))
+                          : QString{}));
+    lez.insert(QStringLiteral("claim_tx"),
+               jstr(maker ? QString{}
+                          : pick(resultLezTx, str(evidence, "lez_claim_tx"))));
+    lez.insert(QStringLiteral("refund_tx"), jstr(str(result, "lez_refund_tx")));
+    lez.insert(QStringLiteral("program_id"), jstr(str(evidence, "lez_program_id")));
+    lez.insert(QStringLiteral("counterparty"), jstr(str(evidence, "counterparty_lez")));
+
+    QJsonObject timelocks;
+    timelocks.insert(QStringLiteral("lez_unix"), jnum("lez_timelock_unix"));
+    timelocks.insert(QStringLiteral("eth_unix"), jnum("eth_timelock_unix"));
+    timelocks.insert(QStringLiteral("lez_minutes"), jstr(str(evidence, "lez_timelock_minutes")));
+    timelocks.insert(QStringLiteral("eth_minutes"), jstr(str(evidence, "eth_timelock_minutes")));
+
+    QJsonObject receipt;
+    receipt.insert(QStringLiteral("schema"), QStringLiteral("swap-receipt/1"));
+    receipt.insert(QStringLiteral("role"), role);
+    receipt.insert(QStringLiteral("status"), status);
+    receipt.insert(QStringLiteral("hashlock"),
+                   jstr(pick(str(result, "hashlock"), str(evidence, "hashlock"))));
+    receipt.insert(QStringLiteral("preimage"),
+                   jstr(pick(str(result, "preimage"), str(evidence, "preimage"))));
+    receipt.insert(QStringLiteral("lez_amount"), jstr(str(evidence, "lez_amount")));
+    receipt.insert(QStringLiteral("eth_amount"), jstr(str(evidence, "eth_amount")));
+    receipt.insert(QStringLiteral("eth_amount_wei"), jstr(str(evidence, "eth_amount_wei")));
+    receipt.insert(QStringLiteral("eth"), eth);
+    receipt.insert(QStringLiteral("lez"), lez);
+    receipt.insert(QStringLiteral("timelocks"), timelocks);
+    receipt.insert(QStringLiteral("started_ms"), jnum("started_ms"));
+    receipt.insert(QStringLiteral("finished_ms"),
+                   static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    receipt.insert(QStringLiteral("network"),
+                   QJsonObject{{QStringLiteral("lez_sequencer"),
+                                jstr(str(evidence, "lez_sequencer"))}});
+    if (!error.isEmpty()) {
+        receipt.insert(QStringLiteral("error"), error);
+    }
+    return receipt;
+}
+
+void SwapUiPlugin::publishReceiptsProp()
+{
+    setReceiptsJson(QString::fromUtf8(
+        QJsonDocument(m_receipts).toJson(QJsonDocument::Compact)));
+}
+
+// Surface first (the in-memory list drives the History tab even if the disk
+// append fails), then append one compact JSONL line with the trace logger's
+// open-append-flush discipline. A write failure is logged and otherwise
+// swallowed — receipts must never take the UI down.
+void SwapUiPlugin::journalReceipt(const QJsonObject& receipt)
+{
+    m_receipts.prepend(receipt);
+    while (m_receipts.size() > kMaxSurfacedReceipts) {
+        m_receipts.removeLast();
+    }
+    publishReceiptsProp();
+
+    const QString path = receiptsFilePath();
+    const QDir dir = QFileInfo(path).dir();
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        swapUiTrace(QStringLiteral("journalReceipt: mkpath failed for %1")
+                        .arg(dir.absolutePath()));
+        return;
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        swapUiTrace(QStringLiteral("journalReceipt: open failed for %1: %2")
+                        .arg(path, f.errorString()));
+        return;
+    }
+    f.write(QJsonDocument(receipt).toJson(QJsonDocument::Compact) + '\n');
+    f.flush();
+    swapUiTrace(QStringLiteral("journalReceipt: appended status=%1 role=%2")
+                    .arg(valueString(receipt, QStringLiteral("status")),
+                         valueString(receipt, QStringLiteral("role"))));
+}
+
+// Whole-file read is fine at journal scale (one line per swap); the file is
+// oldest-first, the surfaced list newest-first and capped. Corrupt lines are
+// skipped individually so one bad write never hides the rest of the history.
+void SwapUiPlugin::loadReceiptsFromDisk()
+{
+    m_receipts = QJsonArray{};
+    QFile f(receiptsFilePath());
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!f.atEnd()) {
+            const QByteArray line = f.readLine().trimmed();
+            if (line.isEmpty()) {
+                continue;
+            }
+            const auto doc = QJsonDocument::fromJson(line);
+            if (!doc.isObject()) {
+                continue;
+            }
+            m_receipts.prepend(doc.object());
+            while (m_receipts.size() > kMaxSurfacedReceipts) {
+                m_receipts.removeLast();
+            }
+        }
+        swapUiTrace(QStringLiteral("loadReceiptsFromDisk: loaded %1 receipts")
+                        .arg(m_receipts.size()));
+    }
+    publishReceiptsProp();
+}
+
+void SwapUiPlugin::refreshHistory()
+{
+    loadReceiptsFromDisk();
+}
+
+void SwapUiPlugin::clearHistory()
+{
+    QFile f(receiptsFilePath());
+    if (f.exists() && !f.remove()) {
+        swapUiTrace(QStringLiteral("clearHistory: remove failed for %1: %2")
+                        .arg(f.fileName(), f.errorString()));
+        setErrorMessage(QStringLiteral("Could not clear the swap history file"));
+        setStatus(errorMessage());
+        return;
+    }
+    m_receipts = QJsonArray{};
+    publishReceiptsProp();
+    setStatus(QStringLiteral("Swap history cleared"));
 }
 
 void SwapUiPlugin::publishOffer()
@@ -1483,6 +1899,7 @@ void SwapUiPlugin::startAutoAccept()
             setAutoAcceptFailed(0);
             setAutoAcceptIteration(0);
             setSwapHistory(QStringList{});
+            beginMakerEvidence(false);
             clearMakerProgress();
             setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
             addMakerProgressStep(QStringLiteral("WaitingForEthLock"));
@@ -1626,6 +2043,25 @@ void SwapUiPlugin::coordinationAppendEvents(const QJsonArray& events)
     auto current = QJsonDocument::fromJson(coordinationEventsJson().toUtf8()).array();
     for (const auto& event : events) {
         current.append(event);
+        // The taker's Delivery SwapAccept is the only place the maker learns
+        // the counterparty's identity — fold it into the receipt evidence.
+        if (m_coordinationRole == QStringLiteral("maker") && event.isObject()) {
+            const auto obj = event.toObject();
+            const auto ethSwapId = valueString(obj, QStringLiteral("eth_swap_id"));
+            if (!ethSwapId.isEmpty()) {
+                const auto takerEth = valueString(obj, QStringLiteral("taker_eth_address"));
+                const auto takerLez = valueString(obj, QStringLiteral("taker_lez_account"));
+                if (!takerEth.isEmpty()) {
+                    m_makerEvidence.insert(QStringLiteral("counterparty_eth"), takerEth);
+                }
+                if (!takerLez.isEmpty()) {
+                    m_makerEvidence.insert(QStringLiteral("counterparty_lez"), takerLez);
+                }
+                if (valueString(m_makerEvidence, QStringLiteral("eth_swap_id")).isEmpty()) {
+                    m_makerEvidence.insert(QStringLiteral("eth_swap_id"), ethSwapId);
+                }
+            }
+        }
     }
     // Cap the surfaced list so a long-lived auto-accept loop does not bloat
     // the QML property.

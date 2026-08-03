@@ -27,6 +27,9 @@ Rectangle {
     required property string role
     property string resultJson: ""
     property var context: null
+    // The moment-of-completion card points at the History tab archive; the
+    // History tab's own expanded card hides the (self-referential) hint.
+    property bool showHistoryHint: true
 
     property bool preimageRevealed: false
     property bool copied: false
@@ -463,8 +466,9 @@ Rectangle {
                 }
             }
             Text {
+                visible: card.showHistoryHint
                 Layout.fillWidth: true
-                text: "Session receipt — not persisted. Copy the JSON to keep it."
+                text: "Saved to swap history — the History tab keeps it across restarts."
                 color: Theme.textMuted
                 font.pixelSize: Theme.fontCaption
                 wrapMode: Text.Wrap

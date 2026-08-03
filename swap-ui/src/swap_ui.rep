@@ -80,6 +80,15 @@ class SwapUi
     PROP(QString coordinationEventsJson READWRITE)
     PROP(QString coordinationLastResultJson READWRITE)
 
+    // Durable swap-history journal (receipt cards, PR2). receiptsJson is a
+    // JSON array of swap-receipt/1 objects, newest first, capped at 200 —
+    // loaded from the per-profile JSONL journal at init and prepended on
+    // every completed/refunded/failed swap. Additive-only surface: the rep
+    // source and its QML consumer ship in the same module package and the
+    // Basecamp host acquires the replica dynamically, so extending this
+    // block never breaks a deployed peer.
+    PROP(QString receiptsJson READWRITE)
+
     SLOT(void setRole(const QString& role))
     SLOT(void setConfigValue(const QString& key, const QString& value))
     SLOT(void loadConfig(const QString& configJson))
@@ -98,4 +107,8 @@ class SwapUi
     SLOT(void fetchOffers())
     SLOT(void startAutoAccept())
     SLOT(void stopAutoAccept())
+
+    // Swap-history journal controls
+    SLOT(void refreshHistory())
+    SLOT(void clearHistory())
 }
