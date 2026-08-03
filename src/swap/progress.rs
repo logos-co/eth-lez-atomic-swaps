@@ -28,6 +28,18 @@ pub enum SwapProgress {
         swap_id: String,
         hashlock: String,
     },
+    /// A matched ETH lock was rejected by the loop-mode timelock-margin gate
+    /// (P1-E): its absolute on-chain expiry does not clear the maker's fresh
+    /// LEZ expiry plus the safety margin. Purely informational — the maker
+    /// records the rejection and keeps waiting — but without it the UI sits at
+    /// WaitingForEthLock with no hint of why nothing is happening.
+    EthLockRejected {
+        swap_id: String,
+        /// The taker's absolute ETH expiry (unix seconds) from the contract.
+        eth_expiry_secs: u64,
+        /// The minimum acceptable expiry: fresh LEZ expiry + margin.
+        required_expiry_secs: u64,
+    },
     LezLocking,
     LezLocked {
         tx_hash: String,

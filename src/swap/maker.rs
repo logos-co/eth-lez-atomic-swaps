@@ -312,6 +312,20 @@ pub async fn run_maker(
                                     "maker: rejecting ETH lock — timelock too tight vs fresh LEZ \
                                      expiry + margin; waiting for other locks"
                                 );
+                                // Surface the rejection to progress consumers
+                                // (CLI / GUI): without this the maker loop
+                                // silently stays at WaitingForEthLock and the
+                                // operator has no signal that a candidate was
+                                // seen and turned away, or why. Additive only —
+                                // the P1-E record-and-keep-waiting semantics
+                                // are unchanged.
+                                progress::report(&progress, SwapProgress::EthLockRejected {
+                                    swap_id: format!("{swap_id}"),
+                                    eth_expiry_secs: eth_timelock_secs,
+                                    required_expiry_secs: lez_expiry_secs.saturating_add(
+                                        guards.map(|g| g.timelock_margin_secs).unwrap_or(0),
+                                    ),
+                                });
                                 if rejected.len() < MAX_REJECTED {
                                     rejected.insert(swap_id.0);
                                 }

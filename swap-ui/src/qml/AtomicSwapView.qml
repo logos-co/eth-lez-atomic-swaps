@@ -203,6 +203,7 @@ Item {
                 var map = {
                     "WaitingForEthLock": "Waiting for buyer to lock ETH\u2026",
                     "EthLockDetected":   "ETH lock detected",
+                    "EthLockRejected":   "ETH lock rejected \u2014 timelock too tight, still waiting",
                     "LezLocking":        "Locking LEZ in escrow\u2026",
                     "LezLocked":         "LEZ locked",
                     "WaitingForPreimage": "Waiting for preimage reveal\u2026",

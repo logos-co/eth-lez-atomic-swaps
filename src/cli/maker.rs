@@ -430,6 +430,15 @@ fn describe(event: &SwapProgress) -> String {
         SwapProgress::EthLockDetected { swap_id, hashlock } => {
             format!("ETH lock detected (swap {swap_id}, hashlock {hashlock})")
         }
+        SwapProgress::EthLockRejected {
+            swap_id,
+            eth_expiry_secs,
+            required_expiry_secs,
+        } => format!(
+            "ETH lock rejected (swap {swap_id}): expiry {eth_expiry_secs} < required \
+             {required_expiry_secs} (fresh LEZ expiry + margin); still waiting — the taker \
+             must re-lock with a longer ETH timelock"
+        ),
         SwapProgress::LezLocking => "locking LEZ escrow...".into(),
         SwapProgress::LezLocked { tx_hash } => format!("LEZ locked ({tx_hash})"),
         SwapProgress::WaitingForPreimage => "waiting for taker to claim LEZ...".into(),
