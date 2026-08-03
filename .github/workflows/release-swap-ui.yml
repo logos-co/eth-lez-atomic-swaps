@@ -21,5 +21,8 @@ jobs:
       contents: write
     with:
       module_path: swap-ui
-      # darwin-arm64 ONLY for now — see release-swap.yml / issue #32.
-      variants: "darwin-arm64"
+      # Kept in lockstep with release-swap.yml — see the rationale there.
+      # swap_ui has no fixed-output hashes of its own, but it builds the
+      # backend through the `swap` flake input, so it inherits the same
+      # per-variant constraints.
+      variants: "darwin-arm64,linux-amd64,linux-arm64"

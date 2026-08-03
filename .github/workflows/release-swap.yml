@@ -26,10 +26,15 @@ jobs:
       contents: write
     with:
       module_path: swap-module
-      # darwin-arm64 ONLY for now: the Linux circuit-artifact hashes in
-      # swap-module/flake.nix aren't pinned yet (issue #32), so the
-      # linux-amd64 / linux-arm64 legs of the upstream default matrix
-      # would fail. Widen this list once #32 lands.
-      variants: "darwin-arm64"
+      # All three variants the upstream matrix supports (issue #32). The
+      # logos-blockchain-circuits and rapidsnark fixed-output hashes are now
+      # pinned for x86_64-linux / aarch64-linux in swap-module/flake.nix, so
+      # the Linux legs resolve instead of falling back to fakeSha256.
+      # Spelled out rather than left to the upstream default so a change to
+      # that default cannot silently alter what we publish. Intel macOS is
+      # absent on purpose — upstream ships no macos-x86_64 circuits bundle.
+      # The upstream matrix is fail-fast: false, so a leg that does break
+      # yields a partial release rather than losing the variants that built.
+      variants: "darwin-arm64,linux-amd64,linux-arm64"
       # signing_mode defaults to "none" (unsigned .lgx). Switch to
       # inline/external here when a signing key exists.

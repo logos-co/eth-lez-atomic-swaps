@@ -5,21 +5,31 @@ packages from **this repo's own GitHub releases**, indexed by this
 repo's own catalog. You install them by adding the catalog URL to
 Basecamp — no official-catalog listing required.
 
-> Platform: **macOS Apple Silicon (darwin-arm64) only** for now. Linux
-> builds are blocked on unpinned circuit hashes (issue #32).
+> Platforms: **darwin-arm64**, **linux-amd64**, **linux-arm64**. The
+> release workflows build all three (issue #32 pinned the Linux circuit
+> and rapidsnark hashes). Intel macOS is not supported — upstream ships
+> no `macos-x86_64` circuits bundle.
 
 > **Status: release imminent.** The LEZ v0.2.0 client repin has landed on
 > `master`, so modules built from `master` talk to the public LEZ testnet
 > listed below. No module release has been *dispatched* yet — until the
 > first release workflow run is cut, the catalog URL resolves but offers
 > no packages; this guide is a preview of the flow.
+>
+> The Linux legs have never been executed on a Linux runner, so treat
+> linux-amd64 / linux-arm64 as unproven until the first release run is
+> green. The matrix is `fail-fast: false`: if a Linux leg breaks, the
+> release still publishes the variants that did build.
 
 ## Prerequisites
 
-- **Logos Basecamp 0.2.1** (macOS dmg) — download from the
-  [logos-basecamp releases page](https://github.com/logos-co/logos-basecamp/releases),
-  open the dmg and drag Basecamp to Applications.
-- macOS on Apple Silicon (M1 or newer).
+- **Logos Basecamp 0.2.1** — download from the
+  [logos-basecamp releases page](https://github.com/logos-co/logos-basecamp/releases):
+  - macOS Apple Silicon: the `aarch64.dmg`; open it and drag Basecamp to
+    Applications.
+  - Linux: the `x86_64.AppImage` or `aarch64.AppImage`; `chmod +x` it and
+    run it.
+- macOS on Apple Silicon (M1 or newer), or Linux on `x86_64` / `aarch64`.
 
 ## 1. Add the catalog
 
