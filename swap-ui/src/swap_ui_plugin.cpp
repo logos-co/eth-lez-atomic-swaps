@@ -179,7 +179,10 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setLezAmount(QStringLiteral("1"));
     setEthAmount(QStringLiteral("1"));
     setLezTimelockMinutes(QStringLiteral("5"));
-    setEthTimelockMinutes(QStringLiteral("10"));
+    // 15, not 10: the maker-loop runtime gate needs LEZ (5) + margin (5) +
+    // transit slack — 10 sits exactly on the margin boundary and rejects every
+    // taker lock by the tx-transit delta (see bot::validate_timelocks).
+    setEthTimelockMinutes(QStringLiteral("15"));
     setEthRecipientAddress(QString{});
     setLezTakerAccountId(QString{});
     setPollIntervalMs(QStringLiteral("2000"));
