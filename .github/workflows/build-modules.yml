@@ -125,4 +125,35 @@ jobs:
           # what gets built. Keep it: this stack evaluates through five layers
           # of flakes, and the default four-frame trace is not enough to
           # locate an evaluation failure from a log alone.
-          nix build .#lgx-portable --print-out-paths --no-link --show-trace
+          # `--print-out-paths` writes the store path to stdout (build logs go to
+          # stderr), so the next step can open the .lgx that was just produced
+          # rather than rebuilding or guessing at a path.
+          out=$(nix build .#lgx-portable --print-out-paths --no-link --show-trace)
+          echo "Built: $out"
+          echo "LGX_OUT=$out" >> "$GITHUB_ENV"
+
+      # The guard for issue #60. `swap` 0.3.0 shipped a manifest with no
+      # `display_name` and `manifestVersion: "0.2.0"`, and every gate in the
+      # pipeline stayed green: the build succeeded, `lgx verify` succeeded, the
+      # release published. A DROPPED OPTIONAL FIELD FAILS NOTHING — that is the
+      # hole, and nothing above this line closes it, because `nix build` only
+      # asserts that a .lgx came out, never that the right thing is inside it.
+      #
+      # Placed here rather than in the release workflow on purpose: the release
+      # workflow is logos-co/logos-modules-release-action's reusable
+      # `release.yml@v1`, which this repo cannot add steps to. This job already
+      # builds every module x variant with the same command the release runs, so
+      # it is the last point under our control before a bad artifact is published.
+      #
+      # Per-variant, not once: each leg bundles on its own runner with its own
+      # resolution of the packaging inputs, so a manifest defect can in principle
+      # appear on one variant and not another (`fail-fast: false` above keeps the
+      # other legs reporting when one does).
+      - name: Verify .lgx manifest round-trips metadata.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-lgx-manifest.py \
+            --metadata "${{ matrix.module }}/metadata.json" \
+            --lgx "$LGX_OUT" \
+            --label "${{ matrix.module }} (${{ matrix.variant }})"

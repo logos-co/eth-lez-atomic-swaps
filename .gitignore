@@ -34,7 +34,15 @@ swap-ui/result-*
 # safety ignore for older working copies)
 .basecamp/
 swap-ui/.direnv
-swap-ui/flake.lock
+# swap-ui/flake.lock is deliberately NOT ignored (it was, until issue #60).
+# Unpinned, swap-ui re-resolved logos-module-builder and the whole packaging
+# stack from their branch HEADs on every single build, so two builds of the same
+# commit could — and did — ship different bytes: regenerating the lock three days
+# after the 0.3.0 release moved 14 nodes, including logos-module-builder itself.
+# That is also the only reason swap_ui 0.3.0's manifest came out correct while
+# swap 0.3.0's did not: swap_ui floated onto the display_name fix by luck, not by
+# intent. Luck is not a release process, and it cuts the other way just as easily
+# now that three variant legs on three runners merge into one .lgx.
 
 # Logos dev-boost / agent context generated locally; not part of source
 .agents/
