@@ -69,15 +69,19 @@ jobs:
           - variant: linux-arm64
             runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner (GA'd 2025)
     runs-on: ${{ matrix.runs-on }}
-    # 90 min. Justification: GitHub's 360-minute default is a death sentence for
-    # a leg that is genuinely wedged, and this stack (LEZ / risc0 / zerokit /
-    # Qt) can compile for hours from source with no shared binary cache. The
-    # known failure modes below all surface inside ~10 min, and the last real
-    # release attempt (run 29956868665) failed its slowest leg at 8m38s, so 90
-    # min leaves ~9x headroom to reach genuine compilation on a leg that gets
-    # past vendoring while still failing fast enough to keep 6 legs affordable.
-    # Raise it once we know what a full cold Linux build actually costs.
-    timeout-minutes: 90
+    # 60 min. We now know what a full cold build actually costs, which the
+    # previous 90 was explicitly waiting on: the first successful legs ran
+    # 19-29 min cold (swap-ui linux-arm64 19m, swap-module linux-amd64 24m,
+    # both darwin legs 28-29m). 60 keeps ~2x headroom over the slowest of
+    # those — enough for cold-cache variance on the Linux legs, which have the
+    # fewest successful samples — while no longer letting a wedged leg burn 90.
+    #
+    # That 90 was not theoretical: in run 30668452716 two legs sat in crates.io
+    # 429 backoff until the timeout killed them at exactly 90m, which is the
+    # most expensive possible way to learn "the registry was throttling". The
+    # static.crates.io switch in swap-module/flake.nix removes that wait, so
+    # the ceiling no longer needs to absorb it.
+    timeout-minutes: 60
     steps:
       # Full clone, no submodules — exactly what the release workflow does.
       # Nix flake inputs that reference the local working tree (swap-module's

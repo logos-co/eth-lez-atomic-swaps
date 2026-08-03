@@ -117,10 +117,34 @@
           # `backoff_jitter`/`backoff_max` are urllib3 >= 2.0 kwargs; the
           # pinned tree has urllib3 2.5.0.
           #
-          # This is the retry that the RELEASE workflow needs too — it fans out
-          # the same way over the same registry, so the fix belongs in the
-          # build, not in the CI matrix. Kept as a scoped `replaceStrings` on
-          # our private copy of the script rather than an `applyPatches` of the
+          # THIRD substitution, and the one that actually fixes both: fetch the
+          # tarballs from `static.crates.io` instead of the `crates.io/api/v1`
+          # endpoint. Retry alone was measured to be insufficient — run
+          # 30668452716 rode the full ~7.5 min backoff and still came out with
+          # `requests.exceptions.RetryError: ... Max retries exceeded with url:
+          # /api/v1/crates/rlp/0.5.2/download (Caused by ResponseError('too
+          # many 429 error responses'))`, because the throttle outlasts any
+          # bounded budget when six legs pull ~850 crates each through a pool
+          # of 5. `static.crates.io` is the CDN cargo itself downloads from
+          # (the registry's `dl` key); it applies neither the User-Agent policy
+          # that produced the 403 nor the rate limit that produces the 429, so
+          # it removes the cause instead of waiting the symptom out. This is
+          # also where upstream nixpkgs moved after #512735.
+          #
+          # Byte-identical to the API endpoint, verified: `rlp` 0.5.2 is 14181
+          # bytes from both, sha256 bb919243…e1ec, matching this repo's
+          # Cargo.lock exactly (likewise rustc-hash 2.1.2 -> 94300abf…dbe, the
+          # crate that 429'd). The script checksums every tarball against
+          # Cargo.lock anyway, so a wrong URL fails loudly rather than
+          # silently vendoring something else.
+          #
+          # The retry stays as a belt: the CDN can still 5xx, and a 429 from
+          # any future URL change should back off rather than fail cold.
+          #
+          # These are the fixes the RELEASE workflow needs too — it fans out
+          # the same way over the same registry, so they belong in the build,
+          # not in the CI matrix. Kept as scoped `replaceStrings` on our
+          # private copy of the script rather than an `applyPatches` of the
           # shared `fetch-cargo-vendor-util`: patching the real one moves the
           # `outPath` of every Rust package in nixpkgs (measured:
           # `qt6.qtdeclarative`, `python3Packages.cryptography` and
@@ -128,8 +152,8 @@
           # binary-cache hits on exactly the cold CI runners it is meant to
           # help. The scoped form leaves every other outPath untouched.
           #
-          # Neither substitution can change the bytes that get downloaded, so
-          # `cargoDeps.hash` below is unaffected by both.
+          # No substitution can change the bytes that get downloaded, so
+          # `cargoDeps.hash` below is unaffected by all three.
           fetchCargoVendorUA =
             let
               rustBuildSupport = "${nixpkgs}/pkgs/build-support/rust";
@@ -151,7 +175,10 @@
                 (subst "429 retry"
                    "        total=5,\n        backoff_factor=0.5,\n        status_forcelist=[500, 502, 503, 504]\n"
                    "        total=12,\n        backoff_factor=1.5,\n        backoff_jitter=1.0,\n        backoff_max=60,\n        respect_retry_after_header=True,\n        status_forcelist=[429, 500, 502, 503, 504]\n"
-                   (builtins.readFile "${rustBuildSupport}/fetch-cargo-vendor-util.py")));
+                (subst "static.crates.io download"
+                   "    return f\"https://crates.io/api/v1/crates/{pkg[\"name\"]}/{pkg[\"version\"]}/download\"\n"
+                   "    return f\"https://static.crates.io/crates/{pkg[\"name\"]}/{pkg[\"name\"]}-{pkg[\"version\"]}.crate\"\n"
+                   (builtins.readFile "${rustBuildSupport}/fetch-cargo-vendor-util.py"))));
             in
             { name, hash, ... }@args:
             let
