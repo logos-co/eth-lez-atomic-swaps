@@ -119,7 +119,7 @@ Item {
                     text: swapBackend.ethAddress ? swapBackend.ethAddress.substring(0, 8) + "..." + swapBackend.ethAddress.substring(38) : "--"
                     color: Theme.textSecondary
                     font.pixelSize: 11
-                    font.family: "Menlo, Courier New"
+                    font.family: Theme.monoFont
                 }
                 Text {
                     text: swapBackend.balancesLoading ? "Loading..." : (swapBackend.ethBalance ? parent.parent.weiToEth(swapBackend.ethBalance) : "--")
@@ -140,7 +140,7 @@ Item {
                     text: swapBackend.lezAccount ? swapBackend.lezAccount.substring(0, 8) + "..." + swapBackend.lezAccount.substring(swapBackend.lezAccount.length - 4) : "--"
                     color: Theme.textSecondary
                     font.pixelSize: 11
-                    font.family: "Menlo, Courier New"
+                    font.family: Theme.monoFont
                 }
                 Text {
                     text: swapBackend.balancesLoading ? "Loading..." : (swapBackend.lezBalance ? swapBackend.lezBalance + " LEZ" : "--")

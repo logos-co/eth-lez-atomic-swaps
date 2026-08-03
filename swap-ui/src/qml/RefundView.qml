@@ -56,7 +56,7 @@ ScrollView {
             Text {
                 text: "Reclaim funds from expired HTLCs. The maker refunds LEZ (needs hashlock), the taker refunds ETH (needs swap ID)."
                 color: Theme.textSecondary
-                font.pixelSize: Theme.fontSmall
+                font.pixelSize: Theme.fontNormal
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
@@ -65,39 +65,44 @@ ScrollView {
             Rectangle {
                 visible: refundRoot.lastHashlock !== "" || refundRoot.lastEthSwapId !== ""
                 Layout.fillWidth: true
-                implicitHeight: hintCol.implicitHeight + Theme.spacingSmall * 2
+                implicitHeight: hintCol.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
                 border.color: Theme.success
                 border.width: 1
-                radius: Theme.radiusSmall
+                radius: Theme.radiusNormal
 
                 ColumnLayout {
                     id: hintCol
                     anchors {
                         fill: parent
-                        margins: Theme.spacingSmall
+                        margins: Theme.spacingNormal
                     }
-                    spacing: 4
+                    spacing: Theme.spacingSmall
 
-                    Text {
-                        text: "Auto-populated from last swap result"
-                        color: Theme.success
-                        font.pixelSize: 12
-                        font.bold: true
+                    RowLayout {
+                        spacing: 6
+
+                        Rectangle {
+                            width: 6; height: 6; radius: 3
+                            color: Theme.success
+                        }
+                        Text {
+                            text: "AUTO-POPULATED FROM LAST SWAP"
+                            color: Theme.success
+                            font.pixelSize: Theme.fontCaption
+                            font.bold: true
+                            font.letterSpacing: 1
+                        }
                     }
-                    Text {
+                    TrustRow {
                         visible: refundRoot.lastHashlock !== ""
-                        text: "Hashlock: " + refundRoot.lastHashlock.substring(0, 16) + "..."
-                        color: Theme.textMuted
-                        font.pixelSize: 11
-                        font.family: "Menlo, Courier New"
+                        label: "Hashlock"
+                        value: refundRoot.lastHashlock
                     }
-                    Text {
+                    TrustRow {
                         visible: refundRoot.lastEthSwapId !== ""
-                        text: "Swap ID: " + refundRoot.lastEthSwapId.substring(0, 16) + "..."
-                        color: Theme.textMuted
-                        font.pixelSize: 11
-                        font.family: "Menlo, Courier New"
+                        label: "Swap ID"
+                        value: refundRoot.lastEthSwapId
                     }
                 }
             }
@@ -119,16 +124,14 @@ ScrollView {
                     }
                     spacing: Theme.spacingSmall
 
-                    Text {
-                        text: "LEZ Refund (Maker)"
-                        color: Theme.accent
-                        font.pixelSize: Theme.fontLarge
-                        font.bold: true
+                    SectionHeader {
+                        label: "LEZ refund — maker"
+                        hairline: false
                     }
                     Text {
                         text: "Reclaim LEZ locked in escrow after the LEZ timelock expires (default 5m). Timelock is checked off-chain."
-                        color: Theme.textMuted
-                        font.pixelSize: 12
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
@@ -138,8 +141,9 @@ ScrollView {
                         spacing: 4
                         Text {
                             text: "Hashlock"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSmall
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontCaption
+                            font.letterSpacing: 0.5
                         }
                         TextField {
                             id: lezHashlockInput
@@ -152,8 +156,8 @@ ScrollView {
                             placeholderText: "64-char hex (e.g. abcd1234...)"
                             text: refundRoot.lastHashlock
                             color: Theme.textPrimary
-                            font.pixelSize: Theme.fontNormal
-                            font.family: "Menlo, Courier New"
+                            font.pixelSize: Theme.fontSmall
+                            font.family: Theme.monoFont
                             selectByMouse: true
                             maximumLength: 66
                             background: Rectangle {
@@ -171,31 +175,16 @@ ScrollView {
                             visible: lezHashlockInput.text.length > 0 && !refundRoot.isValidHex(lezHashlockInput.text, 32)
                             text: "Must be 64 hex characters (32 bytes)"
                             color: Theme.error
-                            font.pixelSize: 11
+                            font.pixelSize: Theme.fontCaption
                         }
                     }
 
-                    Button {
+                    PrimaryButton {
                         text: swapBackend.refundsLoading ? "Running..." : "Refund LEZ"
                         enabled: !swapBackend.running && !swapBackend.refundsLoading
                                  && refundRoot.isValidHex(lezHashlockInput.text, 32)
                         Layout.fillWidth: true
                         Layout.preferredHeight: 40
-                        font.pixelSize: Theme.fontNormal
-
-                        background: Rectangle {
-                            color: parent.enabled
-                                   ? (parent.hovered ? Theme.accentHover : Theme.accent)
-                                   : Theme.surfaceLight
-                            radius: Theme.radiusSmall
-                        }
-                        contentItem: Text {
-                            text: parent.text
-                            color: parent.enabled ? "#ffffff" : Theme.textMuted
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            font: parent.font
-                        }
 
                         onClicked: swapBackend.refundLez(lezHashlockInput.text)
                     }
@@ -219,16 +208,14 @@ ScrollView {
                     }
                     spacing: Theme.spacingSmall
 
-                    Text {
-                        text: "ETH Refund (Taker)"
-                        color: Theme.accent
-                        font.pixelSize: Theme.fontLarge
-                        font.bold: true
+                    SectionHeader {
+                        label: "ETH refund — taker"
+                        hairline: false
                     }
                     Text {
                         text: "Reclaim ETH locked in the HTLC contract after the ETH timelock expires (default 10m). Enforced on-chain."
-                        color: Theme.textMuted
-                        font.pixelSize: 12
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
@@ -238,8 +225,9 @@ ScrollView {
                         spacing: 4
                         Text {
                             text: "Swap ID"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSmall
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontCaption
+                            font.letterSpacing: 0.5
                         }
                         TextField {
                             id: ethSwapIdInput
@@ -252,8 +240,8 @@ ScrollView {
                             placeholderText: "64-char hex from ETH lock tx"
                             text: refundRoot.lastEthSwapId
                             color: Theme.textPrimary
-                            font.pixelSize: Theme.fontNormal
-                            font.family: "Menlo, Courier New"
+                            font.pixelSize: Theme.fontSmall
+                            font.family: Theme.monoFont
                             selectByMouse: true
                             maximumLength: 66
                             background: Rectangle {
@@ -271,31 +259,16 @@ ScrollView {
                             visible: ethSwapIdInput.text.length > 0 && !refundRoot.isValidHex(ethSwapIdInput.text, 32)
                             text: "Must be 64 hex characters (32 bytes)"
                             color: Theme.error
-                            font.pixelSize: 11
+                            font.pixelSize: Theme.fontCaption
                         }
                     }
 
-                    Button {
+                    PrimaryButton {
                         text: swapBackend.refundsLoading ? "Running..." : "Refund ETH"
                         enabled: !swapBackend.running && !swapBackend.refundsLoading
                                  && refundRoot.isValidHex(ethSwapIdInput.text, 32)
                         Layout.fillWidth: true
                         Layout.preferredHeight: 40
-                        font.pixelSize: Theme.fontNormal
-
-                        background: Rectangle {
-                            color: parent.enabled
-                                   ? (parent.hovered ? Theme.accentHover : Theme.accent)
-                                   : Theme.surfaceLight
-                            radius: Theme.radiusSmall
-                        }
-                        contentItem: Text {
-                            text: parent.text
-                            color: parent.enabled ? "#ffffff" : Theme.textMuted
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            font: parent.font
-                        }
 
                         onClicked: swapBackend.refundEth(ethSwapIdInput.text)
                     }

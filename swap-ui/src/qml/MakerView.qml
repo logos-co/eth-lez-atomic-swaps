@@ -79,11 +79,23 @@ ScrollView {
             }
             spacing: Theme.spacingLarge
 
-            Text {
-                text: "Sell LEZ"
-                color: Theme.textPrimary
-                font.pixelSize: Theme.fontTitle
-                font.bold: true
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spacingNormal
+
+                Text {
+                    text: "Sell LEZ"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontTitle
+                    font.bold: true
+                }
+                StatusChip {
+                    text: swapBackend.autoAcceptRunning ? "Live" : "Offline"
+                    tone: swapBackend.autoAcceptRunning ? Theme.success : Theme.textMuted
+                    pulsing: swapBackend.autoAcceptRunning
+                    bold: swapBackend.autoAcceptRunning
+                }
+                Item { Layout.fillWidth: true }
             }
 
             // --- Your Offer summary card ---
@@ -103,16 +115,37 @@ ScrollView {
                     }
                     spacing: 6
 
-                    Text {
-                        text: "Your Rate"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontNormal
-                        font.bold: true
+                    SectionHeader {
+                        label: "Your rate"
+                        hairline: false
                     }
-                    Text {
-                        text: swapBackend.lezAmount + " LEZ \u2192 " + swapBackend.ethAmount + " ETH  per swap"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontNormal
+                    RowLayout {
+                        spacing: 6
+
+                        Text {
+                            text: swapBackend.lezAmount + " LEZ"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontLarge
+                            font.bold: true
+                            font.family: Theme.monoFont
+                        }
+                        Text {
+                            text: "\u21c4"
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontNormal
+                        }
+                        Text {
+                            text: swapBackend.ethAmount + " ETH"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontLarge
+                            font.bold: true
+                            font.family: Theme.monoFont
+                        }
+                        Text {
+                            text: "per swap"
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontSmall
+                        }
                     }
                     Text {
                         text: {
@@ -144,11 +177,9 @@ ScrollView {
                     }
                     spacing: 6
 
-                    Text {
-                        text: "Live Maker"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontNormal
-                        font.bold: true
+                    SectionHeader {
+                        label: "Live maker"
+                        hairline: false
                     }
 
                     Text {
@@ -160,6 +191,7 @@ ScrollView {
                     }
 
                     Button {
+                        id: goLiveButton
                         text: swapBackend.messagingRetrying && !swapBackend.autoAcceptRunning
                               ? "Waiting for Delivery..."
                               : (swapBackend.autoAcceptRunning ? "Stop Live Maker" : "Go Live & Publish Offer")
@@ -170,6 +202,31 @@ ScrollView {
                                     )
                         Layout.fillWidth: true
                         Layout.preferredHeight: 42
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+
+                        // Filled accent to go live; error-outlined ghost to stop.
+                        background: Rectangle {
+                            color: swapBackend.autoAcceptRunning
+                                   ? (goLiveButton.enabled && goLiveButton.hovered
+                                      ? Theme.surfaceLight : Theme.surface)
+                                   : (goLiveButton.enabled
+                                      ? (goLiveButton.hovered ? Theme.accentHover : Theme.accent)
+                                      : Theme.surfaceLight)
+                            border.color: swapBackend.autoAcceptRunning ? Theme.error : "transparent"
+                            border.width: swapBackend.autoAcceptRunning ? 1 : 0
+                            radius: Theme.radiusNormal
+                        }
+                        contentItem: Text {
+                            text: goLiveButton.text
+                            color: swapBackend.autoAcceptRunning
+                                   ? Theme.error
+                                   : (goLiveButton.enabled ? Theme.accentForeground : Theme.textMuted)
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            font: goLiveButton.font
+                        }
+
                         onClicked: {
                             if (swapBackend.autoAcceptRunning)
                                 swapBackend.stopAutoAccept()
@@ -193,21 +250,31 @@ ScrollView {
             Rectangle {
                 visible: swapBackend.autoAcceptRunning && swapBackend.makerCurrentStep !== ""
                 Layout.fillWidth: true
-                implicitHeight: makerStepper.implicitHeight + Theme.spacingNormal * 2
+                implicitHeight: makerProgressCol.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
                 border.color: Theme.border
                 border.width: 1
                 radius: Theme.radiusNormal
 
-                ProgressStepper {
-                    id: makerStepper
+                ColumnLayout {
+                    id: makerProgressCol
                     anchors {
                         fill: parent
                         margins: Theme.spacingNormal
                     }
-                    steps: makerSteps
-                    currentStep: swapBackend.makerCurrentStep
-                    completedSteps: makerRoot.completedSteps
+                    spacing: Theme.spacingSmall
+
+                    SectionHeader {
+                        label: "Swap in progress"
+                        hairline: false
+                    }
+                    ProgressStepper {
+                        id: makerStepper
+                        Layout.fillWidth: true
+                        steps: makerSteps
+                        currentStep: swapBackend.makerCurrentStep
+                        completedSteps: makerRoot.completedSteps
+                    }
                 }
             }
 
@@ -229,11 +296,10 @@ ScrollView {
                     }
                     spacing: 8
 
-                    Text {
-                        text: "Completed Swaps (" + swapBackend.swapHistory.length + ")"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontNormal
-                        font.bold: true
+                    SectionHeader {
+                        label: "Completed swaps"
+                        detail: "" + swapBackend.swapHistory.length
+                        hairline: false
                     }
 
                     Repeater {
@@ -242,15 +308,22 @@ ScrollView {
                             Layout.fillWidth: true
                             implicitHeight: entryCol.implicitHeight + 12
                             color: "transparent"
-                            border.color: Theme.border
-                            border.width: 1
-                            radius: Theme.radiusSmall
+
+                            // Hairline separator (tape idiom)
+                            Rectangle {
+                                anchors.top: parent.top
+                                width: parent.width
+                                height: 1
+                                color: Theme.border
+                                opacity: 0.6
+                            }
 
                             ColumnLayout {
                                 id: entryCol
                                 anchors {
                                     fill: parent
-                                    margins: 6
+                                    topMargin: 8
+                                    bottomMargin: 4
                                 }
                                 spacing: 4
 
@@ -272,7 +345,7 @@ ScrollView {
                                                 return "Insufficient funds"
                                             return entryCol.entry.status
                                         }
-                                        color: entryCol.entry.status === "completed" ? Theme.accent : Theme.error
+                                        color: entryCol.entry.status === "completed" ? Theme.success : Theme.error
                                         font.pixelSize: Theme.fontSmall
                                         font.bold: true
                                     }
@@ -280,7 +353,8 @@ ScrollView {
                                     Text {
                                         text: makerRoot.timeAgo(entryCol.entry.timestamp)
                                         color: Theme.textMuted
-                                        font.pixelSize: 11
+                                        font.pixelSize: Theme.fontCaption
+                                        font.family: Theme.monoFont
                                     }
                                 }
 
@@ -289,15 +363,15 @@ ScrollView {
                                     visible: entryCol.entry.status === "completed" && (entryCol.entry.eth_tx || entryCol.entry.lez_tx)
                                     text: entryCol.entry.eth_tx ? "ETH: " + entryCol.entry.eth_tx.substring(0, 10) + "..." + entryCol.entry.eth_tx.substring(entryCol.entry.eth_tx.length - 5) : ""
                                     color: Theme.textMuted
-                                    font.pixelSize: 11
-                                    font.family: "Menlo, Courier New"
+                                    font.pixelSize: Theme.fontCaption
+                                    font.family: Theme.monoFont
                                 }
                                 Text {
                                     visible: entryCol.entry.status === "completed" && entryCol.entry.lez_tx
                                     text: entryCol.entry.lez_tx ? "LEZ: " + entryCol.entry.lez_tx.substring(0, 10) + "..." + entryCol.entry.lez_tx.substring(entryCol.entry.lez_tx.length - 5) : ""
                                     color: Theme.textMuted
-                                    font.pixelSize: 11
-                                    font.family: "Menlo, Courier New"
+                                    font.pixelSize: Theme.fontCaption
+                                    font.family: Theme.monoFont
                                 }
 
                                 // Failed: show error
@@ -305,7 +379,7 @@ ScrollView {
                                     visible: entryCol.entry.status === "failed" && entryCol.entry.error
                                     text: entryCol.entry.error || ""
                                     color: Theme.textMuted
-                                    font.pixelSize: 11
+                                    font.pixelSize: Theme.fontCaption
                                     wrapMode: Text.Wrap
                                     Layout.fillWidth: true
                                 }
@@ -315,7 +389,7 @@ ScrollView {
                                     visible: entryCol.entry.status === "insufficient_funds"
                                     text: "Have " + (entryCol.entry.lez_balance || "?") + " LEZ, need " + (entryCol.entry.lez_required || "?") + " LEZ"
                                     color: Theme.textMuted
-                                    font.pixelSize: 11
+                                    font.pixelSize: Theme.fontCaption
                                     wrapMode: Text.Wrap
                                     Layout.fillWidth: true
                                 }

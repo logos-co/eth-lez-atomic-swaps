@@ -43,61 +43,41 @@ ScrollView {
                 font.bold: true
             }
             Text {
-                text: "Edit values below before starting a swap."
+                text: "Add your ETH and LEZ credentials once — every tab reads from here."
                 color: Theme.textSecondary
-                font.pixelSize: Theme.fontSmall
+                font.pixelSize: Theme.fontNormal
             }
 
             RowLayout {
                 Layout.fillWidth: true
+                Layout.topMargin: Theme.spacingSmall
                 spacing: Theme.spacingNormal
 
-                Button {
+                GhostButton {
                     text: "Load Maker Env"
                     enabled: !configRoot.anyRunning && !configRoot.anyLoading && swapBackend.ready
                     Layout.fillWidth: true
                     Layout.preferredHeight: 38
-                    contentItem: Text {
-                        text: parent.text
-                        color: parent.enabled ? Theme.textPrimary : Theme.textMuted
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: Theme.fontSmall
-                        font.bold: true
-                    }
-                    background: Rectangle {
-                        radius: Theme.radiusSmall
-                        color: parent.enabled && parent.hovered ? Theme.surfaceLight : Theme.surface
-                        border.color: parent.enabled ? Theme.accent : Theme.border
-                        border.width: 1
-                    }
+                    font.pixelSize: Theme.fontSmall
+                    font.bold: true
                     onClicked: swapBackend.loadEnvFile(".env", "maker")
                 }
-                Button {
+                GhostButton {
                     text: "Load Taker Env"
                     enabled: !configRoot.anyRunning && !configRoot.anyLoading && swapBackend.ready
                     Layout.fillWidth: true
                     Layout.preferredHeight: 38
-                    contentItem: Text {
-                        text: parent.text
-                        color: parent.enabled ? Theme.textPrimary : Theme.textMuted
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: Theme.fontSmall
-                        font.bold: true
-                    }
-                    background: Rectangle {
-                        radius: Theme.radiusSmall
-                        color: parent.enabled && parent.hovered ? Theme.surfaceLight : Theme.surface
-                        border.color: parent.enabled ? Theme.accent : Theme.border
-                        border.width: 1
-                    }
+                    font.pixelSize: Theme.fontSmall
+                    font.bold: true
                     onClicked: swapBackend.loadEnvFile(".env.taker", "taker")
                 }
             }
 
             // --- Ethereum ---
-            SectionHeader { label: "Ethereum" }
+            SectionHeader {
+                label: "Ethereum"
+                Layout.topMargin: Theme.spacingLarge
+            }
 
             ConfigField {
                 label: "RPC URL"
@@ -136,7 +116,10 @@ ScrollView {
             }
 
             // --- LEZ ---
-            SectionHeader { label: "LEZ" }
+            SectionHeader {
+                label: "LEZ"
+                Layout.topMargin: Theme.spacingLarge
+            }
 
             ConfigField {
                 label: "Sequencer URL"
@@ -189,7 +172,10 @@ ScrollView {
             }
 
             // --- Swap Parameters ---
-            SectionHeader { label: "Swap Parameters" }
+            SectionHeader {
+                label: "Swap Parameters"
+                Layout.topMargin: Theme.spacingLarge
+            }
 
             RowLayout {
                 Layout.fillWidth: true
@@ -248,28 +234,6 @@ ScrollView {
     }
 
     // --- Inline sub-components ---
-    component SectionHeader: Rectangle {
-        property string label
-        Layout.fillWidth: true
-        Layout.topMargin: Theme.spacingLarge
-        height: 36
-        color: "transparent"
-
-        Text {
-            text: parent.label
-            color: Theme.accent
-            font.pixelSize: Theme.fontLarge
-            font.bold: true
-            anchors.verticalCenter: parent.verticalCenter
-        }
-        Rectangle {
-            anchors.bottom: parent.bottom
-            width: parent.width
-            height: 1
-            color: Theme.border
-        }
-    }
-
     component ConfigField: ColumnLayout {
         id: field
 
@@ -286,8 +250,9 @@ ScrollView {
 
         Text {
             id: labelText
-            color: Theme.textSecondary
-            font.pixelSize: Theme.fontSmall
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            font.letterSpacing: 0.5
         }
         TextField {
             id: input
@@ -299,7 +264,8 @@ ScrollView {
             topPadding: 8
             bottomPadding: 8
             color: Theme.textPrimary
-            font.pixelSize: Theme.fontNormal
+            font.pixelSize: Theme.fontSmall
+            font.family: Theme.monoFont
             selectByMouse: true
             background: Rectangle {
                 color: Theme.inputBackground
@@ -314,15 +280,15 @@ ScrollView {
             visible: field.errorText !== ""
             text: field.errorText
             color: Theme.error
-            font.pixelSize: 11
+            font.pixelSize: Theme.fontCaption
             wrapMode: Text.Wrap
             Layout.fillWidth: true
         }
         Text {
             visible: field.hint !== "" && field.errorText === ""
             text: field.hint
-            color: Theme.textSecondary
-            font.pixelSize: 11
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
             wrapMode: Text.Wrap
             Layout.fillWidth: true
         }

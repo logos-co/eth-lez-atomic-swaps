@@ -18,12 +18,16 @@ Rectangle {
     readonly property bool isRefunded: parsed && parsed.status === "refunded"
     readonly property bool visible_: parsed !== null
 
+    readonly property color tone: isError ? Theme.error
+                                          : isCompleted ? Theme.success
+                                                        : Theme.warning
+
     visible: visible_
     Layout.fillWidth: true
     implicitHeight: resultCol.implicitHeight + Theme.spacingNormal * 2
     radius: Theme.radiusNormal
-    color: isError ? Qt.darker(Theme.error, 3.0) : isCompleted ? Qt.darker(Theme.success, 3.0) : Theme.surfaceLight
-    border.color: isError ? Theme.error : isCompleted ? Theme.success : Theme.warning
+    color: Theme.surface
+    border.color: tone
     border.width: 1
 
     ColumnLayout {
@@ -34,11 +38,24 @@ Rectangle {
         }
         spacing: Theme.spacingSmall
 
-        Text {
-            text: card.isError ? "Error" : card.isCompleted ? "Swap Completed" : card.isRefunded ? "Swap Refunded" : "Result"
-            color: card.isError ? Theme.error : card.isCompleted ? Theme.success : Theme.warning
-            font.pixelSize: Theme.fontLarge
-            font.bold: true
+        // Status header — dot + uppercase micro-label (chip idiom)
+        RowLayout {
+            spacing: 6
+
+            Rectangle {
+                width: 6; height: 6; radius: 3
+                color: card.tone
+            }
+            Text {
+                text: card.isError ? "ERROR"
+                                   : card.isCompleted ? "SWAP COMPLETED"
+                                                      : card.isRefunded ? "SWAP REFUNDED"
+                                                                        : "RESULT"
+                color: card.tone
+                font.pixelSize: Theme.fontCaption
+                font.bold: true
+                font.letterSpacing: 1
+            }
         }
 
         // Error message
@@ -51,7 +68,7 @@ Rectangle {
             Layout.fillWidth: true
         }
 
-        // Completed details
+        // Completed details — trust surface
         Repeater {
             model: card.isCompleted ? [
                 { label: "Hashlock", value: card.parsed.hashlock || "" },
@@ -60,54 +77,22 @@ Rectangle {
                 { label: "LEZ Tx", value: card.parsed.lez_tx || "" },
             ] : []
 
-            RowLayout {
-                required property var modelData
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-
-                Text {
-                    text: modelData.label + ":"
-                    color: Theme.textSecondary
-                    font.pixelSize: Theme.fontSmall
-                    Layout.preferredWidth: 80
-                }
-                Text {
-                    text: modelData.value
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSmall
-                    font.family: "Menlo, Courier New"
-                    elide: Text.ElideMiddle
-                    Layout.fillWidth: true
-                }
+            TrustRow {
+                label: modelData.label
+                value: modelData.value
             }
         }
 
-        // Refunded details
+        // Refunded details — trust surface
         Repeater {
             model: card.isRefunded ? [
                 { label: "ETH Refund", value: card.parsed.eth_refund_tx || "n/a" },
                 { label: "LEZ Refund", value: card.parsed.lez_refund_tx || "n/a" },
             ] : []
 
-            RowLayout {
-                required property var modelData
-                Layout.fillWidth: true
-                spacing: Theme.spacingSmall
-
-                Text {
-                    text: modelData.label + ":"
-                    color: Theme.textSecondary
-                    font.pixelSize: Theme.fontSmall
-                    Layout.preferredWidth: 90
-                }
-                Text {
-                    text: modelData.value
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSmall
-                    font.family: "Menlo, Courier New"
-                    elide: Text.ElideMiddle
-                    Layout.fillWidth: true
-                }
+            TrustRow {
+                label: modelData.label
+                value: modelData.value
             }
         }
     }
