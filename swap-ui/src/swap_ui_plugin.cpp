@@ -1367,6 +1367,19 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
     } else {
         setMakerCurrentStep(step);
         addMakerProgressStep(step);
+        // Mirror the single-shot maker.progress hook: the auto-accept loop
+        // forwards the per-swap EthLockDetected through maker_loop.progress,
+        // and without subscribing here the board-path maker never joins the
+        // per-swap coordination topic — the taker's SwapAccept reaches the
+        // maker's waku node and is dropped ("no subscribed peers found"), so
+        // coordination events never show on the board path.
+        if (step == QStringLiteral("EthLockDetected")) {
+            const auto hashlock = normaliseHashlock(
+                valueString(data, QStringLiteral("hashlock")));
+            if (!hashlock.isEmpty()) {
+                coordinationStart(QStringLiteral("maker"), hashlock);
+            }
+        }
     }
 }
 
