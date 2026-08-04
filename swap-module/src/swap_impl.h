@@ -116,8 +116,7 @@ public:
     // whichever order a UI happens to call these two. Returns JSON
     // {"outcome":"AlreadyInitialized"} or
     // {"outcome":"Initialized","data":{"tx_hash":"..."}}.
-    std::string lezEnsureInitialized(const std::string& sequencerUrl,
-                                     const std::string& signingKeyHex);
+    std::string lezEnsureInitialized(const std::string& sequencerUrl, const std::string& signingKeyHex);
 
     // Start a background job that ensures the account is initialized, then
     // claims from the native pinata faucet until its balance reaches
@@ -135,9 +134,7 @@ public:
     // token) runs to completion regardless. Acceptable for a single ~150 LEZ
     // claim; a follow-up would thread a cancel flag through if a target ever
     // needs many claims.
-    std::string startLezFundingJob(const std::string& sequencerUrl,
-                                   const std::string& signingKeyHex,
-                                   const std::string& targetLez);
+    std::string startLezFundingJob(const std::string& sequencerUrl, const std::string& signingKeyHex, const std::string& targetLez);
 
     // ---- Long-running flows ----
     //
