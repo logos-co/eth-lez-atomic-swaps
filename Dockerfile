@@ -8,7 +8,11 @@
 #
 # Why a container at all (see deploy/README.md for the full rationale): the
 # build needs Rust 1.93 with network-fetching build scripts (LEZ v0.2.0 deps)
-# AND Node >=20 for offer-publisher/. Nix was rejected for this repo's CLI
+# AND Node >=22 for offer-publisher/ (its libp2p dependency chain uses
+# Promise.withResolvers, which Node 20.x does not have despite the
+# offer-publisher/README.md's stale "Node >=20" note — verified live on the
+# VPS: node:20-bookworm-slim throws "Promise.withResolvers is not a
+# function" inside @libp2p/peer-store at runtime). Nix was rejected for this repo's CLI
 # packaging (cargoHash churn, issue #32); a bare systemd unit was rejected
 # because it leaves the toolchain as manual, drifting VPS state. This image
 # is the reproducible middle ground.
@@ -63,9 +67,10 @@ ENV RISC0_SKIP_BUILD=1
 RUN cargo build --release --locked --bin swap-cli
 
 ########################################
-# Stage 2: offer-publisher/ dependencies (Node >=20)
+# Stage 2: offer-publisher/ dependencies (Node >=22 — see the top-of-file
+# note on Promise.withResolvers)
 ########################################
-FROM node:20-bookworm-slim AS node-builder
+FROM node:22-bookworm-slim AS node-builder
 WORKDIR /build/offer-publisher
 
 COPY offer-publisher/package.json offer-publisher/package-lock.json ./
@@ -76,7 +81,7 @@ COPY offer-publisher/fleet.mjs offer-publisher/publish-offer.mjs ./
 ########################################
 # Stage 3: runtime
 ########################################
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 # procps: gives the compose healthcheck a `pgrep` to check swap-cli liveness
 # with (bookworm-slim ships neither procps nor a /proc-walking alternative).
