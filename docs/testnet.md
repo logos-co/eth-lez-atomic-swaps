@@ -134,6 +134,8 @@ ETH `0xF32eA5DD55a173700eA67777fa836aCe2E21B7b4`; taker LEZ
 ETH `0xb6aa7c4E43f698631cAcdE0be59C95Bec968f6E2`. Final settlement:
 maker LEZ 1650→650, taker LEZ 0→1000; ETH moved 0.0001 taker→maker.
 
-(The LEZ explorer at `explorer.testnet.lez.logos.co` was not reachable from
-this environment; transactions were verified via the sequencer's
-`getTransaction`/`getAccount` RPCs.)
+(The LEZ explorer is live at `explorer.testnet.lez.logos.co` — the URL form
+is `/transaction/<hash>`, not `/tx/<hash>` (which 404s). Transactions above
+can be viewed at `https://explorer.testnet.lez.logos.co/transaction/<hash>`;
+they were originally verified via the sequencer's `getTransaction`/
+`getAccount` RPCs.)
