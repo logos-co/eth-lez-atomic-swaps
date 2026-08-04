@@ -1679,6 +1679,17 @@ pub fn read_status_file(path: &Path) -> Result<MakerStatus> {
 /// [`STATUS_WRITE_INTERVAL_SECS`] until `cancel` is set. Best-effort: a failed
 /// balance read keeps the last known value rather than aborting — this is a
 /// monitoring signal, not a fund-safety path.
+/// Bound on each individual balance read inside [`spawn_status_writer`].
+/// Live-observed: `get_account_balance` can hang for tens of seconds before
+/// the underlying RPC client's own timeout fires ("Request timeout"). Without
+/// an outer bound here, a single slow read stretches the ENTIRE write cycle
+/// past [`STATUS_WRITE_INTERVAL_SECS`] — which then makes the status file
+/// itself look stale to `swap-cli maker --status` during exactly the kind of
+/// transient sequencer hiccup this whole mechanism is supposed to tolerate.
+/// Capping the read keeps the write cadence close to 15s regardless of RPC
+/// health; a timed-out read just keeps the last known balance for one cycle.
+const STATUS_BALANCE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub fn spawn_status_writer(
     config: SwapConfig,
     status: Arc<StatusState>,
@@ -1694,25 +1705,48 @@ pub fn spawn_status_writer(
             }
 
             match LezClient::new(&config) {
-                Ok(lez_client) => match lez_client.get_balance(&maker_account).await {
-                    Ok(balance) => status.set_lez_balance(balance),
-                    Err(e) => debug!("status writer: LEZ balance read failed: {e}"),
-                },
+                Ok(lez_client) => {
+                    match tokio::time::timeout(
+                        STATUS_BALANCE_READ_TIMEOUT,
+                        lez_client.get_balance(&maker_account),
+                    )
+                    .await
+                    {
+                        Ok(Ok(balance)) => status.set_lez_balance(balance),
+                        Ok(Err(e)) => debug!("status writer: LEZ balance read failed: {e}"),
+                        Err(_) => debug!(
+                            "status writer: LEZ balance read timed out after {}s — keeping last \
+                             known value",
+                            STATUS_BALANCE_READ_TIMEOUT.as_secs()
+                        ),
+                    }
+                }
                 Err(e) => debug!("status writer: LEZ client init failed: {e}"),
             }
 
-            match EthClient::new(&config).await {
-                Ok(eth_client) => {
-                    match eth_client
-                        .provider()
-                        .get_balance(config.eth_recipient_address)
-                        .await
+            match tokio::time::timeout(STATUS_BALANCE_READ_TIMEOUT, EthClient::new(&config)).await
+            {
+                Ok(Ok(eth_client)) => {
+                    match tokio::time::timeout(
+                        STATUS_BALANCE_READ_TIMEOUT,
+                        eth_client.provider().get_balance(config.eth_recipient_address),
+                    )
+                    .await
                     {
-                        Ok(balance) => status.set_eth_balance(balance.to::<u128>()),
-                        Err(e) => debug!("status writer: ETH balance read failed: {e}"),
+                        Ok(Ok(balance)) => status.set_eth_balance(balance.to::<u128>()),
+                        Ok(Err(e)) => debug!("status writer: ETH balance read failed: {e}"),
+                        Err(_) => debug!(
+                            "status writer: ETH balance read timed out after {}s — keeping last \
+                             known value",
+                            STATUS_BALANCE_READ_TIMEOUT.as_secs()
+                        ),
                     }
                 }
-                Err(e) => debug!("status writer: ETH client init failed: {e}"),
+                Ok(Err(e)) => debug!("status writer: ETH client init failed: {e}"),
+                Err(_) => debug!(
+                    "status writer: ETH client init timed out after {}s",
+                    STATUS_BALANCE_READ_TIMEOUT.as_secs()
+                ),
             }
 
             let snapshot = status.snapshot(store.snapshot().len(), store.quarantined_snapshot().len());
