@@ -9,7 +9,7 @@ use lee_core::{
 use lez_htlc_program::{HTLCEscrow, HTLCInstruction, HTLCState};
 use sequencer_service_protocol::LeeTransaction;
 use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{
@@ -29,6 +29,68 @@ pub enum RefundOutcome {
     /// A taker claim won the race: the escrow is `Claimed` and carries the
     /// revealed 32-byte preimage. The maker must claim the ETH side.
     ClaimedByTaker([u8; 32]),
+}
+
+/// Bounded retries / initial backoff for [`LezClient::get_balance_with_retry`].
+/// Shared by every hot-path balance read that can tolerate a few extra seconds
+/// of latency in exchange for not treating a transient sequencer blip as a
+/// hard failure: the maker-loop startup guard, the per-iteration balance
+/// check, and the background fund-topper.
+const BALANCE_RETRY_ATTEMPTS: u32 = 5;
+const BALANCE_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Generic core of [`LezClient::get_balance_with_retry`], parameterized over
+/// the fetch so the retry / backoff / `on_transient` behaviour is
+/// unit-testable without a live sequencer (same pattern as
+/// `cli::bot::read_escrow_bounded_with` / `max_escrow_balance_with`).
+///
+/// `on_transient` fires exactly once per call IF at least one attempt failed
+/// — whether the read went on to succeed on a later attempt or exhausted
+/// every attempt — never more than once, and never when the very first
+/// attempt succeeds cleanly.
+async fn balance_with_retry_core<F, Fut>(
+    mut fetch: F,
+    mut on_transient: impl FnMut(&SwapError),
+) -> Result<u128>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<u128>>,
+{
+    let mut delay = BALANCE_RETRY_INITIAL_DELAY;
+    let mut last_err = None;
+    let mut retried = false;
+    for attempt in 1..=BALANCE_RETRY_ATTEMPTS {
+        match fetch().await {
+            Ok(balance) => {
+                if retried {
+                    // We only reach here with `last_err` populated, so this
+                    // unwrap is safe; kept as an expect for clarity.
+                    on_transient(
+                        last_err
+                            .as_ref()
+                            .expect("retried implies at least one Err was recorded"),
+                    );
+                }
+                return Ok(balance);
+            }
+            Err(e) => {
+                retried = true;
+                warn!(
+                    "balance read failed (attempt {attempt}/{BALANCE_RETRY_ATTEMPTS}): {e} — \
+                     retrying (this means the sequencer could not be reached, NOT that the \
+                     account is under-funded)"
+                );
+                last_err = Some(e);
+                if attempt < BALANCE_RETRY_ATTEMPTS {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                }
+            }
+        }
+    }
+    let err = last_err.expect("loop runs at least once, so an all-Err path always sets this");
+    on_transient(&err);
+    Err(err)
 }
 
 enum LezBackend {
@@ -294,6 +356,44 @@ impl LezClient {
             .map_err(|e| SwapError::LezSequencer(format!("get_account_balance failed: {e}")))?;
 
         Ok(resp)
+    }
+
+    /// [`Self::get_balance`], bounded-retried with exponential backoff on the
+    /// `Err` path only (issue #93 point 2, generalized for the follow-up gap
+    /// found live on the deployed maker: the startup inventory read got this
+    /// treatment, but every OTHER hot-path balance read — the maker loop's
+    /// per-iteration check and the fund-topper's read — still did a single
+    /// unretried call, so a transient sequencer timeout burned a whole loop
+    /// iteration and inflated the failure counter).
+    ///
+    /// A transient sequencer error (a timeout, a dropped connection) is NOT the
+    /// same thing as "reachable and genuinely under-funded" — the latter is a
+    /// successful read that just reports a low number, and this function does
+    /// NOT retry that case; the caller still sees it immediately via `Ok`.
+    /// Only the `Err` case is retried, mirroring the retry `claim_to_target`
+    /// got in #77.
+    ///
+    /// `on_transient` is invoked exactly once per call IF at least one attempt
+    /// failed — whether the read went on to succeed on a later attempt or
+    /// exhausted every attempt — so callers can track "the sequencer blipped"
+    /// as a signal distinct from the read's ultimate `Result`, e.g. to bump an
+    /// operator-facing `transient_errors` counter without polluting a
+    /// swap-failure counter (a retried-and-recovered blip is not a swap
+    /// failure, and neither is a fully-exhausted one — it is the sequencer
+    /// being unreachable, not the swap logic doing anything wrong).
+    ///
+    /// Live-observed on the VPS: repeated `get_account_balance` timeouts,
+    /// sometimes recovering within the retry budget and sometimes not. Without
+    /// this retry, a single-shot read turned a sub-second sequencer blip into
+    /// either a crash loop (the startup case, #93) or a fully-counted "swap
+    /// failure" (the per-iteration case) with no offers on the board in
+    /// between.
+    pub async fn get_balance_with_retry(
+        &self,
+        account_id: &AccountId,
+        on_transient: impl FnMut(&SwapError),
+    ) -> Result<u128> {
+        balance_with_retry_core(|| self.get_balance(account_id), on_transient).await
     }
 
     /// Transfer LEZ to a recipient using the authenticated transfer program.
@@ -658,6 +758,103 @@ mod tests {
 
     fn test_program_id() -> ProgramId {
         [1u32, 2, 3, 4, 5, 6, 7, 8]
+    }
+
+    // Robustness-gap regression (deployed maker, live-observed sequencer
+    // timeouts): a transient sequencer blip that recovers within the retry
+    // budget must be entirely invisible to the caller's `Result` — it comes
+    // back `Ok`, not a failure that happened to be swallowed. `on_transient`
+    // is the ONLY signal a caller gets that a blip occurred, which is what
+    // lets `run_maker_loop` bump a separate `transient_errors` counter instead
+    // of `failed`.
+    #[tokio::test(start_paused = true)]
+    async fn balance_retry_recovers_from_transient_errors_without_failing() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = AtomicU32::new(0);
+        let transient_hits = AtomicU32::new(0);
+        let result = balance_with_retry_core(
+            || {
+                let n = calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if n < 2 {
+                        // First two attempts: sequencer timeout (transient).
+                        Err(SwapError::LezSequencer(
+                            "get_account_balance failed: Request timeout".into(),
+                        ))
+                    } else {
+                        // Third attempt recovers.
+                        Ok(42u128)
+                    }
+                }
+            },
+            |_| {
+                transient_hits.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.expect("the third attempt succeeds, so the overall read must be Ok"),
+            42,
+            "a recovered read must return the real balance, not an error"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            3,
+            "must have retried past the two transient failures"
+        );
+        assert_eq!(
+            transient_hits.load(Ordering::Relaxed),
+            1,
+            "on_transient fires exactly once per call, regardless of how many attempts \
+             it took to recover — this is the signal a caller uses to bump a \
+             transient-errors counter WITHOUT touching a swap-failure counter"
+        );
+    }
+
+    // The other half of the same regression: when the sequencer is down for
+    // the whole retry budget, the read still comes back as an ordinary `Err`
+    // (the caller decides what a persistent outage means for ITS counters —
+    // this function does not itself distinguish "genuine swap failure" from
+    // "infrastructure still down"), but `on_transient` still fires exactly
+    // once so a caller can flag it as infra flakiness rather than double-count
+    // via both a transient AND a failure signal.
+    #[tokio::test(start_paused = true)]
+    async fn balance_retry_exhausts_bounded_attempts_and_reports_transient_once() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = AtomicU32::new(0);
+        let transient_hits = AtomicU32::new(0);
+        let result = balance_with_retry_core(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async {
+                    Err(SwapError::LezSequencer(
+                        "get_account_balance failed: Request timeout".into(),
+                    ))
+                }
+            },
+            |_| {
+                transient_hits.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an outage spanning the whole retry budget must still surface as Err"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            BALANCE_RETRY_ATTEMPTS,
+            "must stop at the bounded attempt count, not retry forever"
+        );
+        assert_eq!(
+            transient_hits.load(Ordering::Relaxed),
+            1,
+            "on_transient still fires exactly once, not once per failed attempt"
+        );
     }
 
     #[test]
