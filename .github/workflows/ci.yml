@@ -1,14 +1,10 @@
 name: CI
 
-# PR-time compile and runtime coverage. Three jobs:
+# PR-time compile and runtime coverage. Two jobs:
 #
 #   rust-checks  — proves the Rust workspace (incl. the swap-ffi cdylib the
 #                  Basecamp module wraps) still compiles and its unit tests
 #                  pass, without the risc0 guest toolchain.
-#   module-build — proves the swap_ui Basecamp module (and transitively the
-#                  swap backend module + the swap-ffi nix build with its
-#                  pinned cargoHash) still builds via nix, exactly like the
-#                  release pipeline does.
 #   basecamp-ui-runtime — installs the portable delivery/swap/swap_ui packages
 #                         into an isolated profile and drives them inside the
 #                         real pinned Basecamp bundle, headlessly.
@@ -96,62 +92,6 @@ jobs:
       - name: cargo test (anvil integration)
         run: cargo test --locked --test taker_binding --test eth_integration
 
-  module-build:
-    name: module-build (nix build swap-ui#lgx-portable)
-    # aarch64-darwin here specifically to keep this PR-time job cheap and
-    # fast; it is no longer the only buildable platform. Issue #32 (PR #53)
-    # pinned real circuits/rapidsnark hashes for linux-amd64 and linux-arm64
-    # too, and .github/workflows/build-modules.yml now compiles both
-    # modules on all three variants (incl. two Linux runners) on every
-    # push/PR — that job is the one that actually proves Linux builds.
-    # This job stays darwin-only as a fast single-variant portable-package
-    # smoke check; the full matrix owns cross-platform coverage.
-    runs-on: macos-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # git+file:. flake refs want a full, non-shallow clone.
-          fetch-depth: 0
-
-      - uses: DeterminateSystems/nix-installer-action@main
-
-      # No nix store caching yet: magic-nix-cache was sunset with the GitHub
-      # Actions Cache v1 API, so every run builds cold (binary-cache
-      # substitution from cache.nixos.org still covers nixpkgs deps).
-      # Follow-up: adopt nix-community/cache-nix-action (or a cachix cache)
-      # once validated on a real runner.
-
-      # ------------------------------------------------------------------
-      # LOUD CAVEAT — the three --override-input flags below are a
-      # temporary workaround, not part of the build definition:
-      #
-      # Cold cargo-vendor fetches 403 on crates.io because the nixpkgs
-      # commits pinned by logos-module-builder (e9f00bd8) and logos-delivery
-      # (23d72dab) ship a fetch-cargo-vendor-util without a User-Agent
-      # (logos-module-builder#159; crates.io rejects the python-requests
-      # default UA). The overrides point at forks carrying the upstream fix
-      # (NixOS/nixpkgs@8209ba2b) applied ONLY to the vendor-staging FOD, so
-      # no input-addressed store paths change.
-      #
-      #   * DROP the two eaec81d3 overrides when logos-module-builder#173
-      #     (repins its nixpkgs) merges AND this repo's module flakes pick
-      #     up the new builder rev.
-      #   * DROP the 3134d7bb override when logos-delivery-module repins its
-      #     own nixpkgs the same way (sibling fix, not covered by #173).
-      #
-      # Known flake: even with the UA fix, a cold vendor fetch can hit a
-      # transient crates.io 429 (rate limit — the fetcher downloads crates
-      # in parallel with no backoff). If this step fails with "Status code:
-      # 429", re-run the job.
-      # ------------------------------------------------------------------
-      - name: nix build swap_ui Basecamp package (lgx-portable)
-        run: |
-          nix build 'git+file:.?dir=swap-ui#lgx-portable' --no-link --print-out-paths \
-            --override-input logos-module-builder/nixpkgs github:danisharora099/nixpkgs/eaec81d3b8a8d2339e25c718a1650b2c45adf726 \
-            --override-input swap/logos-module-builder/nixpkgs github:danisharora099/nixpkgs/eaec81d3b8a8d2339e25c718a1650b2c45adf726 \
-            --override-input swap/delivery_module/logos-delivery/nixpkgs github:danisharora099/nixpkgs/3134d7bb12629545b1f3e5b1d2faadbf861484fd
-
   basecamp-ui-runtime:
     name: basecamp-ui-runtime (real Basecamp, linux-amd64)
     runs-on: ubuntu-latest
@@ -176,7 +116,7 @@ jobs:
       - name: Install Basecamp system runtime libraries
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libopengl0
+          sudo apt-get install --yes libegl1 libgl1 libglx0 libopengl0
 
       - name: Install modules and run Basecamp-native UI smoke test
         run: make basecamp-ui-smoke

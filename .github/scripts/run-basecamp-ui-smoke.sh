@@ -29,7 +29,7 @@ toml_value() {
     in_section && $0 ~ "^[[:space:]]*" wanted_key "[[:space:]]*=" {
       value = $0
       sub(/^[^=]*=[[:space:]]*/, "", value)
-      if (match(value, /^\"[^\"]*\"/)) {
+      if (match(value, /^"[^"]*"/)) {
         value = substr(value, RSTART + 1, RLENGTH - 2)
       } else {
         sub(/[[:space:]]*(#.*)?$/, "", value)
@@ -101,8 +101,8 @@ find_single_lgx() {
 
 # Build the same portable package variants that Basecamp consumes. The module
 # flakes remain package-only; the host and test framework come from Basecamp.
-# Keep the two scoped nixpkgs workarounds identical to the existing PR-time
-# module-build job: the pinned builder and Delivery nixpkgs revisions predate
+# Keep the two scoped nixpkgs workarounds identical to the PR-time module
+# matrix: the pinned builder and Delivery nixpkgs revisions predate
 # crates.io's User-Agent fix. They change only the affected nested input, not
 # this repo's flake outputs or host selection.
 module_builder_nixpkgs='github:danisharora099/nixpkgs/eaec81d3b8a8d2339e25c718a1650b2c45adf726'
@@ -138,6 +138,25 @@ basecamp_bin="$basecamp_output/bin/LogosBasecamp"
   echo "logos-qt-mcp test framework missing from $qt_mcp_output" >&2
   exit 1
 }
+
+# Nix's Linux bundle deliberately leaves the host graphics-driver ABI outside
+# its closure. Enumerate every unresolved ELF dependency in one failure instead
+# of discovering one library per expensive cold CI build.
+if [[ $(uname -s) == Linux ]]; then
+  basecamp_elf="$basecamp_output/bin/.LogosBasecamp.elf"
+  [[ -x "$basecamp_elf" ]] || { echo "Basecamp ELF missing: $basecamp_elf" >&2; exit 1; }
+  if ! ldd_output=$(ldd "$basecamp_elf" 2>&1); then
+    echo "ldd could not inspect the Basecamp ELF:" >&2
+    printf '%s\n' "$ldd_output" >&2
+    exit 1
+  fi
+  missing_libraries=$(printf '%s\n' "$ldd_output" | awk '$2 == "=>" && $3 == "not" && !seen[$1]++ { print $1 }')
+  if [[ -n "$missing_libraries" ]]; then
+    echo "Basecamp ELF has unresolved system libraries:" >&2
+    printf '%s\n' "$missing_libraries" | awk '{ print "  " $0 }' >&2
+    exit 1
+  fi
+fi
 
 test_root=$(mktemp -d /tmp/atomic-swaps-basecamp-ui.XXXXXX)
 user_dir="$test_root/user-dir"
