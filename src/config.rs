@@ -47,7 +47,13 @@ pub struct SwapConfig {
 
     // --- Counterparty ---
     pub eth_recipient_address: Address,
-    pub lez_taker_account_id: AccountId,
+    /// OPTIONAL designated counterparty. A maker no longer needs this: each
+    /// taker publishes its own LEZ AccountId in its ETH lock
+    /// (`Locked.takerLezAccount`) and the maker locks LEZ to THAT, which is
+    /// what lets it serve a stranger. When set, it acts as an allowlist — the
+    /// maker only accepts locks naming this account. The taker never reads it
+    /// (it signs with its own account).
+    pub lez_taker_account_id: Option<AccountId>,
 
     // --- Polling ---
     pub poll_interval: Duration,

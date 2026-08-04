@@ -179,7 +179,9 @@ impl DemoEnv {
             lez_timelock,
             eth_timelock,
             eth_recipient_address: maker_eth_addr,
-            lez_taker_account_id: accounts[1].account_id,
+            // Deliberately None: the demo proves the taker's LEZ account travels
+            // on-chain in its own ETH lock, so the maker never needs it configured.
+            lez_taker_account_id: None,
             poll_interval: Duration::from_millis(500),
         };
 
@@ -200,7 +202,9 @@ impl DemoEnv {
             lez_timelock,
             eth_timelock,
             eth_recipient_address: maker_eth_addr,
-            lez_taker_account_id: accounts[1].account_id,
+            // Deliberately None: the demo proves the taker's LEZ account travels
+            // on-chain in its own ETH lock, so the maker never needs it configured.
+            lez_taker_account_id: None,
             poll_interval: Duration::from_millis(500),
         };
 

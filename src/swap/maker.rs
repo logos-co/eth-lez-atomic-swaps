@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy::primitives::{FixedBytes, U256};
+use lee_core::account::AccountId;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -104,46 +105,159 @@ pub fn eth_timelock_covers_lez(
     eth_expiry_secs >= lez_expiry_secs.saturating_add(margin_secs)
 }
 
+/// Why a matched candidate was turned away. Every variant is decided in the
+/// PURE path below, i.e. strictly before the journal write and before any LEZ
+/// instruction is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    /// The taker's ETH timelock does not clear the maker's fresh LEZ expiry by
+    /// the safety margin.
+    TimelockTooTight,
+    /// The `takerLezAccount` published in the ETH lock is one the maker can
+    /// never lock to: all-zero, or the maker's OWN account. The LEZ guest
+    /// asserts `maker != taker` and rejects a zero/unknown taker, so building a
+    /// Lock instruction for such a value is guaranteed to fail — see
+    /// [`taker_lez_account_is_usable`] for why that must never happen after the
+    /// journal write.
+    UnusableTakerLezAccount,
+    /// A designated-counterparty maker (`lez_taker_account_id` configured) saw a
+    /// lock naming a different taker. Not hostile — just not ours.
+    NotDesignatedTaker,
+}
+
 /// What to do with a matched ETH-lock candidate in the maker event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CandidateDisposition {
+pub enum CandidateDisposition {
     /// Already rejected this run, or already journaled as in-flight — ignore it
     /// and keep waiting for other locks (P1-A belt / P1-E rejected-set).
     Skip,
-    /// The taker's ETH timelock is too tight; record it as rejected and keep
-    /// waiting — NEVER surface an error (that restarts the outer loop and the
-    /// 256-block replay re-delivers this same lock, a hot-loop DoS) (P1-E).
-    Reject,
+    /// Turn this candidate away: record it as rejected and keep waiting — NEVER
+    /// surface an error (that restarts the outer loop and the 256-block replay
+    /// re-delivers this same lock, a hot-loop DoS) (P1-E).
+    Reject(RejectReason),
     /// Safe to proceed to lock LEZ against.
     Accept,
 }
 
-/// Pure decision for one matched candidate. `margin` is `None` for the
-/// single-shot maker (no loop-mode timelock gate). Kept side-effect-free so the
-/// P1-A journal-skip belt and the P1-E rejected-set / timelock gate are
-/// unit-testable without a live watcher or sequencer.
+/// Whether a `takerLezAccount` read off the `Locked` event is one the maker can
+/// actually lock to.
 ///
-/// The rejected-set is keyed by the ETH **swap id** (the escrow identifier),
-/// NOT the hashlock: a taker who locks too-tight and then re-locks correctly
-/// under a NEW swap id (same secret) must not be suppressed by a stale
-/// hashlock-keyed rejection (P2-5). The journal-skip belt (`in_journal`) stays
-/// hashlock-scoped — a hashlock already in flight must never be re-locked
-/// regardless of swap id (P1-A).
-pub(crate) fn classify_candidate(
-    swap_id: &[u8; 32],
+/// **This is the check that must run before the journal write.** The LEZ HTLC
+/// guest asserts `maker_id != taker_id`, so a hostile taker who locks one cheap
+/// ETH HTLC naming the MAKER'S OWN LEZ account makes the maker's Lock
+/// instruction fail. If that were discovered after `journal.record`, the maker
+/// would return `Err` with a non-empty journal — and a non-empty journal is
+/// exactly what `loop_must_stop_after_iteration` treats as "funds unresolved,
+/// stop for a supervised restart". One Sepolia transaction would then kill the
+/// bot on every restart: a free, permanent DoS. Deciding it here, in the pure
+/// path, downgrades that attack to a logged rejection that costs the attacker
+/// gas and costs the maker nothing.
+///
+/// A `bytes32` is always exactly 32 bytes, so length can never be wrong on this
+/// path; the contract additionally rejects `bytes32(0)` at lock time. Both are
+/// re-checked anyway — this function is the maker's own belt, and it must not
+/// depend on the contract it is talking to being the one we think it is.
+pub fn taker_lez_account_is_usable(
+    taker_lez_account: &[u8; 32],
+    maker_lez_account: &[u8; 32],
+) -> bool {
+    taker_lez_account != &[0u8; 32] && taker_lez_account != maker_lez_account
+}
+
+/// The LEZ account the maker will name as the SOLE claimant of its escrow,
+/// derived from the taker's own on-chain lock. `None` for a value the maker can
+/// never lock to.
+///
+/// This is the seam between "what the taker published on Ethereum" and "what
+/// goes into the LEZ `Lock` instruction", exposed so an integration test can
+/// assert the whole chain (ETH lock → watcher decode → LEZ taker_id) without a
+/// sequencer. It is evaluated at MATCH time, inside the pure path, so its
+/// failure case can only ever produce a rejection — never a post-journal error.
+pub fn designated_lez_claimant(
+    taker_lez_account: &[u8; 32],
+    maker_lez_account: &[u8; 32],
+) -> Option<AccountId> {
+    taker_lez_account_is_usable(taker_lez_account, maker_lez_account)
+        .then(|| AccountId::new(*taker_lez_account))
+}
+
+/// The matched ETH lock under consideration, as read off the `Locked` event.
+pub struct Candidate<'a> {
+    /// The HASHLOCK — the only sound dedupe key on this path, and deliberately
+    /// the only identifier the pure decision sees (see [`classify_candidate`]).
+    pub hashlock: &'a [u8; 32],
+    /// LEZ account the taker published as the designated claimant.
+    pub taker_lez_account: &'a [u8; 32],
+    /// Absolute on-chain ETH expiry, unix seconds.
+    pub eth_timelock_secs: u64,
+}
+
+/// The maker's side of the decision: who it is, who (if anyone) it is willing
+/// to serve, and the LEZ expiry/margin it would lock with.
+pub struct MakerPolicy<'a> {
+    /// The maker's OWN LEZ account — a candidate naming it is unusable.
+    pub maker_lez_account: &'a [u8; 32],
+    /// `Some` only for a designated-counterparty maker (`lez_taker_account_id`
+    /// configured): serve just that taker. `None` means serve anyone, which is
+    /// the point of binding the taker account on-chain.
+    pub designated_taker: Option<&'a [u8; 32]>,
+    /// The FRESH absolute LEZ expiry the maker would lock with (P1-1).
+    pub lez_expiry_secs: u64,
+    /// `None` for the single-shot maker (no loop-mode timelock gate).
+    pub margin: Option<u64>,
+}
+
+/// Pure decision for one matched candidate. Kept side-effect-free so the P1-A
+/// journal-skip belt, the P1-E rejected-set / timelock gate AND the
+/// taker-account binding checks are unit-testable without a live watcher or
+/// sequencer — and, critically, so every rejection happens before `journal
+/// .record` and before any LEZ instruction is built.
+///
+/// # Both dedupe keys are the HASHLOCK, and that is load-bearing
+///
+/// The rejected-set used to be keyed by ETH swap id, so that a taker who locked
+/// too-tight could re-lock correctly under a fresh escrow with the same secret
+/// (P2-5). Binding `takerLezAccount` into the `swapId` preimage KILLED that
+/// scheme: one sender can now mint UNLIMITED distinct swap ids for a single
+/// hashlock just by varying that field, so a swap-id-keyed rejected set is
+/// bypassable for free — every hostile re-lock looks like a brand-new candidate
+/// and re-enters processing. The ETH and LEZ sides also no longer agree on
+/// cardinality: LEZ derives ONE escrow PDA per hashlock and refuses any
+/// pre-existing escrow, so at most one ETH lock per hashlock can ever be
+/// served.
+///
+/// The invariant is therefore **one in-flight/decided swap per hashlock**, and
+/// both gates key on it: the in-run rejected-set and the durable journal
+/// (`in_journal`). The deliberate cost is that a rejection now burns the SECRET,
+/// not just the escrow — a taker whose lock is turned away must retry with a
+/// fresh preimage. That is one cheap client-side regeneration for them, versus
+/// a free unlimited re-trigger for an attacker, so it is the right trade.
+pub fn classify_candidate(
+    candidate: &Candidate<'_>,
+    policy: &MakerPolicy<'_>,
     rejected: &HashSet<[u8; 32]>,
     in_journal: bool,
-    eth_timelock_secs: u64,
-    lez_timelock_secs: u64,
-    margin: Option<u64>,
 ) -> CandidateDisposition {
-    if rejected.contains(swap_id) || in_journal {
+    if rejected.contains(candidate.hashlock) || in_journal {
         return CandidateDisposition::Skip;
     }
-    if let Some(margin_secs) = margin
-        && !eth_timelock_covers_lez(eth_timelock_secs, lez_timelock_secs, margin_secs)
+    // Structural first, and cheapest: a taker account we could never lock to.
+    if !taker_lez_account_is_usable(candidate.taker_lez_account, policy.maker_lez_account) {
+        return CandidateDisposition::Reject(RejectReason::UnusableTakerLezAccount);
+    }
+    if let Some(designated) = policy.designated_taker
+        && candidate.taker_lez_account != designated
     {
-        return CandidateDisposition::Reject;
+        return CandidateDisposition::Reject(RejectReason::NotDesignatedTaker);
+    }
+    if let Some(margin_secs) = policy.margin
+        && !eth_timelock_covers_lez(
+            candidate.eth_timelock_secs,
+            policy.lez_expiry_secs,
+            margin_secs,
+        )
+    {
+        return CandidateDisposition::Reject(RejectReason::TimelockTooTight);
     }
     CandidateDisposition::Accept
 }
@@ -245,7 +359,16 @@ pub async fn run_maker(
     const MAX_REJECTED: usize = 1024;
     let mut rejected: HashSet<[u8; 32]> = HashSet::new();
 
-    let (swap_id, discovered_hashlock, lez_expiry_secs) = loop {
+    // The maker's own LEZ account: a candidate naming it is unusable (the guest
+    // asserts maker != taker), and that must be caught in the pure path below.
+    let maker_lez_account: [u8; 32] = *lez_client.account_id().value();
+    // `Some` only when the operator pinned a counterparty. Unset (the new
+    // default) means the maker serves whoever locks ETH, binding each swap to
+    // the LEZ account carried on that taker's own lock.
+    let designated_taker: Option<[u8; 32]> =
+        config.lez_taker_account_id.map(|id| *id.value());
+
+    let (swap_id, discovered_hashlock, lez_expiry_secs, lez_claimant) = loop {
         tokio::select! {
             Some(event) = rx.recv() => {
                 if let EthHtlcEvent::Locked {
@@ -254,6 +377,7 @@ pub async fn run_maker(
                     amount,
                     hashlock: event_hashlock,
                     timelock: event_timelock,
+                    taker_lez_account,
                     ..
                 } = event
                 {
@@ -292,26 +416,34 @@ pub async fn run_maker(
                         let in_journal = guards
                             .map(|g| g.journal.contains(&hex::encode(hl)))
                             .unwrap_or(false);
-                        match classify_candidate(
-                            &swap_id.0,
+                        // NOTE ordering: this whole decision — including the
+                        // taker-LEZ-account binding checks — is PURE and runs
+                        // before `journal.record` below. A candidate the maker
+                        // cannot lock to must never leave a journal entry
+                        // behind, because a non-empty journal stops the loop
+                        // for a supervised restart (see
+                        // `taker_lez_account_is_usable`).
+                        let disposition = classify_candidate(
+                            &Candidate {
+                                hashlock: &hl,
+                                taker_lez_account: &taker_lez_account.0,
+                                eth_timelock_secs,
+                            },
+                            &MakerPolicy {
+                                maker_lez_account: &maker_lez_account,
+                                designated_taker: designated_taker.as_ref(),
+                                lez_expiry_secs,
+                                margin: guards.map(|g| g.timelock_margin_secs),
+                            },
                             &rejected,
                             in_journal,
-                            eth_timelock_secs,
-                            lez_expiry_secs,
-                            guards.map(|g| g.timelock_margin_secs),
-                        ) {
+                        );
+                        match disposition {
                             CandidateDisposition::Skip => {
                                 info!(%swap_id, "maker: skipping ETH lock — already in-flight/handled");
                                 continue;
                             }
-                            CandidateDisposition::Reject => {
-                                warn!(
-                                    %swap_id,
-                                    eth_timelock_secs,
-                                    lez_expiry_secs,
-                                    "maker: rejecting ETH lock — timelock too tight vs fresh LEZ \
-                                     expiry + margin; waiting for other locks"
-                                );
+                            CandidateDisposition::Reject(reason) => {
                                 // Surface the rejection to progress consumers
                                 // (CLI / GUI): without this the maker loop
                                 // silently stays at WaitingForEthLock and the
@@ -319,20 +451,76 @@ pub async fn run_maker(
                                 // seen and turned away, or why. Additive only —
                                 // the P1-E record-and-keep-waiting semantics
                                 // are unchanged.
-                                progress::report(&progress, SwapProgress::EthLockRejected {
-                                    swap_id: format!("{swap_id}"),
-                                    eth_expiry_secs: eth_timelock_secs,
-                                    required_expiry_secs: lez_expiry_secs.saturating_add(
-                                        guards.map(|g| g.timelock_margin_secs).unwrap_or(0),
-                                    ),
-                                });
+                                match reason {
+                                    RejectReason::TimelockTooTight => {
+                                        warn!(
+                                            %swap_id,
+                                            eth_timelock_secs,
+                                            lez_expiry_secs,
+                                            "maker: rejecting ETH lock — timelock too tight vs fresh LEZ \
+                                             expiry + margin; waiting for other locks"
+                                        );
+                                        progress::report(&progress, SwapProgress::EthLockRejected {
+                                            swap_id: format!("{swap_id}"),
+                                            eth_expiry_secs: eth_timelock_secs,
+                                            required_expiry_secs: lez_expiry_secs.saturating_add(
+                                                guards.map(|g| g.timelock_margin_secs).unwrap_or(0),
+                                            ),
+                                        });
+                                    }
+                                    RejectReason::UnusableTakerLezAccount
+                                    | RejectReason::NotDesignatedTaker => {
+                                        warn!(
+                                            %swap_id,
+                                            taker_lez_account = %hex::encode(taker_lez_account.0),
+                                            ?reason,
+                                            "maker: rejecting ETH lock — its takerLezAccount is not \
+                                             one this maker can lock to; waiting for other locks"
+                                        );
+                                        progress::report(&progress, SwapProgress::EthLockRejectedTakerAccount {
+                                            swap_id: format!("{swap_id}"),
+                                            taker_lez_account: hex::encode(taker_lez_account.0),
+                                            reason: match reason {
+                                                RejectReason::UnusableTakerLezAccount =>
+                                                    "unusable takerLezAccount (zero, or the maker's own \
+                                                     account — the LEZ HTLC requires maker != taker)".into(),
+                                                _ => "not the designated counterparty this maker serves \
+                                                      (LEZ_TAKER_ACCOUNT_ID)".to_string(),
+                                            },
+                                        });
+                                    }
+                                }
+                                // Keyed by HASHLOCK, not swap id: since
+                                // `takerLezAccount` entered the swapId preimage
+                                // one sender can mint unlimited swap ids for a
+                                // single hashlock, so a swap-id-keyed set is a
+                                // free bypass (see `classify_candidate`).
                                 if rejected.len() < MAX_REJECTED {
-                                    rejected.insert(swap_id.0);
+                                    rejected.insert(hl);
                                 }
                                 continue;
                             }
                             CandidateDisposition::Accept => {}
                         }
+
+                        // Resolve the LEZ claimant HERE, at match time and
+                        // still inside the pure/pre-journal region, so the
+                        // conversion can never fail later: a `None` after
+                        // `journal.record` would return Err with a non-empty
+                        // journal and stop the loop (a free restart-DoS). The
+                        // classifier already guarantees Some; this is the
+                        // suspenders, and it keeps the fallible step before the
+                        // durable write.
+                        let Some(lez_claimant) = designated_lez_claimant(
+                            &taker_lez_account.0,
+                            &maker_lez_account,
+                        ) else {
+                            warn!(%swap_id, "maker: unusable takerLezAccount slipped past classification — skipping");
+                            if rejected.len() < MAX_REJECTED {
+                                rejected.insert(hl);
+                            }
+                            continue;
+                        };
 
                         // Verify the HTLC is still OPEN on-chain (skip stale swaps).
                         if let Ok(htlc) = eth_client.get_htlc(swap_id).await
@@ -341,12 +529,17 @@ pub async fn run_maker(
                             continue;
                         }
 
-                        info!(%swap_id, "maker: matched ETH Locked event");
+                        info!(
+                            %swap_id,
+                            taker_lez_account = %hex::encode(taker_lez_account.0),
+                            "maker: matched ETH Locked event"
+                        );
                         progress::report(&progress, SwapProgress::EthLockDetected {
                             swap_id: format!("{swap_id}"),
                             hashlock: hex::encode(hl),
+                            taker_lez_account: hex::encode(taker_lez_account.0),
                         });
-                        break (swap_id, hl, lez_expiry_secs);
+                        break (swap_id, hl, lez_expiry_secs, lez_claimant);
                     }
                 }
             }
@@ -390,15 +583,14 @@ pub async fn run_maker(
             .record(&hashlock_hex, &format!("{swap_id}"))?;
     }
 
-    // 2. Lock LEZ (short timelock).
+    // 2. Lock LEZ (short timelock), naming the taker's OWN LEZ account as read
+    // off their ETH lock — never a statically configured one. The LEZ guest
+    // gates Claim on `signer == escrow.taker_id`, so this binding is what lets
+    // an arbitrary taker (not just a pre-agreed counterparty) collect. The
+    // value was validated in the pure path above, before the journal write.
     progress::report(&progress, SwapProgress::LezLocking);
     let lez_lock_tx = lez_client
-        .lock(
-            hashlock,
-            config.lez_taker_account_id,
-            config.lez_amount,
-            lez_expiry_secs,
-        )
+        .lock(hashlock, lez_claimant, config.lez_amount, lez_expiry_secs)
         .await?;
     info!(tx_hash = %lez_lock_tx, "maker: LEZ locked");
     // P2-2: the lock is confirmed and an on-chain escrow now exists — upgrade the
@@ -793,6 +985,34 @@ mod tests {
         assert!(!eth_timelock_covers_lez(10, u64::MAX, 300));
     }
 
+    // ── candidate classification ────────────────────────────────────────
+    //
+    // Test fixtures. MAKER is the maker's own LEZ account; TAKER an honest
+    // stranger's. `candidate`/`policy` keep each test to the field it is about.
+    const MAKER: [u8; 32] = [0xC0u8; 32];
+    const TAKER: [u8; 32] = [0x7Eu8; 32];
+
+    fn candidate<'a>(
+        hashlock: &'a [u8; 32],
+        taker: &'a [u8; 32],
+        eth_timelock_secs: u64,
+    ) -> Candidate<'a> {
+        Candidate {
+            hashlock,
+            taker_lez_account: taker,
+            eth_timelock_secs,
+        }
+    }
+
+    fn policy<'a>(lez_expiry_secs: u64, margin: Option<u64>) -> MakerPolicy<'a> {
+        MakerPolicy {
+            maker_lez_account: &MAKER,
+            designated_taker: None,
+            lez_expiry_secs,
+            margin,
+        }
+    }
+
     // P1-E: a too-tight ETH timelock yields Reject (record + keep waiting),
     // NOT an error that restarts the loop over the replayed lock. Once
     // rejected, the same hashlock yields Skip on every subsequent replay — so
@@ -806,13 +1026,23 @@ mod tests {
 
         // First encounter: too tight → Reject (caller records it, keeps waiting).
         assert_eq!(
-            classify_candidate(&hl, &rejected, false, lez, lez, Some(margin)),
-            CandidateDisposition::Reject
+            classify_candidate(
+                &candidate(&hl, &TAKER, lez),
+                &policy(lez, Some(margin)),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Reject(RejectReason::TimelockTooTight)
         );
         rejected.insert(hl);
         // Every subsequent replay of the same lock → Skip (never re-processed).
         assert_eq!(
-            classify_candidate(&hl, &rejected, false, lez, lez, Some(margin)),
+            classify_candidate(
+                &candidate(&hl, &TAKER, lez),
+                &policy(lez, Some(margin)),
+                &rejected,
+                false
+            ),
             CandidateDisposition::Skip
         );
     }
@@ -827,12 +1057,22 @@ mod tests {
         let rejected: HashSet<[u8; 32]> = HashSet::new();
         // Timelock is comfortably safe, but it is already in the journal.
         assert_eq!(
-            classify_candidate(&hl, &rejected, true, lez + 10_000, lez, Some(300)),
+            classify_candidate(
+                &candidate(&hl, &TAKER, lez + 10_000),
+                &policy(lez, Some(300)),
+                &rejected,
+                true
+            ),
             CandidateDisposition::Skip
         );
         // Not in the journal and timelock safe → Accept.
         assert_eq!(
-            classify_candidate(&hl, &rejected, false, lez + 10_000, lez, Some(300)),
+            classify_candidate(
+                &candidate(&hl, &TAKER, lez + 10_000),
+                &policy(lez, Some(300)),
+                &rejected,
+                false
+            ),
             CandidateDisposition::Accept
         );
     }
@@ -845,7 +1085,194 @@ mod tests {
         let rejected: HashSet<[u8; 32]> = HashSet::new();
         // Even a "tight" timelock is Accepted when margin is None.
         assert_eq!(
-            classify_candidate(&hl, &rejected, false, 1, 1_000_000, None),
+            classify_candidate(
+                &candidate(&hl, &TAKER, 1),
+                &policy(1_000_000, None),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Accept
+        );
+    }
+
+    // ── the taker-LEZ-account binding ───────────────────────────────────
+
+    // THE attack this ordering exists for. The LEZ guest asserts
+    // `maker_id != taker_id`, so a lock naming the MAKER'S OWN account makes the
+    // Lock instruction fail. Discovered after `journal.record`, that failure
+    // returns Err with a non-empty journal — which
+    // `loop_must_stop_after_iteration` reads as "funds unresolved, stop for a
+    // supervised restart". One cheap ETH tx per restart would then keep the bot
+    // permanently down. It must be a PURE rejection instead, with no journal
+    // write at all: below, the journal is untouched after classification.
+    #[test]
+    fn hostile_taker_account_equal_to_maker_is_rejected_without_journal_write() {
+        let hl = [0x44u8; 32];
+        let lez = 1_000u64;
+        let rejected: HashSet<[u8; 32]> = HashSet::new();
+        let journal = MockJournal::default();
+
+        // The hostile lock names the maker's own LEZ account, and is otherwise
+        // perfect: right recipient, generous timelock — it would pass every
+        // pre-existing gate.
+        let disposition = classify_candidate(
+            &candidate(&hl, &MAKER, lez + 10_000),
+            &MakerPolicy {
+                maker_lez_account: &MAKER,
+                designated_taker: None,
+                lez_expiry_secs: lez,
+                margin: Some(300),
+            },
+            &rejected,
+            journal.contains(&hex::encode(hl)),
+        );
+
+        assert_eq!(
+            disposition,
+            CandidateDisposition::Reject(RejectReason::UnusableTakerLezAccount)
+        );
+        // The whole point: classification is side-effect-free, so reaching a
+        // rejection cannot have recorded anything — and therefore cannot arm
+        // the journal-driven loop stop.
+        assert!(
+            !journal.has_in_flight(),
+            "a hostile takerLezAccount must never leave a journal entry — a non-empty \
+             journal stops the maker loop, making this a free restart-DoS"
+        );
+        // And the conversion the lock path uses refuses it too (suspenders).
+        assert!(designated_lez_claimant(&MAKER, &MAKER).is_none());
+    }
+
+    // The contract rejects bytes32(0) at lock time, but the maker must not
+    // depend on the contract it is talking to being the one it thinks it is.
+    #[test]
+    fn zero_taker_account_is_rejected() {
+        let hl = [0x55u8; 32];
+        let zero = [0u8; 32];
+        let rejected: HashSet<[u8; 32]> = HashSet::new();
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &zero, 100_000),
+                &policy(1_000, Some(300)),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Reject(RejectReason::UnusableTakerLezAccount)
+        );
+        assert!(designated_lez_claimant(&zero, &MAKER).is_none());
+        // An honest stranger's account is usable and converts to that account.
+        assert_eq!(
+            designated_lez_claimant(&TAKER, &MAKER).map(|a| *a.value()),
+            Some(TAKER)
+        );
+    }
+
+    // A designated-counterparty maker (LEZ_TAKER_ACCOUNT_ID set) serves only
+    // that taker; with it unset — the new default — it serves anyone.
+    #[test]
+    fn designated_taker_acts_as_an_allowlist_when_set() {
+        let hl = [0x66u8; 32];
+        let other = [0x99u8; 32];
+        let rejected: HashSet<[u8; 32]> = HashSet::new();
+        let designated = MakerPolicy {
+            maker_lez_account: &MAKER,
+            designated_taker: Some(&TAKER),
+            lez_expiry_secs: 1_000,
+            margin: Some(300),
+        };
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &other, 100_000),
+                &designated,
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Reject(RejectReason::NotDesignatedTaker)
+        );
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &TAKER, 100_000),
+                &designated,
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Accept
+        );
+        // Unset: the stranger is served. This is the whole point of the change.
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &other, 100_000),
+                &policy(1_000, Some(300)),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Accept
+        );
+    }
+
+    // The swapId-malleability bypass. `takerLezAccount` is now part of the
+    // swapId preimage, so ONE sender can mint unlimited distinct swap ids for a
+    // single hashlock at will. A swap-id-keyed rejected set would therefore see
+    // every hostile re-lock as a brand-new candidate and re-process it forever;
+    // keying by hashlock closes it — the second attempt is Skipped even though
+    // its swap id (and its takerLezAccount) are different.
+    #[test]
+    fn rejected_set_keyed_by_hashlock_survives_swap_id_malleability() {
+        let hl = [0x77u8; 32]; // ONE hashlock...
+        let lez = 1_000_000u64;
+        let margin = 300u64;
+        let mut rejected: HashSet<[u8; 32]> = HashSet::new();
+
+        // Attempt 1: too-tight timelock → Reject; the caller records the
+        // HASHLOCK (not the swap id).
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &TAKER, lez),
+                &policy(lez, Some(margin)),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Reject(RejectReason::TimelockTooTight)
+        );
+        rejected.insert(hl);
+
+        // Attempt 2: the attacker varies takerLezAccount, which mints a fresh
+        // swapId on-chain for free — the same secret, a new escrow id. Under
+        // swap-id keying this would sail through as unseen; under hashlock
+        // keying it is Skipped.
+        let other_account = [0xABu8; 32];
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &other_account, lez),
+                &policy(lez, Some(margin)),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Skip,
+            "varying takerLezAccount mints a new swapId for the SAME hashlock — it must \
+             not re-enter processing"
+        );
+        // Even a now-generous timelock cannot revive the burnt hashlock: LEZ
+        // derives one escrow PDA per hashlock, so there is nothing to re-serve.
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &other_account, lez + 100_000),
+                &policy(lez, Some(margin)),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Skip
+        );
+        // A genuinely different swap (fresh secret ⇒ fresh hashlock) is served
+        // normally — the rejection burns the secret, not the taker.
+        let fresh_hl = [0x78u8; 32];
+        assert_eq!(
+            classify_candidate(
+                &candidate(&fresh_hl, &TAKER, lez + 100_000),
+                &policy(lez, Some(margin)),
+                &rejected,
+                false
+            ),
             CandidateDisposition::Accept
         );
     }
@@ -876,35 +1303,12 @@ mod tests {
         assert!(!eth_timelock_covers_lez(eth_lock, fresh, margin));
     }
 
-    // P2-5: the rejected-set is keyed by ETH swap id, not hashlock. A taker who
-    // locks too-tight (rejected) and then re-locks CORRECTLY under a fresh escrow
-    // id with the SAME secret must NOT be suppressed by the stale rejection.
-    #[test]
-    fn rejected_set_is_keyed_by_swap_id_not_hashlock() {
-        let swap_a = [0xA1u8; 32]; // first (too-tight) escrow id
-        let swap_b = [0xB2u8; 32]; // corrected re-lock, same secret, NEW escrow id
-        let lez = 1_000_000u64;
-        let margin = 300u64;
-        let mut rejected: HashSet<[u8; 32]> = HashSet::new();
-
-        // First escrow too tight → Reject; the caller records the swap id.
-        assert_eq!(
-            classify_candidate(&swap_a, &rejected, false, lez, lez, Some(margin)),
-            CandidateDisposition::Reject
-        );
-        rejected.insert(swap_a);
-        // Replay of the SAME escrow id → Skip.
-        assert_eq!(
-            classify_candidate(&swap_a, &rejected, false, lez + 10_000, lez, Some(margin)),
-            CandidateDisposition::Skip
-        );
-        // A corrected re-lock under a NEW escrow id (same secret) with a safe
-        // timelock is a fresh, acceptable candidate — not suppressed.
-        assert_eq!(
-            classify_candidate(&swap_b, &rejected, false, lez + 10_000, lez, Some(margin)),
-            CandidateDisposition::Accept
-        );
-    }
+    // (The former P2-5 test asserted the opposite keying — rejected-set by ETH
+    // swap id, so a corrected same-secret re-lock under a fresh escrow id was
+    // still served. Binding `takerLezAccount` into the swapId preimage made
+    // swap ids attacker-mintable per hashlock, which turned that leniency into
+    // a free unlimited re-trigger; it is replaced by
+    // `rejected_set_keyed_by_hashlock_survives_swap_id_malleability` above.)
 
     // A minimal in-memory journal to exercise the P1-3 stop decision without a
     // live watcher/sequencer: `record`/`clear` mutate the set; the loop consults

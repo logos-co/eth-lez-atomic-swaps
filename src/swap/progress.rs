@@ -27,6 +27,10 @@ pub enum SwapProgress {
     EthLockDetected {
         swap_id: String,
         hashlock: String,
+        /// The taker's LEZ AccountId (hex) carried on the ETH `Locked` event —
+        /// the account the maker will name as the sole claimant of its LEZ
+        /// escrow. Surfaced so an operator can see WHO a swap is bound to.
+        taker_lez_account: String,
     },
     /// A matched ETH lock was rejected by the loop-mode timelock-margin gate
     /// (P1-E): its absolute on-chain expiry does not clear the maker's fresh
@@ -39,6 +43,19 @@ pub enum SwapProgress {
         eth_expiry_secs: u64,
         /// The minimum acceptable expiry: fresh LEZ expiry + margin.
         required_expiry_secs: u64,
+    },
+    /// A matched ETH lock was turned away because of the LEZ account it named:
+    /// either one the maker can never lock to (zero, or the maker's own — the
+    /// LEZ HTLC requires `maker != taker`), or, for a designated-counterparty
+    /// maker, a taker it does not serve. Kept separate from
+    /// [`SwapProgress::EthLockRejected`] so the timelock story stays honest;
+    /// like it, purely informational — the maker records the rejection BEFORE
+    /// any journal write and keeps waiting.
+    EthLockRejectedTakerAccount {
+        swap_id: String,
+        /// The rejected `takerLezAccount` (hex) from the `Locked` event.
+        taker_lez_account: String,
+        reason: String,
     },
     LezLocking,
     LezLocked {
