@@ -87,15 +87,12 @@ pub struct MakerArgs {
     )]
     restrict_counterparty: bool,
 
-    /// Faucet sidecar: loop `wallet pinata claim` (150 LEZ each) until the
-    /// maker LEZ balance reaches this target. Standalone (exits when reached)
-    /// unless combined with --loop, where it tops up before the loop starts.
+    /// Faucet sidecar: natively claim from the pinata faucet (150 LEZ each,
+    /// no `wallet` binary) until the maker LEZ balance reaches this target.
+    /// Standalone (exits when reached) unless combined with --loop, where it
+    /// tops up before the loop starts.
     #[arg(long, env = "FUND_TO_TARGET", value_name = "TARGET")]
     fund_to: Option<u128>,
-
-    /// Path to the LEZ `wallet` binary used for pinata claims.
-    #[arg(long, env = "LEZ_WALLET_BIN", default_value = "wallet")]
-    wallet_bin: String,
 }
 
 pub async fn cmd_maker(
@@ -108,7 +105,7 @@ pub async fn cmd_maker(
     if let Some(target) = args.fund_to
         && !args.loop_mode
     {
-        let balance = bot::fund_to_target(config, &args.wallet_bin, target, json).await?;
+        let balance = bot::fund_to_target(config, target, json).await?;
         if json {
             println!("{}", serde_json::json!({ "balance": balance.to_string() }));
         }
@@ -195,7 +192,7 @@ async fn cmd_maker_loop(
 
     // Optional pre-loop top-up.
     if let Some(target) = args.fund_to {
-        bot::fund_to_target(config, &args.wallet_bin, target, json).await?;
+        bot::fund_to_target(config, target, json).await?;
     }
 
     // Crash recovery FIRST (P1-3): reconcile journaled in-flight swaps before
@@ -265,7 +262,7 @@ async fn cmd_maker_loop(
     if balance < config.lez_amount {
         return Err(SwapError::InvalidConfig(format!(
             "insufficient LEZ inventory: balance {balance} < offer amount {}; \
-             top up with `swap-cli maker --fund-to <target>` or `wallet pinata claim`",
+             top up with `swap-cli maker --fund-to <target>`",
             config.lez_amount
         )));
     }
@@ -463,7 +460,7 @@ fn describe(event: &SwapProgress) -> String {
             lez_required,
         } => format!(
             "out of LEZ inventory ({lez_balance} < {lez_required}) — loop stopping; \
-             top up with --fund-to or `wallet pinata claim`"
+             top up with --fund-to"
         ),
         SwapProgress::AutoAcceptStopped {
             total_completed,
