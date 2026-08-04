@@ -60,6 +60,10 @@ async fn setup() -> (
     )
 }
 
+/// A stand-in taker LEZ AccountId. `lock()` rejects `bytes32(0)`, and the value
+/// is part of the swapId preimage, so it must be a real 32-byte account.
+const TAKER_LEZ_ACCOUNT: [u8; 32] = [0x7Eu8; 32];
+
 fn make_preimage_and_hashlock() -> ([u8; 32], [u8; 32]) {
     let preimage = [0xABu8; 32];
     let hashlock: [u8; 32] = Sha256::digest(preimage).into();
@@ -90,7 +94,7 @@ async fn test_lock_and_read() {
 
     let contract = EthHTLC::new(contract_addr, maker.clone());
     let receipt = contract
-        .lock(hashlock.into(), timelock, taker_addr)
+        .lock(hashlock.into(), timelock, taker_addr, TAKER_LEZ_ACCOUNT.into())
         .value(amount)
         .send()
         .await
@@ -122,7 +126,7 @@ async fn test_lock_and_claim() {
 
     let maker_contract = EthHTLC::new(contract_addr, maker.clone());
     let receipt = maker_contract
-        .lock(hashlock.into(), timelock, taker_addr)
+        .lock(hashlock.into(), timelock, taker_addr, TAKER_LEZ_ACCOUNT.into())
         .value(amount)
         .send()
         .await
@@ -172,7 +176,7 @@ async fn test_lock_and_refund() {
 
     let contract = EthHTLC::new(contract_addr, maker.clone());
     let receipt = contract
-        .lock(hashlock.into(), timelock, taker_addr)
+        .lock(hashlock.into(), timelock, taker_addr, TAKER_LEZ_ACCOUNT.into())
         .value(amount)
         .send()
         .await
@@ -222,7 +226,7 @@ async fn test_watcher_receives_locked_event() {
 
     // Lock ETH.
     watcher_contract
-        .lock(hashlock.into(), timelock, taker_addr)
+        .lock(hashlock.into(), timelock, taker_addr, TAKER_LEZ_ACCOUNT.into())
         .value(U256::from(1_000_000))
         .send()
         .await
@@ -244,4 +248,84 @@ async fn test_watcher_receives_locked_event() {
         alloy::primitives::FixedBytes::from(hashlock)
     );
     assert_eq!(event.0.recipient, taker_addr);
+    // The taker's LEZ account must survive the round trip through the log — it
+    // is the value the maker binds its LEZ escrow to.
+    assert_eq!(
+        event.0.takerLezAccount,
+        alloy::primitives::FixedBytes::from(TAKER_LEZ_ACCOUNT)
+    );
+}
+
+// Two locks that differ ONLY in takerLezAccount must get distinct swap ids and
+// coexist — the property the maker's matching relies on, and the reason its
+// dedupe key had to move to the hashlock (one sender can mint unlimited swap
+// ids for a single hashlock this way).
+#[tokio::test]
+async fn test_taker_lez_account_varies_swap_id_for_one_hashlock() {
+    let (maker, _taker, contract_addr, _maker_addr, taker_addr, _anvil) = setup().await;
+
+    let (_, hashlock) = make_preimage_and_hashlock();
+    let timelock = future_timelock(&maker).await;
+    let contract = EthHTLC::new(contract_addr, maker.clone());
+
+    let mut swap_ids = Vec::new();
+    for account in [[0x01u8; 32], [0x02u8; 32]] {
+        let receipt = contract
+            .lock(hashlock.into(), timelock, taker_addr, account.into())
+            .value(U256::from(1_000_000))
+            .send()
+            .await
+            .unwrap()
+            .get_receipt()
+            .await
+            .unwrap();
+        assert!(receipt.status());
+        swap_ids.push(receipt.inner.logs()[0].topics()[1]);
+    }
+
+    assert_ne!(
+        swap_ids[0], swap_ids[1],
+        "takerLezAccount is in the swapId preimage, so the two locks must not collide"
+    );
+    // Both are simultaneously OPEN: the ETH side allows many escrows per
+    // hashlock while LEZ allows exactly one, which is why maker-side dedupe
+    // must key on the hashlock rather than the swap id.
+    for id in swap_ids {
+        let htlc = contract.getHTLC(id).call().await.unwrap();
+        assert_eq!(htlc.state, 1, "both locks are OPEN at once");
+    }
+}
+
+// The startup handshake, against real deployments. A current contract passes;
+// the check is what stops a version-skewed build from silently never seeing
+// lock events.
+#[tokio::test]
+async fn test_interface_version_handshake() {
+    let (maker, _taker, contract_addr, _maker_addr, _taker_addr, _anvil) = setup().await;
+
+    let reported = EthHTLC::new(contract_addr, maker.clone())
+        .INTERFACE_VERSION()
+        .call()
+        .await
+        .expect("deployed EthHTLC must expose INTERFACE_VERSION");
+    assert_eq!(
+        reported.to::<u64>(),
+        swap_orchestrator::eth::client::EXPECTED_INTERFACE_VERSION,
+        "contract and app build must agree on the interface version"
+    );
+
+    // A contract WITHOUT the getter (here: an address with no code at all) must
+    // be rejected, not silently accepted.
+    let empty = alloy::primitives::Address::from([0x9Au8; 20]);
+    assert!(
+        swap_orchestrator::eth::client::verify_interface_version(&maker, empty)
+            .await
+            .is_err(),
+        "an unversioned/absent contract must fail the handshake"
+    );
+    assert!(
+        swap_orchestrator::eth::client::verify_interface_version(&maker, contract_addr)
+            .await
+            .is_ok()
+    );
 }

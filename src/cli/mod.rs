@@ -109,9 +109,15 @@ pub struct ConfigArgs {
     #[arg(long, env = "ETH_RECIPIENT_ADDRESS")]
     eth_recipient: String,
 
-    /// Taker's LEZ account ID (base58)
+    /// OPTIONAL designated taker's LEZ account ID (base58).
+    ///
+    /// A maker no longer needs this: each taker publishes its own LEZ account
+    /// in its ETH lock (`Locked.takerLezAccount`) and the maker binds the LEZ
+    /// escrow to THAT, so it can serve strangers. Set it only to restrict the
+    /// maker to one counterparty (see `maker --restrict-counterparty`). The
+    /// taker ignores it entirely — it signs with its own account.
     #[arg(long, env = "LEZ_TAKER_ACCOUNT_ID")]
-    lez_taker_account: String,
+    lez_taker_account: Option<String>,
 
     /// Amount of LEZ to swap
     #[arg(long, env = "LEZ_AMOUNT")]
@@ -151,7 +157,11 @@ impl ConfigArgs {
             .map_err(|e| SwapError::InvalidConfig(format!("invalid eth-recipient: {e}")))?;
 
         let lez_htlc_program_id = parse_program_id(&self.lez_htlc_program_id)?;
-        let lez_taker_account_id = parse_base58_account_id(&self.lez_taker_account)?;
+        let lez_taker_account_id = self
+            .lez_taker_account
+            .as_deref()
+            .map(parse_base58_account_id)
+            .transpose()?;
 
         // Determine LEZ auth mode: wallet (scaffold) or raw key.
         let lez_auth = match (
