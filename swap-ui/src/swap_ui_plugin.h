@@ -71,6 +71,15 @@ private:
                                  const QString& hexValue = {},
                                  const QString& hexKey = {});
 
+    // Browsing the offer board only needs the network endpoints/constants
+    // used to reach Delivery and read offers (fetchOffersAsync itself takes
+    // no config at all — see fetchOffers()) — not the taker's own
+    // credentials, trade amounts, or timelocks. validateForTrade is the full
+    // validateConfig() check every other action (accept, publish,
+    // auto-accept, refund) still requires. See feat/browse-before-config.
+    bool validateForBrowse() const;
+    bool validateForTrade();
+
     // Config persistence (config.json under module_data/swap_ui/, mirroring
     // receiptsFilePath()). Holds two private keys (eth_private_key,
     // lez_signing_key) — written 0600, atomic temp+rename. Saves are

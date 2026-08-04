@@ -773,6 +773,30 @@ bool SwapUiPlugin::validateConfigForAction(const QString& action,
     return ok;
 }
 
+// The lightweight gate for fetchOffers(): only the network
+// endpoints/constants needed to reach Delivery and read the offer feed.
+// Deliberately excludes credentials (eth_private_key, lez signing/wallet),
+// trade amounts, and timelocks — those only matter once a specific offer is
+// being accepted (see validateForTrade / canAccept in OfferBoard.qml).
+bool SwapUiPlugin::validateForBrowse() const
+{
+    return !ethRpcUrl().trimmed().isEmpty()
+        && !ethHtlcAddress().trimmed().isEmpty()
+        && isEthAddress(ethHtlcAddress())
+        && !lezSequencerUrl().trimmed().isEmpty()
+        && !lezHtlcProgramId().trimmed().isEmpty()
+        && isHexBytes(lezHtlcProgramId(), 32);
+}
+
+// Named alias for validateConfig(): the full check every trade action
+// (accept, publish, auto-accept, refund) requires. Kept as a distinct name
+// so call sites read as "browse" vs. "trade" intent rather than both saying
+// the same ambiguous "validateConfig".
+bool SwapUiPlugin::validateForTrade()
+{
+    return validateConfig();
+}
+
 void SwapUiPlugin::updateRunning()
 {
     setRunning(makerRunning() || takerRunning() || autoAcceptRunning());
@@ -2033,7 +2057,16 @@ void SwapUiPlugin::fetchOffers()
     if (offersLoading() || makerRunning() || takerRunning() || autoAcceptRunning()) {
         return;
     }
-    if (!validateConfigForAction(QStringLiteral("offers"))) {
+    // Browsing only needs validateForBrowse (network constants), not the
+    // full validateConfigForAction("offers") this used to call: a zero-config
+    // fresh install must be able to see the market before typing anything
+    // (see feat/browse-before-config). fetchOffersAsync itself takes no
+    // config argument at all, so this was never more than an over-eager
+    // gate.
+    if (!validateForBrowse()) {
+        setErrorMessage(QStringLiteral(
+            "Network configuration incomplete — check RPC/sequencer URLs and HTLC IDs in Config"));
+        setStatus(errorMessage());
         return;
     }
     ensureMessagingReady([this]() {
