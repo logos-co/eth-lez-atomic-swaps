@@ -47,8 +47,8 @@ sequencer recovery/upgrade-to-matching.
 | `LEZ_SIGNING_KEY_FILE` | *(unset)* | Path to a file containing the hex key (preferred over inline env). |
 | `LEZ_WALLET_HOME` + `LEZ_ACCOUNT_ID` | *(unset)* | Scaffold wallet on disk + base58 account id — keys stay in wallet files. |
 | `ETH_RPC_URL` | `wss://ethereum-sepolia-rpc.publicnode.com` | Must be WebSocket. |
-| `ETH_HTLC_ADDRESS` | `0x8636Fe66DFee166589a913140f14d5F57394834A` | Canonical Sepolia deployment. |
-| `ETH_HTLC_FROM_BLOCK` | `11316985` | Deployment block; lower bound for hashlock scans. |
+| `ETH_HTLC_ADDRESS` | `0x351B0EA07739FA9F6769213927D7836a790A5FAF` | Canonical Sepolia deployment (INTERFACE_VERSION 2). |
+| `ETH_HTLC_FROM_BLOCK` | `11417462` | Deployment block; lower bound for hashlock scans. |
 
 **Key material policy:** the LEZ signing key enters only via env / key file /
 wallet-home — never as a tool argument (tool calls end up in MCP transcripts),
