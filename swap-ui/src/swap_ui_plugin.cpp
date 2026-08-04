@@ -537,14 +537,30 @@ QString SwapUiPlugin::configFilePath()
 
 void SwapUiPlugin::loadConfigFromDisk()
 {
-    QFile f(configFilePath());
+    // Note for anyone chasing a "my saved config didn't survive a restart"
+    // report in a dev/scaffold environment: `lgs basecamp launch <profile>`
+    // reinstalls the swap_ui plugin package on every invocation, and that
+    // reinstall clears this profile's module_data/swap_ui/ directory as a
+    // side effect (confirmed by polling the file across a real launch — it
+    // disappears seconds into the `lgpm install` step, well before this
+    // plugin's code ever runs). That is an lgpm/package-install behavior
+    // upstream of this function, not a load-order bug here; an
+    // already-installed profile that's simply relaunched (no reinstall)
+    // preserves module_data normally. The open-failed trace below exists so
+    // that distinction is diagnosable instead of silent.
+    const QString path = configFilePath();
+    QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
+        swapUiTrace(QStringLiteral("loadConfigFromDisk: no config at %1 (%2)")
+                        .arg(path, f.errorString()));
         return;
     }
     const QByteArray data = f.readAll();
     f.close();
     const auto obj = parseObject(QString::fromUtf8(data));
     if (obj.isEmpty()) {
+        swapUiTrace(QStringLiteral("loadConfigFromDisk: %1 exists but parsed empty (%2 bytes)")
+                        .arg(path, QString::number(data.size())));
         return;
     }
     // applyConfigObject's own scheduleConfigSave() call at the end will
@@ -552,8 +568,7 @@ void SwapUiPlugin::loadConfigFromDisk()
     // harmless (idempotent), simpler than threading a "don't save" flag
     // through applyConfigObject for the one caller that doesn't want it.
     applyConfigObject(obj);
-    swapUiTrace(QStringLiteral("loadConfigFromDisk: loaded config from %1")
-                    .arg(configFilePath()));
+    swapUiTrace(QStringLiteral("loadConfigFromDisk: loaded config from %1").arg(path));
 }
 
 void SwapUiPlugin::scheduleConfigSave()
