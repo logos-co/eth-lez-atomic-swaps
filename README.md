@@ -332,16 +332,6 @@ Taker                                          Maker
 
 If one side stops responding, the timelocks allow refunds.
 
-## Screenshots
-
-**Legacy logos-app plugin:**
-
-| Config | Maker | Taker | Refund |
-|--------|-------|-------|--------|
-| ![Config](docs/config.png) | ![Maker](docs/maker.png) | ![Taker](docs/taker.png) | ![Refund](docs/refund.png) |
-
-![logos-app plugin](docs/logos-app-plugin.gif)
-
 ## Project Layout
 
 | Path | Purpose |

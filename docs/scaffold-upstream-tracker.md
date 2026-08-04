@@ -1,5 +1,12 @@
 # Scaffold Upstream Tracker
 
+> **HISTORICAL / ARCHIVED:** This tracker preserves migration rationale and may
+> mention removed standalone UI commands. Do not use it as current run
+> instructions. Use the repository README's
+> [**Manual Basecamp Run**](../README.md#manual-basecamp-run) flow;
+> Basecamp-native automation is tracked in
+> [PR #90](https://github.com/logos-co/eth-lez-atomic-swaps/pull/90).
+
 Backlog of candidate issues / PRs to file against
 [`github.com/logos-co/scaffold`](https://github.com/logos-co/scaffold). Each
 entry is grounded in concrete pain encountered while upgrading

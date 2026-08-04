@@ -1,5 +1,11 @@
 # Scaffold Upgrade Plan
 
+> **HISTORICAL / ARCHIVED:** This completed migration plan may mention removed
+> standalone UI commands. Do not use it as current run instructions. Use the
+> repository README's [**Manual Basecamp Run**](../README.md#manual-basecamp-run)
+> flow; Basecamp-native automation is tracked in
+> [PR #90](https://github.com/logos-co/eth-lez-atomic-swaps/pull/90).
+
 Captures the upstream filing queue + project-internal cleanup queue produced by
 the `scaffold.toml` 0.1.1 → 0.2.0 upgrade pass on this repo. Use this as the
 resume point.

@@ -1,5 +1,12 @@
 # Delivery dogfooding — issue-filing triage
 
+> **HISTORICAL / ARCHIVED:** This triage preserves dated evidence and may
+> reference removed launch workarounds. Do not use it as current run
+> instructions. Use the repository README's
+> [**Manual Basecamp Run**](../README.md#manual-basecamp-run) flow;
+> Basecamp-native automation is tracked in
+> [PR #90](https://github.com/logos-co/eth-lez-atomic-swaps/pull/90).
+
 This is the working triage for the findings in
 [`delivery-dogfooding.md`](../delivery-dogfooding.md). Each row cross-checks
 the claim against (a) the

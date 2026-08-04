@@ -1,5 +1,12 @@
 # logos-delivery-module v0.1.1 dogfooding log
 
+> **HISTORICAL / ARCHIVED:** This document preserves integration evidence and
+> may mention removed standalone UI commands or obsolete launch workarounds.
+> Do not use it as current run instructions. Use the README's
+> [**Manual Basecamp Run**](README.md#manual-basecamp-run) flow; Basecamp-native
+> automation is tracked in
+> [PR #90](https://github.com/logos-co/eth-lez-atomic-swaps/pull/90).
+
 This file tracks only the findings from integrating
 [`logos-delivery-module`](https://github.com/logos-co/logos-delivery-module/tree/v0.1.1)
 into this app during this session.
