@@ -149,6 +149,20 @@ QString defaultLezSequencerUrl()
     return override.isEmpty() ? QStringLiteral("https://testnet.lez.logos.co") : override;
 }
 
+// Default ETH RPC endpoint pre-filled into the Config tab: the same public
+// Sepolia WSS endpoint lez-mcp bakes in (lez-mcp/src/config.rs
+// DEFAULT_ETH_RPC_URL). Previously this field started empty, so a stock
+// install couldn't even validate its config without the user finding and
+// pasting an RPC URL first. Basecamp requires a WebSocket endpoint; an env
+// override is honored for local dev (point at anvil's ws:// port).
+QString defaultEthRpcUrl()
+{
+    const QString override = qEnvironmentVariable("SWAP_UI_ETH_RPC_URL");
+    return override.isEmpty()
+        ? QStringLiteral("wss://ethereum-sepolia-rpc.publicnode.com")
+        : override;
+}
+
 // Default ETH HTLC contract address pre-filled into the Config tab: the
 // canonical shared deployment on Sepolia (chainId 11155111, deployed
 // 2026-07-21, tx 0xb634a97c…e7c1, minTimelockDelta=300). Updating this single
@@ -175,7 +189,7 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setLastResultJson(QString{});
     setValidationErrorsJson(QStringLiteral("{}"));
 
-    setEthRpcUrl(QString{});
+    setEthRpcUrl(defaultEthRpcUrl());
     setEthPrivateKey(QString{});
     setEthHtlcAddress(defaultEthHtlcAddress());
     setLezSequencerUrl(defaultLezSequencerUrl());
@@ -183,13 +197,22 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setLezWalletHome(QString{});
     setLezAccountId(QString{});
     setLezHtlcProgramId(QString{});
-    setLezAmount(QStringLiteral("1"));
-    setEthAmount(QStringLiteral("1"));
-    setLezTimelockMinutes(QStringLiteral("5"));
-    // 15, not 10: the maker-loop runtime gate needs LEZ (5) + margin (5) +
-    // transit slack — 10 sits exactly on the margin boundary and rejects every
-    // taker lock by the tx-transit delta (see bot::validate_timelocks).
-    setEthTimelockMinutes(QStringLiteral("15"));
+    // 150 LEZ: exactly one pinata faucet claim, so a fresh testnet account can
+    // actually fund a default offer. 1 (the old default) is a rounding error
+    // next to the 20/40-minute standing-bot timelocks and not worth adjusting
+    // for on its own, but paired with 1 ETH below it made the stock offer
+    // impossible to fill on Sepolia.
+    setLezAmount(QStringLiteral("150"));
+    // 0.0002 ETH, not 1: 1 whole ETH is unfillable for essentially every
+    // Sepolia faucet-funded tester, so the default offer was dead on arrival.
+    setEthAmount(QStringLiteral("0.0002"));
+    // LEZ 15 / ETH 25: validateConfig only requires eth > lez, but the
+    // maker-loop runtime gate needs eth >= lez + margin (5) + transit slack
+    // (2) = lez + 7 (see bot::validate_timelocks). 15/25 clears that with
+    // margin to spare (25 >= 22), unlike the old 5/15 pair, which sat exactly
+    // on the boundary and rejected every taker lock by the tx-transit delta.
+    setLezTimelockMinutes(QStringLiteral("15"));
+    setEthTimelockMinutes(QStringLiteral("25"));
     setEthRecipientAddress(QString{});
     setLezTakerAccountId(QString{});
     setPollIntervalMs(QStringLiteral("2000"));
