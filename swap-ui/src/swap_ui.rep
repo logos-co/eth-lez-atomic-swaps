@@ -111,4 +111,10 @@ class SwapUi
     // Swap-history journal controls
     SLOT(void refreshHistory())
     SLOT(void clearHistory())
+
+    // Config persistence (feat/persist-config). Deletes the on-disk
+    // config.json and resets every live field back to the plugin's built-in
+    // defaults — the escape hatch for a profile whose config.json holds
+    // stale/bad credentials (it holds two private keys).
+    SLOT(void resetConfig())
 }

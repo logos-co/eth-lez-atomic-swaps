@@ -149,6 +149,20 @@ QString defaultLezSequencerUrl()
     return override.isEmpty() ? QStringLiteral("https://testnet.lez.logos.co") : override;
 }
 
+// Default ETH RPC endpoint pre-filled into the Config tab: the same public
+// Sepolia WSS endpoint lez-mcp bakes in (lez-mcp/src/config.rs
+// DEFAULT_ETH_RPC_URL). Previously this field started empty, so a stock
+// install couldn't even validate its config without the user finding and
+// pasting an RPC URL first. Basecamp requires a WebSocket endpoint; an env
+// override is honored for local dev (point at anvil's ws:// port).
+QString defaultEthRpcUrl()
+{
+    const QString override = qEnvironmentVariable("SWAP_UI_ETH_RPC_URL");
+    return override.isEmpty()
+        ? QStringLiteral("wss://ethereum-sepolia-rpc.publicnode.com")
+        : override;
+}
+
 // Default ETH HTLC contract address pre-filled into the Config tab: the
 // canonical shared deployment on Sepolia (chainId 11155111, deployed
 // 2026-07-21, tx 0xb634a97c…e7c1, minTimelockDelta=300). Updating this single
@@ -164,6 +178,40 @@ QString defaultEthHtlcAddress()
 
 } // namespace
 
+// Reset every config PROP back to its built-in default. Shared by the
+// constructor (fresh in-memory state) and resetConfig() (the "Reset app
+// data" control) so the two can never drift apart.
+void SwapUiPlugin::applyDefaultConfig()
+{
+    setEthRpcUrl(defaultEthRpcUrl());
+    setEthPrivateKey(QString{});
+    setEthHtlcAddress(defaultEthHtlcAddress());
+    setLezSequencerUrl(defaultLezSequencerUrl());
+    setLezSigningKey(QString{});
+    setLezWalletHome(QString{});
+    setLezAccountId(QString{});
+    setLezHtlcProgramId(QString{});
+    // 150 LEZ: exactly one pinata faucet claim, so a fresh testnet account can
+    // actually fund a default offer. 1 (the old default) is a rounding error
+    // next to the 20/40-minute standing-bot timelocks and not worth adjusting
+    // for on its own, but paired with 1 ETH below it made the stock offer
+    // impossible to fill on Sepolia.
+    setLezAmount(QStringLiteral("150"));
+    // 0.0002 ETH, not 1: 1 whole ETH is unfillable for essentially every
+    // Sepolia faucet-funded tester, so the default offer was dead on arrival.
+    setEthAmount(QStringLiteral("0.0002"));
+    // LEZ 15 / ETH 25: validateConfig only requires eth > lez, but the
+    // maker-loop runtime gate needs eth >= lez + margin (5) + transit slack
+    // (2) = lez + 7 (see bot::validate_timelocks). 15/25 clears that with
+    // margin to spare (25 >= 22), unlike the old 5/15 pair, which sat exactly
+    // on the boundary and rejected every taker lock by the tx-transit delta.
+    setLezTimelockMinutes(QStringLiteral("15"));
+    setEthTimelockMinutes(QStringLiteral("25"));
+    setEthRecipientAddress(QString{});
+    setLezTakerAccountId(QString{});
+    setPollIntervalMs(QStringLiteral("2000"));
+}
+
 SwapUiPlugin::SwapUiPlugin(QObject* parent)
     : SwapUiSimpleSource(parent)
 {
@@ -175,24 +223,7 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setLastResultJson(QString{});
     setValidationErrorsJson(QStringLiteral("{}"));
 
-    setEthRpcUrl(QString{});
-    setEthPrivateKey(QString{});
-    setEthHtlcAddress(defaultEthHtlcAddress());
-    setLezSequencerUrl(defaultLezSequencerUrl());
-    setLezSigningKey(QString{});
-    setLezWalletHome(QString{});
-    setLezAccountId(QString{});
-    setLezHtlcProgramId(QString{});
-    setLezAmount(QStringLiteral("1"));
-    setEthAmount(QStringLiteral("1"));
-    setLezTimelockMinutes(QStringLiteral("5"));
-    // 15, not 10: the maker-loop runtime gate needs LEZ (5) + margin (5) +
-    // transit slack — 10 sits exactly on the margin boundary and rejects every
-    // taker lock by the tx-transit delta (see bot::validate_timelocks).
-    setEthTimelockMinutes(QStringLiteral("15"));
-    setEthRecipientAddress(QString{});
-    setLezTakerAccountId(QString{});
-    setPollIntervalMs(QStringLiteral("2000"));
+    applyDefaultConfig();
 
     setEthAddress(QString{});
     setEthBalance(QString{});
@@ -245,6 +276,14 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     connect(&m_coordinationPollTimer, &QTimer::timeout,
             this, &SwapUiPlugin::coordinationPollSwapEvents);
 
+    // Debounced config-file save: setConfigValue fires on every keystroke, so
+    // a single (re)start-the-timer call per edit coalesces a burst of typing
+    // into one disk write instead of one per character.
+    m_configSaveTimer.setInterval(800);
+    m_configSaveTimer.setSingleShot(true);
+    connect(&m_configSaveTimer, &QTimer::timeout,
+            this, &SwapUiPlugin::saveConfigToDisk);
+
     validateConfig();
 }
 
@@ -252,6 +291,13 @@ SwapUiPlugin::~SwapUiPlugin()
 {
     m_messagingPollTimer.stop();
     m_coordinationPollTimer.stop();
+    // Flush a pending debounced save synchronously rather than dropping it:
+    // without this, quitting within the 800ms debounce window of the last
+    // edit would silently discard that edit.
+    if (m_configSaveTimer.isActive()) {
+        m_configSaveTimer.stop();
+        saveConfigToDisk();
+    }
     if (m_swap) {
         if (!makerJobId().isEmpty()) {
             m_swap->stopJob(makerJobId());
@@ -273,11 +319,19 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     setBackend(this);
     setStatus(QStringLiteral("Please choose a configuration."));
 
+    // Load any saved config BEFORE the async default fill below, so a saved
+    // (possibly user-entered) lez_htlc_program_id wins over the compiled-in
+    // default — the async lambda's own isEmpty() guard already does the
+    // right thing once this has run first.
+    loadConfigFromDisk();
+
     // Default the maker's LEZ HTLC program-ID field to the canonical value
     // compiled into the Rust library (the public-testnet deployment ID, see
     // swap-ffi/src/lez_htlc_program_id.rs). Only fills when the user hasn't
-    // set one, so a hand-entered ID always wins; empty-guard kept as a
-    // defensive no-op should the library ever ship without a baked-in ID.
+    // set one (whether that's because nothing was saved, or the saved config
+    // simply never had one), so a hand-entered ID always wins; empty-guard
+    // kept as a defensive no-op should the library ever ship without a
+    // baked-in ID.
     m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
         if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
             setLezHtlcProgramId(programId);
@@ -458,6 +512,111 @@ void SwapUiPlugin::applyConfigObject(const QJsonObject& obj)
     if (obj.contains(QStringLiteral("swap_role"))) {
         setRole(valueString(obj, QStringLiteral("swap_role")));
     }
+
+    scheduleConfigSave();
+}
+
+// ---------------------------------------------------------------------------
+// Config persistence
+// ---------------------------------------------------------------------------
+//
+// Durable per-profile config file, mirroring receiptsFilePath()'s location
+// convention (<LOGOS_USER_DIR>/module_data/swap_ui/, falling back to Qt's
+// AppDataLocation). Holds every field configJson() serializes — including
+// eth_private_key and lez_signing_key, i.e. two private keys — so it is
+// written 0600 and replaced atomically (temp file + rename) rather than
+// edited in place.
+QString SwapUiPlugin::configFilePath()
+{
+    QString base = qEnvironmentVariable("LOGOS_USER_DIR");
+    if (base.isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
+    return QDir(base).filePath(QStringLiteral("module_data/swap_ui/config.json"));
+}
+
+void SwapUiPlugin::loadConfigFromDisk()
+{
+    QFile f(configFilePath());
+    if (!f.open(QIODevice::ReadOnly)) {
+        return;
+    }
+    const QByteArray data = f.readAll();
+    f.close();
+    const auto obj = parseObject(QString::fromUtf8(data));
+    if (obj.isEmpty()) {
+        return;
+    }
+    // applyConfigObject's own scheduleConfigSave() call at the end will
+    // debounce-rewrite this file with the same content a moment later —
+    // harmless (idempotent), simpler than threading a "don't save" flag
+    // through applyConfigObject for the one caller that doesn't want it.
+    applyConfigObject(obj);
+    swapUiTrace(QStringLiteral("loadConfigFromDisk: loaded config from %1")
+                    .arg(configFilePath()));
+}
+
+void SwapUiPlugin::scheduleConfigSave()
+{
+    m_configSaveTimer.start();
+}
+
+void SwapUiPlugin::saveConfigToDisk()
+{
+    const QString path = configFilePath();
+    const QDir dir = QFileInfo(path).dir();
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        swapUiTrace(QStringLiteral("saveConfigToDisk: mkpath failed for %1")
+                        .arg(dir.absolutePath()));
+        return;
+    }
+
+    // Atomic replace: write to a sibling temp file, then rename over the
+    // real path. A crash/kill mid-write leaves the old config.json intact
+    // (or the temp file orphaned) rather than a half-written, corrupt file.
+    const QString tmpPath = path + QStringLiteral(".tmp");
+    QFile tmp(tmpPath);
+    if (!tmp.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        swapUiTrace(QStringLiteral("saveConfigToDisk: open failed for %1: %2")
+                        .arg(tmpPath, tmp.errorString()));
+        return;
+    }
+    tmp.write(configJson().toUtf8());
+    tmp.flush();
+    tmp.close();
+    // 0600: this file holds eth_private_key and lez_signing_key in the
+    // clear. Set before the rename so the destination is never briefly
+    // group/other-readable under the old name.
+    QFile::setPermissions(tmpPath,
+                          QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+
+    QFile::remove(path); // QFile::rename fails if the destination exists.
+    if (!QFile::rename(tmpPath, path)) {
+        swapUiTrace(QStringLiteral("saveConfigToDisk: rename failed %1 -> %2")
+                        .arg(tmpPath, path));
+        return;
+    }
+    swapUiTrace(QStringLiteral("saveConfigToDisk: wrote %1").arg(path));
+}
+
+void SwapUiPlugin::resetConfig()
+{
+    m_configSaveTimer.stop();
+    if (!QFile::remove(configFilePath())) {
+        swapUiTrace(QStringLiteral("resetConfig: no config file to remove at %1")
+                        .arg(configFilePath()));
+    }
+    applyDefaultConfig();
+    validateConfig();
+    if (m_swap) {
+        m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
+            if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
+                setLezHtlcProgramId(programId);
+            }
+        });
+    }
+    setErrorMessage(QString{});
+    setStatus(QStringLiteral("App data reset to defaults"));
 }
 
 void SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
@@ -770,6 +929,7 @@ void SwapUiPlugin::setConfigValue(const QString& key, const QString& value)
         return;
     }
     validateConfig();
+    scheduleConfigSave();
 }
 
 void SwapUiPlugin::loadConfig(const QString& configJson)
