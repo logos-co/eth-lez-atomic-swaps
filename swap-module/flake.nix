@@ -301,13 +301,20 @@
             # `cargoDeps` rather than `cargoHash` so vendoring goes through
             # the User-Agent-carrying fetcher above.
             #
-            # The value is the one master's `cargoHash` already carries.
-            # `cargoHash` covers only the fixed-output vendor-staging tree —
-            # the checksum-verified crate tarballs, git checkouts and
-            # Cargo.lock — so it tracks the lockfile, not the nixpkgs
-            # building it: measured cold twice, against e9f00bd8 and
-            # nixos-unstable 0954f7ee (10 months and two different drvPaths
-            # apart), and the `got:` was identical.
+            # `cargoHash`/`cargoDeps.hash` covers only the fixed-output
+            # vendor-staging tree — the checksum-verified crate tarballs, git
+            # checkouts and Cargo.lock — so it tracks the LOCKFILE, not the
+            # nixpkgs building it (measured cold twice, against e9f00bd8 and
+            # nixos-unstable 0954f7ee, 10 months and two different drvPaths
+            # apart: identical `got:`). It DOES change whenever the workspace
+            # Cargo.toml/Cargo.lock gains/drops a dependency — e.g. bumped
+            # 2026-08-04 when the native-LEZ-faucet lift added `system_accounts`
+            # + `getrandom` to the root Cargo.toml. Bump it here (and re-check
+            # the whole repo for any other pinned `cargoHash`/`cargoDeps`/
+            # `outputHash` — this is currently the only Rust vendor hash) any
+            # time a workspace crate's dependency set changes; the build's own
+            # error message gives you the correct value directly (`hash
+            # mismatch ... use "sha256-..."`).
             #
             # Re-measure from a CLEAN checkout of the commit being pushed:
             # `swap-source` is a `path:".."` input, so it silently vendors
@@ -315,7 +322,7 @@
             cargoDeps = fetchCargoVendorUA {
               name = "swap-ffi-0.1.0";
               src = swapFfiSource;
-              hash = "sha256-DePrHOfh7Ucu27FfPoQvn1Mu0StCtF6RcJJTEKqp2oA=";
+              hash = "sha256-VrHw47Jxf4z3KuFcKAiysMuXMHLaIrsoC/O3AdrQljM=";
             };
             # --no-default-features: the `demo` feature only adds the risc0
             # guest build (needs the rzup toolchain + a nested cargo build the
