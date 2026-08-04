@@ -49,6 +49,16 @@ const CLAIM_RETRY_DELAY: Duration = Duration::from_secs(3);
 /// Consecutive claim failures [`claim_to_target`] tolerates before aborting.
 const MAX_CONSECUTIVE_CLAIM_FAILURES: u32 = 5;
 
+/// Bounded retries for a single balance read in [`claim_to_target`]'s loop.
+/// Public RPC endpoints occasionally drop a single request transiently (a
+/// maker bot running unattended on a VPS will hit this eventually); without
+/// this, one blip would abort the whole funding loop even though the very
+/// next read would have succeeded. Claim submission/confirmation already has
+/// its own retry semantics (the consecutive-failure counter); this covers the
+/// plain read that gates the loop.
+const BALANCE_READ_RETRIES: u32 = 3;
+const BALANCE_READ_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 /// How many candidate keys [`Signer::generate`] will try before giving up.
 /// `PrivateKey::try_new` rejecting 32 cryptographically random bytes is
 /// astronomically unlikely; the cap only turns a pathological RNG failure
@@ -291,10 +301,7 @@ pub async fn claim_to_target(
     let mut consecutive_failures: u32 = 0;
     let mut claims: u64 = 0;
     loop {
-        let balance = sequencer
-            .get_account_balance(signer.account_id)
-            .await
-            .map_err(|e| format!("get_account_balance failed: {e}"))?;
+        let balance = read_balance_retrying(sequencer, signer.account_id).await?;
         if balance >= target {
             emit(progress.as_ref(), FundingProgress::TargetReached { balance });
             return Ok(balance);
@@ -336,6 +343,29 @@ pub async fn claim_to_target(
         // Let the claim land before re-checking the balance.
         tokio::time::sleep(CLAIM_RETRY_DELAY).await;
     }
+}
+
+/// Read an account balance, retrying up to [`BALANCE_READ_RETRIES`] times on
+/// transient RPC errors before giving up.
+async fn read_balance_retrying(
+    sequencer: &SequencerClient,
+    account_id: AccountId,
+) -> Result<u128, String> {
+    let mut last_err = String::new();
+    for attempt in 0..BALANCE_READ_RETRIES {
+        match sequencer.get_account_balance(account_id).await {
+            Ok(balance) => return Ok(balance),
+            Err(e) => {
+                last_err = format!("get_account_balance failed: {e}");
+                if attempt + 1 < BALANCE_READ_RETRIES {
+                    tokio::time::sleep(BALANCE_READ_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{last_err} (after {BALANCE_READ_RETRIES} attempts)"
+    ))
 }
 
 async fn attempt_claim(
