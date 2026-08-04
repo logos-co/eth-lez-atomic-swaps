@@ -3,6 +3,7 @@
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include "swap_api.h"
+#include "timelock_math.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -466,6 +467,31 @@ void SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
     setEthAmount(weiToEthValue(valueString(offer, QStringLiteral("eth_amount"))));
     setEthHtlcAddress(valueString(offer, QStringLiteral("eth_htlc_address")));
     setLezHtlcProgramId(valueString(offer, QStringLiteral("lez_htlc_program_id")));
+
+    // Adopt the offer's own timelocks instead of leaving this taker profile's
+    // (possibly stale/default) minutes in place. The offer carries absolute
+    // unix expiries (lez_timelock/eth_timelock); the maker-loop's runtime gate
+    // requires eth_expiry >= fresh_lez_expiry + margin + transit slack (see
+    // src/swap/maker.rs classify_candidate + src/cli/bot.rs
+    // validate_timelocks). A taker whose config disagrees with the advertised
+    // expiries loses that race on every candidate, wedging the maker at
+    // WaitingForEthLock forever. The absolute-expiry -> minutes-from-now
+    // conversion (ceil, clamped to >=1) lives in timelock_math.h so it has a
+    // standalone unit test (tests/timelock_math_test.cpp) independent of the
+    // full plugin/module build.
+    const qint64 nowSecs = QDateTime::currentSecsSinceEpoch();
+    const qint64 ethExpirySecs =
+        static_cast<qint64>(offer.value(QStringLiteral("eth_timelock")).toDouble(0));
+    const qint64 lezExpirySecs =
+        static_cast<qint64>(offer.value(QStringLiteral("lez_timelock")).toDouble(0));
+    if (ethExpirySecs > 0) {
+        setEthTimelockMinutes(
+            QString::number(swap_ui::minutesUntilExpiry(ethExpirySecs, nowSecs)));
+    }
+    if (lezExpirySecs > 0) {
+        setLezTimelockMinutes(
+            QString::number(swap_ui::minutesUntilExpiry(lezExpirySecs, nowSecs)));
+    }
 }
 
 void SwapUiPlugin::addValidationError(QJsonObject& errors,
