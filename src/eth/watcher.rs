@@ -21,6 +21,7 @@ pub enum EthHtlcEvent {
         /// escrow.taker_id`), so the maker must lock to exactly this value —
         /// never to a static configured account.
         taker_lez_account: FixedBytes<32>,
+        tx_hash: FixedBytes<32>,
     },
     Claimed {
         swap_id: FixedBytes<32>,
@@ -82,8 +83,9 @@ pub async fn watch_events(
                 .await
             {
                 Ok(events) => {
-                    for (event, _) in events {
-                        debug!(swap_id = %event.swapId, "Locked event");
+                    for (event, log) in events {
+                        let tx_hash = log.transaction_hash.unwrap_or_default();
+                        debug!(swap_id = %event.swapId, %tx_hash, "Locked event");
                         let ev = EthHtlcEvent::Locked {
                             swap_id: event.swapId,
                             sender: event.sender,
@@ -92,6 +94,7 @@ pub async fn watch_events(
                             hashlock: event.hashlock,
                             timelock: event.timelock,
                             taker_lez_account: event.takerLezAccount,
+                            tx_hash,
                         };
                         if tx.send(ev).await.is_err() {
                             return Ok(());

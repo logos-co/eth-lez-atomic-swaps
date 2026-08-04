@@ -12,6 +12,12 @@ pub enum SwapProgress {
     LockingEth,
     EthLocked {
         swap_id: String,
+        /// The ETH lock transaction hash, so a consumer can build a block
+        /// explorer link.
+        tx_hash: String,
+        /// The chain ID of the ETH endpoint the lock was submitted to (e.g.
+        /// 31337 for Anvil, 11155111 for Sepolia), so a hash isn't ambiguous.
+        chain_id: u64,
     },
     WaitingForLezLock,
     LezLockDetected,
@@ -31,6 +37,12 @@ pub enum SwapProgress {
         /// the account the maker will name as the sole claimant of its LEZ
         /// escrow. Surfaced so an operator can see WHO a swap is bound to.
         taker_lez_account: String,
+        /// The taker's ETH lock transaction hash, so a consumer can build a
+        /// block explorer link — this is the maker's only path to the
+        /// taker's lock tx.
+        tx_hash: String,
+        /// The chain ID of the ETH endpoint the lock was observed on.
+        chain_id: u64,
     },
     /// A matched ETH lock was rejected by the loop-mode timelock-margin gate
     /// (P1-E): its absolute on-chain expiry does not clear the maker's fresh

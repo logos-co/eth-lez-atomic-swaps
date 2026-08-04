@@ -354,8 +354,10 @@ pub async fn run_maker(
     // restart; rejecting *within* this event loop and continuing to wait —
     // instead of returning Err and letting the outer loop restart over the same
     // lock — prevents a permanent hot-loop / DoS on one hostile candidate
-    // (P1-E). Keyed by swap id (not hashlock) so a corrected same-secret re-lock
-    // under a fresh escrow is still acceptable (P2-5).
+    // (P1-E). Keyed by HASHLOCK, not swap id: `takerLezAccount` is part of the
+    // swapId preimage, so a hostile taker can mint unlimited distinct swap ids
+    // for one hashlock and walk straight past a swap-id-keyed set (see
+    // `rejected_set_keyed_by_hashlock_survives_swap_id_malleability`).
     const MAX_REJECTED: usize = 1024;
     let mut rejected: HashSet<[u8; 32]> = HashSet::new();
 
@@ -378,6 +380,7 @@ pub async fn run_maker(
                     hashlock: event_hashlock,
                     timelock: event_timelock,
                     taker_lez_account,
+                    tx_hash: event_tx_hash,
                     ..
                 } = event
                 {
@@ -531,6 +534,7 @@ pub async fn run_maker(
 
                         info!(
                             %swap_id,
+                            tx_hash = %event_tx_hash,
                             taker_lez_account = %hex::encode(taker_lez_account.0),
                             "maker: matched ETH Locked event"
                         );
@@ -538,6 +542,8 @@ pub async fn run_maker(
                             swap_id: format!("{swap_id}"),
                             hashlock: hex::encode(hl),
                             taker_lez_account: hex::encode(taker_lez_account.0),
+                            tx_hash: format!("{event_tx_hash}"),
+                            chain_id: eth_client.chain_id(),
                         });
                         break (swap_id, hl, lez_expiry_secs, lez_claimant);
                     }

@@ -1,7 +1,7 @@
 {
   "name": "swap",
   "display_name": "ETH ↔ LEZ Atomic Swap",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "LEZ <> ETH atomic swap backend (wraps the swap-ffi Rust orchestrator)",
   "author": "Logos",
   "type": "core",

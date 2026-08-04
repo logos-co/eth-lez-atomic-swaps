@@ -51,7 +51,7 @@ For mental model + per-entry rationale, see
 >   2026-07-21: the full end-to-end swap completed (both peers `Completed`,
 >   preimage revealed, ETH + LEZ claims). The GUI two-peer click-through remains
 >   human-run; Basecamp module loading + delivery messaging are proven
->   separately (standalone `lgs basecamp run swap_ui` delivery-connect + offers
+>   separately (Basecamp install/launch delivery-connect + offers
 >   subscription, and the per-swap delivery coordination record in
 >   [`delivery-dogfooding.md`](../delivery-dogfooding.md)).
 >
@@ -200,7 +200,7 @@ conventions look like (check open issues first).
 | Cleanup | Unblocked by | Status |
 |---|---|---|
 | Delete `make circuits` (68 lines); keep only the `CIRCUITS_DIR` + `LOGOS_BLOCKCHAIN_CIRCUITS` bridge | TR-07 | ✅ **Unblocked** — scaffold `7c52211` `[circuits]` + `lgs setup` fetch. Ready for the Makefile cleanup pass. |
-| Delete `make swap-lgx-build` (+ `swap-module-build` / `swap-ui-build` / `swap-ui-run`) | TR-10 + TR-14 | ✅ **Unblocked** — replaced by `lgs basecamp build` / `lgs basecamp run swap_ui`. |
+| Delete `make swap-lgx-build` (+ `swap-module-build` / `swap-ui-build` / `swap-ui-run`) | TR-10 + TR-14 | ✅ **Unblocked** — replaced by `lgs basecamp build`, `lgs basecamp install`, and isolated Basecamp profile launches. |
 | Delete `scripts/basecamp-instance.sh` + `make basecamp-{init,run,clean}-*` | TR-03 + TR-04 + TR-05 + TR-08 + TR-12 + TR-16 + TR-17 | ✅ **DONE** — `basecamp-instance.sh` and all `basecamp-*` Makefile targets deleted; `lgs basecamp setup`/`install` own the install path (TR-03 resolved). The interim committed launch bridge `scripts/basecamp-launch.sh` (for the macOS `LOGOS_DATA_DIR` gap) was deleted 2026-07-27 after [scaffold PR #238](https://github.com/logos-co/scaffold/pull/238) merged and the pin moved to `6789ec04`. |
 | Gut `src/cli/infra.rs` + delete `make infra` | TR-06 | Blocked — Anvil co-process hook not yet in scaffold. |
 | Delete `make test` / `make demo` entirely | TR-06 + TR-07 + TR-19 | Partially done — `lgs run` adoption landed 2026-07-27 ([PR #239](https://github.com/logos-co/scaffold/pull/239) profiles + `deploy = false`); the thin Make wrappers remain only for the trailing localnet stop (TR-19 / [#172](https://github.com/logos-co/scaffold/issues/172)) and Anvil stays app-owned (TR-06); full deletion still blocked on [#172](https://github.com/logos-co/scaffold/issues/172). |

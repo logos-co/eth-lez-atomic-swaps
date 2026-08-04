@@ -439,10 +439,13 @@ fn describe(event: &SwapProgress) -> String {
             swap_id,
             hashlock,
             taker_lez_account,
+            tx_hash,
+            chain_id,
         } => {
             format!(
-                "ETH lock detected (swap {swap_id}, hashlock {hashlock}); LEZ escrow will be \
-                 claimable only by taker account {taker_lez_account}"
+                "ETH lock detected (swap {swap_id}, hashlock {hashlock}, tx {tx_hash}, chain \
+                 {chain_id}); LEZ escrow will be claimable only by taker account \
+                 {taker_lez_account}"
             )
         }
         SwapProgress::EthLockRejectedTakerAccount {

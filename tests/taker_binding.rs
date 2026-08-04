@@ -143,7 +143,8 @@ async fn taker_lez_account_travels_from_eth_lock_to_lez_lock_instruction() {
             U256::from(ETH_AMOUNT),
         )
         .await
-        .expect("taker locks ETH");
+        .expect("taker locks ETH")
+        .swap_id;
 
     // ── link 1: the watcher decodes the account off the log ──
     let event = tokio::time::timeout(Duration::from_secs(30), async {

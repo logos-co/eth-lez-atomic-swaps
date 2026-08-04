@@ -9,10 +9,12 @@ name: Build modules
 #   blow up at realisation time, so `nix eval` (and `nix flake check`) went green
 #   while the Linux legs had never once been built. The release workflows
 #   (release-swap.yml / release-swap-ui.yml) are `workflow_dispatch`-only, so
-#   nothing exercised them on push either, and canary.yml's `modules` leg is
-#   hard-gated to darwin-arm64 (canary/leg-modules.sh emits `broken` elsewhere).
-#   Result: "the derivation graph resolves" was being mistaken for "it builds".
-#   This job removes that blind spot by running the real build on real runners.
+#   nothing exercised them on push either, and canary.yml's `modules` leg was
+#   hard-gated to darwin-arm64 (canary/leg-modules.sh emitted `broken`
+#   elsewhere). Result: "the derivation graph resolves" was being mistaken for
+#   "it builds". This job removes that blind spot by running the real build on
+#   real runners. PR #53 closed #32 (real hashes for all three variants) and
+#   the canary `modules` leg is now a three-way matrix too, matching this job.
 #
 # RELATION TO THE RELEASE PIPELINE
 #   Deliberately mirrors the build leg of
@@ -32,7 +34,6 @@ on:
   push:
     branches:
       - master
-      - danisharora099/linux-variants
   workflow_dispatch: {}
 
 concurrency:
