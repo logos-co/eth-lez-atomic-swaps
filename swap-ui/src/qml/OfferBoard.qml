@@ -44,9 +44,19 @@ Item {
     }
     readonly property int configIssueCount: Object.keys(validationErrors).length
     readonly property bool configReady: validationSettled && configIssueCount === 0
+    // Network constants only — mirrors the backend's validateForBrowse()
+    // (swap_ui_plugin.cpp). All four are pre-filled with public-testnet
+    // defaults out of the box (see feat/sane-testnet-defaults), so a
+    // zero-config fresh install can browse the market immediately; only
+    // *accepting* an offer needs the full configReady (credentials, amounts,
+    // timelocks — see canAccept below).
+    readonly property bool browseReady: swapBackend.ethRpcUrl !== ""
+        && swapBackend.ethHtlcAddress !== ""
+        && swapBackend.lezSequencerUrl !== ""
+        && swapBackend.lezHtlcProgramId !== ""
     readonly property bool marketLive: swapBackend.ready
         && swapBackend.messagingConnected
-        && configReady
+        && browseReady
 
     // Selected offer (plain object copy; depends on modelRev + selectedKey)
     readonly property var sel: {
@@ -604,8 +614,13 @@ Item {
                         text: {
                             if (!swapBackend.ready)
                                 return "Starting swap engine…"
-                            if (!board.configReady)
-                                return "Set up to join the market"
+                            // browseReady (network constants), not configReady
+                            // (full trade config) — browsing the market never
+                            // needs credentials, amounts, or timelocks. See
+                            // feat/browse-before-config. Pre-filled testnet
+                            // defaults mean this branch is rarely reached.
+                            if (!board.browseReady)
+                                return "Finish network setup to browse"
                             if (!swapBackend.messagingConnected)
                                 return "Connecting to the swap network…"
                             return "No offers on the board yet"
@@ -623,13 +638,19 @@ Item {
                         text: {
                             if (!swapBackend.ready)
                                 return "The backend module is loading."
-                            if (!board.configReady)
-                                return "Add your ETH and LEZ credentials to see live offers and trade."
+                            if (!board.browseReady)
+                                return "Add your ETH RPC / LEZ sequencer details in Config to browse the market."
                             if (!swapBackend.messagingConnected)
                                 return swapBackend.messagingRetrying
                                        ? "Waiting for the delivery fleet. Offers will stream in as soon as a peer is found."
                                        : "Delivery is starting automatically."
-                            return "The market is waking up — offers appear here the moment makers publish them."
+                            // Browsing never required Config; only accepting
+                            // an offer does. Nudge the still-unconfigured case
+                            // toward set up to *trade*, not "to see offers" —
+                            // offers are already visible at this point.
+                            return board.configReady
+                                   ? "The market is waking up — offers appear here the moment makers publish them."
+                                   : "The market is waking up — offers appear here the moment makers publish them. Set up to trade in Config once you see one you like."
                         }
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontNormal

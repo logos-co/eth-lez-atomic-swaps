@@ -46,21 +46,28 @@ pub async fn run_taker(
         },
     );
 
-    // 2. Lock ETH (long timelock).
+    // 2. Lock ETH (long timelock), publishing OUR LEZ account on-chain so the
+    // maker knows which account to name as the sole claimant of its LEZ escrow.
+    // This is per-swap and self-declared: no out-of-band agreement, and no
+    // static `LEZ_TAKER_ACCOUNT_ID` on the maker's side.
     progress::report(&progress, SwapProgress::LockingEth);
-    let swap_id = eth_client
+    let lock_receipt = eth_client
         .lock(
             hashlock,
             config.eth_timelock,
             config.eth_recipient_address,
+            *lez_client.account_id().value(),
             U256::from(config.eth_amount),
         )
         .await?;
-    info!(%swap_id, "taker: ETH locked");
+    let swap_id = lock_receipt.swap_id;
+    info!(%swap_id, tx_hash = %lock_receipt.tx_hash, "taker: ETH locked");
     progress::report(
         &progress,
         SwapProgress::EthLocked {
             swap_id: format!("{swap_id}"),
+            tx_hash: format!("{}", lock_receipt.tx_hash),
+            chain_id: eth_client.chain_id(),
         },
     );
 

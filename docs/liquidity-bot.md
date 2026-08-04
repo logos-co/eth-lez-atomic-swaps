@@ -59,7 +59,7 @@ the flags above. A public-testnet `maker.env` looks like:
 ```ini
 ETH_RPC_URL=wss://...sepolia...        # WebSocket required
 ETH_PRIVATE_KEY=0x...
-ETH_HTLC_ADDRESS=0x8636Fe66...834A
+ETH_HTLC_ADDRESS=0x351B0EA07739FA9F6769213927D7836a790A5FAF
 ETH_RECIPIENT_ADDRESS=0x...            # maker address receiving ETH
 LEZ_SEQUENCER_URL=https://testnet.lez.logos.co
 LEZ_WALLET_HOME=.scaffold/wallet

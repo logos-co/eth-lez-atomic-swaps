@@ -1,0 +1,50 @@
+# Maker liquidity-bot: `swap-cli maker --loop` + offer-publisher sidecar.
+# See README.md in this directory for the full deploy runbook.
+
+services:
+  maker:
+    # Both `image` and `build` are active on purpose: `docker compose build`
+    # builds from source and tags the result with this same name, so
+    # `docker compose up -d` works identically whether the image was just
+    # built on this host or pulled from GHCR (`docker compose pull`) once
+    # .github/workflows/release-maker-image.yml has published a tag there.
+    # No manual comment/uncomment dance needed for the first build-on-host
+    # deploy vs. later registry-pull deploys.
+    image: ghcr.io/logos-co/eth-lez-atomic-swaps-maker:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: eth-lez-maker
+    restart: unless-stopped
+    env_file:
+      - maker.env
+    volumes:
+      # Named volume, NOT a bind mount into a repo checkout: .maker-state.json
+      # (the crash-recovery journal) and the status file must survive image
+      # upgrades / container recreation, which is the whole point of not
+      # running this as a bare `cargo run` on the host.
+      - maker-state:/app/state
+    # No ports published: the maker only makes outbound connections (Sepolia
+    # RPC, LEZ sequencer RPC, the waku fleet over TCP) — nothing listens.
+    healthcheck:
+      # swap-cli has no HTTP endpoint; use liveness of the swap-cli process
+      # itself plus a fresh write to the state directory as the signal. A
+      # stuck-but-still-running process (e.g. wedged on an RPC call) will
+      # eventually get flagged unhealthy once the journal goes stale.
+      test:
+        [
+          "CMD-SHELL",
+          "pgrep -x swap-cli >/dev/null && find /app/state -newermt '-15 minutes' | grep -q . || exit 1",
+        ]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  maker-state:

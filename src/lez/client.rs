@@ -110,6 +110,29 @@ fn escrow_confirms_our_lock(
         && escrow.timelock == timelock_ms
 }
 
+/// Build the LEZ `Lock` instruction. `taker_id` becomes `escrow.taker_id`, the
+/// ONLY account whose signature `execute_claim` accepts — so for an ETH→LEZ
+/// swap it must be the account the taker published in its own ETH lock, never a
+/// statically configured one.
+///
+/// Extracted (and public) so an integration test can assert the whole chain —
+/// on-chain `Locked.takerLezAccount` → watcher decode → maker classification →
+/// this instruction's `taker_id` — without a live sequencer. The LEZ timelock is
+/// milliseconds on the wire; seconds everywhere else in this app.
+pub fn build_lock_instruction(
+    hashlock: [u8; 32],
+    taker_id: AccountId,
+    amount: u128,
+    timelock_secs: u64,
+) -> HTLCInstruction {
+    HTLCInstruction::Lock {
+        hashlock,
+        taker_id,
+        amount,
+        timelock: timelock_secs * 1000,
+    }
+}
+
 impl LezClient {
     /// Create a LezClient from a SwapConfig. Dispatches based on `LezAuth` variant:
     /// - `RawKey`: uses the hex-encoded signing key directly (tests / legacy).
@@ -334,12 +357,7 @@ impl LezClient {
         }
 
         // Step 1: Lock — claims the uninitialized PDA and stores escrow data.
-        let instruction = HTLCInstruction::Lock {
-            hashlock,
-            taker_id,
-            amount,
-            timelock: timelock_secs * 1000,
-        };
+        let instruction = build_lock_instruction(hashlock, taker_id, amount, timelock_secs);
 
         let lock_hash = self
             .send_htlc_instruction(vec![self.account_id, pda], instruction)
@@ -559,6 +577,41 @@ impl LezClient {
 
     pub fn program_id(&self) -> ProgramId {
         self.program_id
+    }
+
+    /// Idempotently ensure this client's account is initialized on-chain
+    /// (owned by the `authenticated_transfer` program). See
+    /// [`crate::lez::onboard::ensure_initialized`] — the sequencer silently
+    /// drops claims/transfers against a never-initialized account, so this
+    /// must run before either.
+    pub async fn ensure_initialized(&self) -> Result<crate::lez::onboard::InitOutcome> {
+        let signer = self.as_onboard_signer();
+        crate::lez::onboard::ensure_initialized(self.sequencer(), &signer)
+            .await
+            .map_err(SwapError::LezTransaction)
+    }
+
+    /// Claim from the native pinata faucet until this client's account
+    /// balance reaches `target`. See
+    /// [`crate::lez::onboard::claim_to_target`] for the full semantics
+    /// (auto-initializes first, 3s between claims, aborts after 5
+    /// consecutive failures).
+    pub async fn claim_to_target(
+        &self,
+        target: u128,
+        progress: Option<crate::lez::onboard::FundingProgressSender>,
+    ) -> Result<u128> {
+        let signer = self.as_onboard_signer();
+        crate::lez::onboard::claim_to_target(self.sequencer(), &signer, target, progress)
+            .await
+            .map_err(SwapError::LezTransaction)
+    }
+
+    fn as_onboard_signer(&self) -> crate::lez::onboard::Signer {
+        crate::lez::onboard::Signer {
+            account_id: self.account_id,
+            signing_key: self.private_key().clone(),
+        }
     }
 
     // ── Internal helpers ──────────────────────────────────────────────

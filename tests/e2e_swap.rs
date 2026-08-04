@@ -149,7 +149,13 @@ impl TestEnv {
             lez_timelock,
             eth_timelock,
             eth_recipient_address: self.maker_eth_addr,
-            lez_taker_account_id: self.taker_lez_id,
+            // NO designated counterparty — for either side. This is the point of
+            // the taker-LEZ-account binding: the maker learns which LEZ account
+            // may claim from the taker's own ETH lock, and the two sides run on
+            // DIFFERENT LEZ accounts (maker_lez_id vs taker_lez_id) with nothing
+            // pre-agreed off-chain. If the binding regressed, the maker would
+            // lock LEZ to the wrong account and the taker's claim would fail.
+            lez_taker_account_id: None,
             poll_interval: Duration::from_millis(500),
         }
     }

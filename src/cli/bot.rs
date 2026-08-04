@@ -14,8 +14,9 @@
 //!   `@waku/sdk` lightpush sidecar that republishes the offer on an interval
 //!   (the fleet runs `store=false`, so late-joining subscribers only see live
 //!   messages).
-//! - **Pinata faucet sidecar** (`--fund-to`) — loops `wallet pinata claim`
-//!   (150 LEZ per claim) until the maker balance reaches a target.
+//! - **Pinata faucet sidecar** (`--fund-to`) — natively loops the pinata
+//!   claim ([`crate::lez::onboard::claim_to_target`], 150 LEZ per claim)
+//!   until the maker balance reaches a target. No external `wallet` binary.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1316,76 +1317,50 @@ pub fn spawn_offer_publisher(
 // Pinata faucet sidecar (--fund-to)
 // ---------------------------------------------------------------------------
 
-/// Loop `wallet pinata claim --to <maker>` until the maker LEZ balance reaches
-/// `target`. Requires wallet-mode auth (LEZ_WALLET_HOME + LEZ_ACCOUNT_ID) —
-/// the pinata faucet is driven through the standalone `wallet` binary.
-/// Returns the final balance.
-pub async fn fund_to_target(
-    config: &SwapConfig,
-    wallet_bin: &str,
-    target: u128,
-    json: bool,
-) -> Result<u128> {
-    let (home, account_id) = match &config.lez_auth {
-        crate::config::LezAuth::Wallet { home, account_id } => (home.clone(), *account_id),
-        crate::config::LezAuth::RawKey(_) => {
-            return Err(SwapError::InvalidConfig(
-                "--fund-to requires wallet-mode auth (LEZ_WALLET_HOME + LEZ_ACCOUNT_ID): \
-                 pinata claims go through the `wallet` binary"
-                    .into(),
-            ));
-        }
-    };
-    let account_b58 = account_id_to_base58(&account_id);
+/// Claim from the native pinata faucet ([`crate::lez::onboard::claim_to_target`])
+/// until the account's LEZ balance reaches `target`. Returns the final
+/// balance. Works under either `LezAuth` mode — no external `wallet` binary
+/// is involved.
+pub async fn fund_to_target(config: &SwapConfig, target: u128, json: bool) -> Result<u128> {
     let lez_client = LezClient::new(config)?;
 
-    let mut consecutive_failures: u32 = 0;
-    let mut claims: u64 = 0;
-    loop {
-        let balance = lez_client.get_balance(&account_id).await?;
-        if balance >= target {
-            if !json {
-                println!(
-                    "Funding target reached: balance {balance} >= {target} ({claims} claim(s))"
-                );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let print_task = (!json).then(|| {
+        tokio::spawn(async move {
+            use crate::lez::onboard::FundingProgress;
+            while let Some(event) = rx.recv().await {
+                match event {
+                    FundingProgress::Initializing => println!("Checking account initialization..."),
+                    FundingProgress::AlreadyInitialized => {}
+                    FundingProgress::Initialized { tx_hash } => {
+                        println!("Account initialized on-chain (tx {tx_hash})")
+                    }
+                    FundingProgress::CheckingBalance { balance, target } => println!(
+                        "Balance {balance} < target {target}; claiming 150 LEZ from pinata..."
+                    ),
+                    FundingProgress::Claimed {
+                        tx_hash,
+                        total_claims,
+                    } => println!("Claim #{total_claims} committed (tx {tx_hash})"),
+                    FundingProgress::ClaimFailed {
+                        error,
+                        consecutive_failures,
+                    } => warn!("pinata claim failed ({consecutive_failures} in a row): {error}"),
+                    FundingProgress::TargetReached { balance } => {
+                        println!("Funding target reached: balance {balance} >= {target}")
+                    }
+                }
             }
-            return Ok(balance);
-        }
-        let needed = target - balance;
-        if !json {
-            println!(
-                "Balance {balance} < target {target} (need {needed}); claiming 150 LEZ from pinata..."
-            );
-        }
-        let output = tokio::process::Command::new(wallet_bin)
-            .env("LEE_WALLET_HOME_DIR", &home)
-            .args(["pinata", "claim", "--to", &account_b58])
-            .output()
-            .await
-            .map_err(|e| {
-                SwapError::InvalidConfig(format!(
-                    "failed to run `{wallet_bin} pinata claim` (set LEZ_WALLET_BIN?): {e}"
-                ))
-            })?;
-        if output.status.success() {
-            consecutive_failures = 0;
-            claims += 1;
-        } else {
-            consecutive_failures += 1;
-            warn!(
-                "pinata claim failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            if consecutive_failures >= 5 {
-                return Err(SwapError::InvalidConfig(
-                    "5 consecutive pinata claim failures — aborting funding loop".into(),
-                ));
-            }
-        }
-        // Let the claim land before re-checking the balance.
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        })
+    });
+
+    let result = lez_client.claim_to_target(target, Some(tx)).await;
+
+    if let Some(handle) = print_task {
+        let _ = handle.await;
     }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,7 +1652,7 @@ mod tests {
             || {
                 let n = calls.fetch_add(1, Ordering::Relaxed);
                 async move {
-                    if n % 2 == 0 {
+                    if n.is_multiple_of(2) {
                         Err(SwapError::LezSequencer("transient".into()))
                     } else {
                         Ok(None)

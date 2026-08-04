@@ -4555,7 +4555,10 @@
           "nixpkgs-crates-io"
         ],
         "rust-overlay": "rust-overlay_6",
-        "zerokit": "zerokit"
+        "zerokit": [
+          "swap",
+          "zerokit-nocheck"
+        ]
       },
       "locked": {
         "lastModified": 1776262372,
@@ -59219,30 +59222,6 @@
       "inputs": {
         "nixpkgs": [
           "swap",
-          "delivery_module",
-          "logos-delivery",
-          "zerokit",
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1771211437,
-        "narHash": "sha256-lcNK438i4DGtyA+bPXXyVLHVmJjYpVKmpux9WASa3ro=",
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "rev": "c62195b3d6e1bb11e0c2fb2a494117d3b55d410f",
-        "type": "github"
-      },
-      "original": {
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "type": "github"
-      }
-    },
-    "rust-overlay_8": {
-      "inputs": {
-        "nixpkgs": [
-          "swap",
           "nixpkgs"
         ]
       },
@@ -59271,8 +59250,9 @@
           "nixpkgs"
         ],
         "nixpkgs-crates-io": "nixpkgs-crates-io",
-        "rust-overlay": "rust-overlay_8",
-        "swap-source": "swap-source"
+        "rust-overlay": "rust-overlay_7",
+        "swap-source": "swap-source",
+        "zerokit-nocheck": "zerokit-nocheck"
       },
       "locked": {
         "path": "../swap-module",
@@ -59302,11 +59282,12 @@
       "inputs": {
         "nixpkgs": [
           "swap",
-          "delivery_module",
-          "logos-delivery",
-          "nixpkgs"
+          "nixpkgs-crates-io"
         ],
-        "rust-overlay": "rust-overlay_7"
+        "rust-overlay": [
+          "swap",
+          "rust-overlay"
+        ]
       },
       "locked": {
         "lastModified": 1771279884,
@@ -59322,6 +59303,22 @@
         "rev": "53b18098e6d5d046e3eb1ac338a8f4f651432477",
         "type": "github"
       }
+    },
+    "zerokit-nocheck": {
+      "inputs": {
+        "zerokit": "zerokit"
+      },
+      "locked": {
+        "path": "./nix/zerokit-nocheck",
+        "type": "path"
+      },
+      "original": {
+        "path": "./nix/zerokit-nocheck",
+        "type": "path"
+      },
+      "parent": [
+        "swap"
+      ]
     }
   },
   "root": "root",

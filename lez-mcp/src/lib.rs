@@ -31,7 +31,7 @@ pub fn swap_config_for(cfg: &McpConfig, lez_auth: LezAuth) -> SwapConfig {
         lez_timelock: 0,
         eth_timelock: 0,
         eth_recipient_address: alloy::primitives::Address::ZERO,
-        lez_taker_account_id: lee::AccountId::new([0u8; 32]),
+        lez_taker_account_id: None,
         poll_interval: Duration::from_secs(2),
     }
 }
