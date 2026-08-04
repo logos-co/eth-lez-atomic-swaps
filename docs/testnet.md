@@ -4,6 +4,9 @@ This app targets **fully public infrastructure**: the public LEZ testnet plus
 Ethereum Sepolia. The first end-to-end atomic swap on this stack completed on
 2026-07-21 (evidence at the bottom).
 
+Public-mode implementation remains **NO-GO** until the release blockers in the
+normative [signed protocol v2 contract](protocol-v2.md) are satisfied.
+
 ## Version pin — why v0.2.0 (final)
 
 The public testnet at `https://testnet.lez.logos.co` runs
@@ -53,6 +56,14 @@ pinned code).
   under the hood (`/LEE/v0.3/...` prefixes), all handled inside `lee`.
 - ETH watcher polls `eth_getLogs` instead of `watch()`/pubsub — public RPC
   providers expire filters/subscriptions within seconds.
+
+## Legacy headless v1 developer record
+
+The remainder of this file records the earlier CLI-driven v1 integration and
+its historical evidence. It is **not** the public trial flow and must not be
+used as Basecamp setup guidance. Public testers use the Atomic Swaps modules
+inside Basecamp, with the fixed 150 LEZ trial amount and the signed v2 protocol
+only after every v2 release blocker is cleared.
 
 ## Deployed artifacts
 
