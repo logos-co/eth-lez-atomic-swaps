@@ -8,7 +8,7 @@ import SwapLinks
 // GhostButton) into the offer detail pane's sibling: hero amounts + rate,
 // both chain references labeled per role, hashlock, preimage with a
 // reveal affordance, counterparty and contract identity, timelocks, the
-// completion wall-clock time, and a copyable JSON receipt.
+// completion wall-clock time, and secret-safe public evidence.
 //
 // Inputs:
 //  - role: "taker" | "maker". The backend's `eth_tx` result field is
@@ -33,7 +33,9 @@ Rectangle {
     property bool showHistoryHint: true
 
     property bool preimageRevealed: false
-    property bool copied: false
+    property string copiedKind: ""
+
+    readonly property string feedbackUrl: "https://github.com/logos-co/eth-lez-atomic-swaps/issues/new?template=trial-feedback.yml"
 
     readonly property var parsed: {
         if (!resultJson) return null
@@ -81,7 +83,6 @@ Rectangle {
     readonly property string ethLockTx: ctx.ethLockTx || ""
     readonly property var networkCtx: ctx.network || ({})
     readonly property string lezSequencer: networkCtx.lezSequencer || ""
-    readonly property string ethRpc: networkCtx.ethRpc || ""
     readonly property double ethChainId: Number(networkCtx.ethChainId || 0)
     readonly property var iterationValue: ctx.iteration !== undefined && ctx.iteration !== null
         ? ctx.iteration : null
@@ -160,52 +161,49 @@ Rectangle {
         return parts.length > 0 ? parts.join(" · ") : "—"
     }
 
-    // JSON receipt (schema swap-receipt/1, dossier §3b): strings stay
-    // strings, unknown fields are null.
-    function receiptJson() {
+    // Public feedback evidence is deliberately narrower than the archived
+    // receipt. Never copy the preimage, hashlock, RPC URL, wallet addresses,
+    // raw backend error, or config-derived identities into a public report.
+    function safeEvidenceJson() {
         var r = {
-            schema: "swap-receipt/1",
+            schema: "trial-evidence/1",
             role: role,
             status: outcome,
-            hashlock: hashlock || null,
-            preimage: preimage || null,
-            lez_amount: lezAmount || null,
-            eth_amount_wei: ethAmountWei || null,
-            eth_amount: ethAmountEth || null,
-            eth: {
-                swap_id: ethSwapId || null,
+            ethereum: {
+                chain_id: ethChainId > 0 ? ethChainId : null,
                 lock_tx: ethLockTx || null,
+                lock_url: Links.ethTx(ethLockTx, ethChainId) || null,
                 claim_tx: ethClaimTx || null,
+                claim_url: Links.ethTx(ethClaimTx, ethChainId) || null,
                 refund_tx: ethRefundTx || null,
-                htlc_address: ethHtlcAddress || null,
-                counterparty: counterpartyEth || null
+                refund_url: Links.ethTx(ethRefundTx, ethChainId) || null
             },
             lez: {
                 lock_tx: lezLockTx || null,
+                lock_url: lezExplorerAvailable
+                    ? (Links.lezTx(lezLockTx) || null) : null,
                 claim_tx: lezClaimTx || null,
+                claim_url: lezExplorerAvailable
+                    ? (Links.lezTx(lezClaimTx) || null) : null,
                 refund_tx: lezRefundTx || null,
-                program_id: lezProgramId || null,
-                counterparty: counterpartyLez || null
-            },
-            timelocks: {
-                lez_unix: lezTimelockUnix > 0 ? lezTimelockUnix : null,
-                eth_unix: ethTimelockUnix > 0 ? ethTimelockUnix : null,
-                lez_minutes: lezTimelockMinutes || null,
-                eth_minutes: ethTimelockMinutes || null
+                refund_url: lezExplorerAvailable
+                    ? (Links.lezTx(lezRefundTx) || null) : null
             },
             started_ms: startedMs > 0 ? startedMs : null,
-            finished_ms: finishedMs > 0 ? finishedMs : null,
-            network: {
-                lez_sequencer: lezSequencer || null,
-                eth_rpc: ethRpc || null,
-                eth_chain_id: ethChainId > 0 ? ethChainId : null
-            }
+            finished_ms: finishedMs > 0 ? finishedMs : null
         }
         if (iterationValue !== null)
             r.iteration = iterationValue
-        if (isError && parsed)
-            r.error = parsed.error
         return JSON.stringify(r, null, 2)
+    }
+
+    function copyText(value, kind) {
+        clipboardHelper.text = value
+        clipboardHelper.selectAll()
+        clipboardHelper.copy()
+        clipboardHelper.text = ""
+        copiedKind = kind
+        copiedReset.restart()
     }
 
     visible: outcome !== ""
@@ -225,7 +223,7 @@ Rectangle {
     Timer {
         id: copiedReset
         interval: 1600
-        onTriggered: card.copied = false
+        onTriggered: card.copiedKind = ""
     }
 
     ColumnLayout {
@@ -485,34 +483,42 @@ Rectangle {
 
         // --- Actions ----------------------------------------------------
         RowLayout {
-            visible: !card.isError
             Layout.fillWidth: true
             Layout.topMargin: Theme.spacingSmall
             spacing: Theme.spacingNormal
 
             GhostButton {
-                text: card.copied ? "Copied" : "Copy JSON receipt"
+                text: card.copiedKind === "evidence" ? "Safe evidence copied"
+                                                       : "Copy safe evidence"
                 accented: false
                 Layout.preferredHeight: 32
                 font.pixelSize: Theme.fontCaption
 
-                onClicked: {
-                    clipboardHelper.text = card.receiptJson()
-                    clipboardHelper.selectAll()
-                    clipboardHelper.copy()
-                    clipboardHelper.text = ""
-                    card.copied = true
-                    copiedReset.restart()
-                }
+                onClicked: card.copyText(card.safeEvidenceJson(), "evidence")
             }
-            Text {
-                visible: card.showHistoryHint
-                Layout.fillWidth: true
-                text: "Saved to swap history — the History tab keeps it across restarts."
-                color: Theme.textMuted
+            GhostButton {
+                text: card.copiedKind === "feedback" ? "Feedback link copied"
+                                                       : "Copy feedback link"
+                Layout.preferredHeight: 32
                 font.pixelSize: Theme.fontCaption
-                wrapMode: Text.Wrap
+
+                // Basecamp intentionally blocks module-owned external URLs.
+                // Copy the stable HTTPS form URL until the host exposes an
+                // approved, user-confirmed external-navigation capability.
+                onClicked: card.copyText(card.feedbackUrl, "feedback")
             }
+            Item { Layout.fillWidth: true }
+        }
+        Text {
+            Layout.fillWidth: true
+            text: card.copiedKind === "feedback"
+                  ? "Feedback link copied. Paste it in your browser, then add the safe evidence."
+                  : (card.showHistoryHint && !card.isError
+                     ? "Saved to swap history. Basecamp keeps external links sandboxed; copy a URL and paste it in your browser."
+                     : "Basecamp keeps external links sandboxed; copy the feedback link and paste it in your browser.")
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            wrapMode: Text.Wrap
         }
     }
 }

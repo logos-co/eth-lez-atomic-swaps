@@ -1,0 +1,85 @@
+name: Atomic swap trial feedback
+description: Tell us whether your Basecamp testnet swap worked and where the journey was confusing.
+title: "[trial] "
+labels:
+  - trial-feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Atomic Swaps in Basecamp. Success reports are just as useful as failures.
+
+        **Keep secrets out of this public issue.** Never paste a mnemonic, private key, password, hashlock preimage, raw configuration file, or unredacted log. The app's **Copy safe evidence** action is designed to produce a public summary when it is available.
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How far did you get?
+      options:
+        - Completed a swap
+        - Started a swap but did not complete it
+        - Found an offer but could not start the swap
+        - Could not find an offer
+        - Could not finish wallet setup
+        - Could not install or open the app
+        - I have general feedback
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Apple Silicon macOS
+        - Linux x86_64
+        - Linux aarch64
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: basecamp-version
+    attributes:
+      label: Basecamp version
+      description: Copy this from Basecamp's About screen, or enter "unknown" if Basecamp would not open.
+      placeholder: e.g. 0.2.3 or unknown
+    validations:
+      required: false
+
+  - type: input
+    id: atomic-swaps-version
+    attributes:
+      label: Atomic Swaps version
+      description: Copy the swap_ui version from Basecamp's App Manager, or enter "not installed" if installation failed.
+      placeholder: e.g. 0.4.0 or not installed
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence (optional)
+      description: Paste the app's Copy safe evidence output or public explorer links. Check it once more for secrets before submitting.
+      placeholder: |
+        Final status: completed
+        Ethereum transaction: https://sepolia.etherscan.io/tx/...
+        LEZ transaction: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: experience
+    attributes:
+      label: What happened, and what would have made the journey easier?
+      description: Include the screen or step where you got stuck. No developer commands or repository checkout are expected for the public trial.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: secret-check
+    attributes:
+      label: Safety check
+      options:
+        - label: I checked this report and removed wallet secrets, passwords, preimages, raw configuration, and unredacted logs.
+          required: true

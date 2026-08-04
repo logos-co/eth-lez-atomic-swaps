@@ -43,11 +43,48 @@ ScrollView {
     property double swapStartedMs: 0
     property double swapFinishedMs: 0
 
+    function latestReceiptForRole(receiptsJson, wantedRole) {
+        try {
+            var receipts = JSON.parse(receiptsJson || "[]")
+            for (var i = 0; i < receipts.length; i++) {
+                if (receipts[i].role === wantedRole)
+                    return receipts[i]
+            }
+        } catch (e) {
+            // A malformed historic line must not hide the live result card.
+        }
+        return null
+    }
+
+    function publicReceiptContext(receipt) {
+        var safeReceipt = receipt || {}
+        var eth = safeReceipt.eth || {}
+        var network = safeReceipt.network || {}
+        return {
+            ethLockTx: String(eth.lock_tx || ""),
+            network: {
+                lezSequencer: String(network.lez_sequencer || ""),
+                ethChainId: Number(network.eth_chain_id || 0)
+            }
+        }
+    }
+
+    readonly property var latestTakerReceipt: latestReceiptForRole(
+        swapBackend.receiptsJson, "taker")
+
     readonly property var receiptContext: {
         var ctx = {
             startedMs: takerRoot.swapStartedMs,
             finishedMs: takerRoot.swapFinishedMs
         }
+        // The backend journals the completed receipt before publishing the
+        // result/running signals. Reuse that authoritative record so the
+        // immediate post-swap card has the same ETH lock proof and network
+        // facts as History, instead of waiting for the user to change tabs.
+        var publicReceipt = takerRoot.publicReceiptContext(
+            takerRoot.latestTakerReceipt)
+        ctx.ethLockTx = publicReceipt.ethLockTx
+        ctx.network = publicReceipt.network
         var offer = takerRoot.completedOffer
         if (offer) {
             ctx.lezAmount = String(offer.lez_amount || "")
