@@ -17,12 +17,14 @@
         configFile = ./metadata.json;
         flakeInputs = inputs;
       };
+      packages = builtins.mapAttrs (_system: systemPackages:
+        builtins.removeAttrs systemPackages [ "integration-test" "test-framework" ]
+      ) base.packages;
+      checks = builtins.mapAttrs (_system: systemChecks:
+        builtins.removeAttrs systemChecks [ "integration-test" ]
+      ) base.checks;
     in
-    base // (
-      if base ? apps then {
-        apps = builtins.mapAttrs (_system: apps:
-          apps // { app = apps.default; }
-        ) base.apps;
-      } else {}
-    );
+    (builtins.removeAttrs base [ "apps" ]) // {
+      inherit packages checks;
+    };
 }

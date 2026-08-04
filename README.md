@@ -167,7 +167,7 @@ Read this before filing an issue — these are the current known rough spots for
 - **Any tracked-file edit triggers a big rebuild.** The modules build from the committed git tree (`git+file:` refs), so any commit or tracked-file edit changes the tree hash and the next `lgs basecamp build`/`install` rebuilds `swap` + `swap_ui` (~10 min). Batch your edits.
 - **Maker funding in the UI flow.** The maker account must hold at least 1000 LEZ before locking. The headless `make demo` self-funds, but for the manual Basecamp flow you may need repeated `logos-scaffold wallet topup <maker-account>` claims (150 LEZ each). See [Troubleshooting](#troubleshooting).
 - **`make infra` must stay running** in its own terminal for the whole swap; Ctrl-C tears down Anvil and the localnet. Stopping and restarting the localnet wipes on-chain state (balances reset).
-- **First `lgs basecamp launch <profile>` is slower** — `lgs basecamp install` provisions scaffold's default profiles; `maker`/`taker` provision themselves on first launch.
+- **First `make basecamp-launch-<profile>` is slower** — `lgs basecamp install` provisions scaffold's default profiles; `maker`/`taker` provision themselves on first launch through the required wrapper.
 - **Dev keys only.** The generated `.env` files use Anvil dev keys and local wallets; logs may contain key material — redact before sharing, and never reuse these keys elsewhere.
 - **`lgs doctor` shows one expected warning** — a `delivery_module` pin-drift warn (v0.1.1 vs scaffold's default rev) keeps the status at "Needs attention"; it is benign.
 - **Launch through `make basecamp-launch-<profile>`, not bare `lgs basecamp launch`.** Basecamp 0.2.x reads `LOGOS_USER_DIR`, not the `LOGOS_DATA_DIR` scaffold sets. Unbridged, the app still opens — it just silently uses the shared `~/Library/Application Support/Logos/LogosBasecamp` and shows none of this project's modules. See [Manual Basecamp Run](#manual-basecamp-run) and tracker TR-21.
@@ -214,7 +214,7 @@ The UI is a [logos-basecamp](https://github.com/logos-co/logos-basecamp) app, bu
 - **`swap-module/`**: `type: "core"` universal C++ module wrapping `swap-ffi`. The pure-C++ `SwapImpl` methods are exposed as a typed `Swap` client class for other modules / UIs.
 - **`swap-ui/`**: `type: "ui_qml"` Basecamp app with a process-isolated C++ backend (Qt Remote Objects, `.rep` interface) and a QML view. It calls into `swap` via the generated `Swap` client.
 
-Both flakes are standalone and build inside their own subdirectories. Their `flake.lock` files are intentionally kept local/ignored so PR diffs stay focused on source changes.
+Both module flakes build inside their own subdirectories. Their tracked `flake.lock` files pin the inputs used by published packages and must be kept aligned with release metadata. The UI flake intentionally does not export a standalone app or standalone integration-test runner; install its LGX packages into an isolated Scaffold profile and test them in Basecamp.
 
 The two-peer flow uses scaffold's `[basecamp.profiles.*]` blocks in [`scaffold.toml`](scaffold.toml) (`maker` and `taker`) to give each peer isolated XDG dirs, runtime dir, wallet, log, and env file under `.scaffold/basecamp/profiles/<profile>/`. Each profile's runtime dir is forced to `/tmp/lgs-<profile>/` to stay under the macOS Unix-socket path limit.
 
@@ -244,13 +244,17 @@ cd swap-module && nix develop
 
 The dev shell pre-builds `swap-ffi` via the flake, symlinks `libswap_ffi.{dylib,so}` into `swap-module/lib/` (so `CMakeLists.txt`'s `find_library(swap_ffi …)` resolves it), and exports `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` / `CMAKE_LIBRARY_PATH` / `CMAKE_INCLUDE_PATH` plus `CMAKE_EXPORT_COMPILE_COMMANDS=ON` so clangd picks up `compile_commands.json` after a `cmake` configure.
 
-For quick standalone UI smoke testing outside Basecamp:
+For UI smoke testing, build the portable packages, keep the local infrastructure running in one terminal, and launch an isolated Basecamp profile in another:
 
 ```bash
-lgs basecamp run swap_ui
+lgs basecamp build --variant lgx-portable
+lgs basecamp setup  # one-time host/LGPM build and profile seed
+make infra
+# In another terminal:
+make basecamp-launch-maker
 ```
 
-This runs `swap_ui` in the dependency-bundling `logos-standalone-app` runner. It is not the two-peer Basecamp path.
+`make basecamp-launch-maker` supplies the required isolated `LOGOS_USER_DIR`, then Scaffold scrubs and reprovisions that profile from the captured module set before starting Basecamp. Do not invoke bare `lgs basecamp launch` on this pin, and do not use `lgs basecamp run swap_ui`: the former silently falls back to Basecamp's shared data tree, while the latter uses Scaffold's unsupported standalone host.
 
 ## Headless Demo And CLI Usage
 
@@ -363,8 +367,7 @@ Scaffold-native (`lgs`) commands are the primary flow for setup, module builds, 
 | `lgs basecamp build` | Build the `swap` / `swap_ui` / `delivery_module` LGX artifacts |
 | `lgs basecamp setup` | Build the portable Basecamp + LGPM and seed the profiles |
 | `lgs basecamp install` | Install the `#lgx-portable` packages into each profile via `lgpm cli-portable` |
-| `lgs basecamp launch <profile>` | Launch a Basecamp peer (`maker` / `taker`) |
-| `lgs basecamp run swap_ui` | Run `swap_ui` standalone in `logos-standalone-app` for smoke testing |
+| `make basecamp-launch-maker` / `make basecamp-launch-taker` | Launch an isolated Basecamp peer with the required absolute `LOGOS_USER_DIR` bridge |
 | `lgs doctor --json` | Report resolved scaffold / circuits / module / profile state |
 
 The retained Makefile targets wrap the scaffold-native flows and own the app-specific Ethereum/localnet orchestration scaffold does not model yet:
