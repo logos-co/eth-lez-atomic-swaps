@@ -34,7 +34,7 @@ public:
     ~SwapUiPlugin() override;
 
     QString name()    const override { return "swap_ui"; }
-    QString version() const override { return "0.3.2"; }
+    QString version() const override { return "0.3.3"; }
 
     Q_INVOKABLE void initLogos(LogosAPI* api);
 
