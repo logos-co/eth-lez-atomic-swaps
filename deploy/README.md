@@ -21,23 +21,34 @@ thing reproducible on a bare box:
 
 ## Current mode: RESTRICTED counterparty
 
-**This deployment cannot serve arbitrary public takers yet.**
-`--restrict-counterparty` (`RESTRICT_COUNTERPARTY=true` in `maker.env`) is
-still required on `master`: the LEZ HTLC `Claim` instruction is gated on
-`signer == taker_id`, and the loop has no inbound channel to learn a public
-taker's LEZ account per-swap. Public-taker support is PR #64 + #76
-(unmerged) and additionally needs a Sepolia `EthHTLC` redeploy.
+**This deployment runs in restricted (single-taker) mode by operator
+choice, not because the code requires it.**
 
-So this maker serves exactly **one** designated taker
-(`LEZ_TAKER_ACCOUNT_ID` in `maker.env`), which is enough to prove the whole
-pipeline end-to-end (build → run → publish → offers visible on the board)
-but is **not** yet open to the public.
+Historical note, since this changed mid-flight: PR #64 (Sepolia `EthHTLC`
+ABI — `Locked` now carries `takerLezAccount`) and PR #76 (engine binds each
+swap to that taker-supplied LEZ account) merged into `master` on 2026-08-04,
+*while this container was being built*, flipping `--restrict-counterparty`
+from a mandatory flag to an opt-in allowlist — `RESTRICT_COUNTERPARTY`
+unset/false is now the correct, fully-supported **public** default (the
+loop learns each taker's LEZ account from their own ETH lock; no static
+designated counterparty needed). The matching Sepolia `EthHTLC` redeploy
+(`0x351B0EA07739FA9F6769213927D7836a790A5FAF`, `INTERFACE_VERSION=2`) landed
+in the same window — see `docs/testnet.md`.
 
-Flipping to public mode later is a single env change once the upstream work
-lands: set `RESTRICT_COUNTERPARTY=false` (or drop the var) in `maker.env`
-and restart the container — no image rebuild, no Dockerfile change. The
-image itself never bakes `--restrict-counterparty` in as a fixed CLI flag
-for exactly this reason (see the `Dockerfile` CMD comment).
+This deployment nonetheless keeps `RESTRICT_COUNTERPARTY=true` for now,
+serving only the designated taker in `LEZ_TAKER_ACCOUNT_ID`, to keep the
+first live rollout conservative while the new public-taker path gets more
+runway. Flipping to public mode is a single env change — set
+`RESTRICT_COUNTERPARTY=false` (or drop the var) in `maker.env` and restart
+the container — no image rebuild, no Dockerfile change. The image itself
+never bakes `--restrict-counterparty` in as a fixed CLI flag for exactly
+this reason (see the `Dockerfile` CMD comment).
+
+**If you rebuild this image from an older commit** (pre-2026-08-04, before
+PR #64/#76), `--restrict-counterparty` is still mandatory there and
+`ETH_HTLC_ADDRESS` must point at the old, now-superseded
+`0x8636Fe66DFee166589a913140f14d5F57394834A` instead — the two ABIs are not
+interchangeable.
 
 ## Hard rule: one `ETH_RECIPIENT_ADDRESS` per maker
 
@@ -94,7 +105,7 @@ Public testnet endpoints (already defaulted in `maker.env.example`):
 
 - LEZ sequencer: `https://testnet.lez.logos.co`
 - ETH RPC: `wss://ethereum-sepolia-rpc.publicnode.com`
-- ETH HTLC: `0x8636Fe66DFee166589a913140f14d5F57394834A`
+- ETH HTLC (v2, current): `0x351B0EA07739FA9F6769213927D7836a790A5FAF`
 - LEZ HTLC program: `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070`
 
 ## Build + run
