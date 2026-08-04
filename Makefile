@@ -1,5 +1,5 @@
 .PHONY: contracts demo infra \
-       setup localnet-start localnet-stop test
+       setup localnet-start localnet-stop test basecamp-ui-smoke
 
 .DEFAULT_GOAL := contracts
 
@@ -101,6 +101,13 @@ infra: contracts localnet-start
 # scatter state under Basecamp's cwd instead of failing loudly. `lgs basecamp
 # launch` inherits ambient env, which is what lets this bridge work at all.
 BASECAMP_USER_DIR = $(CURDIR)/.scaffold/basecamp/profiles/$*/xdg-data/Logos/LogosBasecamp
+
+# Hermetic UI/runtime smoke test. This builds the portable LGX packages,
+# installs them into a throwaway user-dir, and drives the real pinned Basecamp
+# bundle with its test-only QML inspector enabled. It does not start localnet or
+# Anvil and never uses a module-owned app host.
+basecamp-ui-smoke:
+	bash .github/scripts/run-basecamp-ui-smoke.sh
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my

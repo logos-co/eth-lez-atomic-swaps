@@ -70,3 +70,6 @@ result
 result-*
 result-basecamp
 .scaffold
+
+# Basecamp-native UI smoke-test diagnostics
+/artifacts/basecamp-ui-smoke/

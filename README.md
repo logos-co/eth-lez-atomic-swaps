@@ -256,6 +256,16 @@ make basecamp-launch-maker
 
 `make basecamp-launch-maker` supplies the required isolated `LOGOS_USER_DIR`, then Scaffold scrubs and reprovisions that profile from the captured module set before starting Basecamp. Do not invoke bare `lgs basecamp launch` on this pin, and do not use `lgs basecamp run swap_ui`: the former silently falls back to Basecamp's shared data tree, while the latter uses Scaffold's unsupported standalone host.
 
+For the automated, unfunded UI/runtime smoke test:
+
+```bash
+make basecamp-ui-smoke
+```
+
+This reads the Basecamp and LGPM commits from `scaffold.toml`, builds Basecamp's test-only `bin-bundle-dir-inspector` output, and installs the portable `delivery_module`, `swap`, and `swap_ui` LGX packages into a unique temporary `--user-dir`. The module builds reuse the same two scoped nixpkgs overrides as the PR-time package build, avoiding the pinned cargo fetcher's crates.io User-Agent failure without changing the module flakes or their exported outputs. The process launched is the real pinned `LogosBasecamp` binary; the test-only difference is that its upstream QML inspector is enabled so CI can drive it with `QT_QPA_PLATFORM=offscreen`. The test opens **ETH ↔ LEZ Atomic Swap**, verifies the `logos_host` / `ui-host` process topology and backend readiness, and visits all six tabs. It requires Nix and Node.js, but not Anvil, a LEZ localnet, wallet funding, or display access.
+
+The runner creates a dedicated POSIX process group and asks only that Basecamp instance to shut down. Basecamp intentionally gives each `logos_host` / `ui-host` child its own process group; if graceful shutdown leaves one behind, the runner will signal an exact captured PID only after its complete command still matches and contains the run's unique temporary user-dir. It never uses global process-name matching, so it cannot stop a developer's normal Basecamp session. Diagnostics are written to `artifacts/basecamp-ui-smoke/`; CI uploads them on failure. This Linux smoke test catches package discovery, module dependency, process startup, QML load, and navigation regressions. macOS accessibility behavior remains a local review gate against the shipping `.app`, because offscreen QML inspection does not exercise Cocoa's accessibility bridge.
+
 ## Headless Demo And CLI Usage
 
 For a quick automated end-to-end swap without the UI:

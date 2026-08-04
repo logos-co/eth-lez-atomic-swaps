@@ -1,6 +1,6 @@
 name: CI
 
-# Minimal PR-time artifact builds. Two jobs:
+# PR-time compile and runtime coverage. Three jobs:
 #
 #   rust-checks  — proves the Rust workspace (incl. the swap-ffi cdylib the
 #                  Basecamp module wraps) still compiles and its unit tests
@@ -9,11 +9,13 @@ name: CI
 #                  swap backend module + the swap-ffi nix build with its
 #                  pinned cargoHash) still builds via nix, exactly like the
 #                  release pipeline does.
+#   basecamp-ui-runtime — installs the portable delivery/swap/swap_ui packages
+#                         into an isolated profile and drives them inside the
+#                         real pinned Basecamp bundle, headlessly.
 #
-# Deliberately out of scope for v1: runtime QML load (nix/qmlcachegen does
-# not catch QML runtime defects — loading the module in a real Basecamp
-# session is still a manual review gate), the risc0 guest build (`demo`
-# feature), localnet integration tests, and releases.
+# Deliberately out of scope: a funded two-peer swap (covered by the manual
+# Basecamp run and headless demo), macOS accessibility semantics, the risc0
+# guest build (`demo` feature), localnet integration tests, and releases.
 
 on:
   pull_request:
@@ -149,3 +151,33 @@ jobs:
             --override-input logos-module-builder/nixpkgs github:danisharora099/nixpkgs/eaec81d3b8a8d2339e25c718a1650b2c45adf726 \
             --override-input swap/logos-module-builder/nixpkgs github:danisharora099/nixpkgs/eaec81d3b8a8d2339e25c718a1650b2c45adf726 \
             --override-input swap/delivery_module/logos-delivery/nixpkgs github:danisharora099/nixpkgs/3134d7bb12629545b1f3e5b1d2faadbf861484fd
+
+  basecamp-ui-runtime:
+    name: basecamp-ui-runtime (real Basecamp, linux-amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install modules and run Basecamp-native UI smoke test
+        run: make basecamp-ui-smoke
+
+      - name: Upload Basecamp failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: basecamp-ui-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/basecamp-ui-smoke/
+          if-no-files-found: warn
+          retention-days: 14
