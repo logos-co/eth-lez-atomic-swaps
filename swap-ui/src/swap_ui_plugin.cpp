@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
