@@ -286,6 +286,14 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
 
     setReceiptsJson(QStringLiteral("[]"));
 
+    setSetupRunning(false);
+    setSetupJobId(QString{});
+    setSetupStep(QString{});
+    setSetupError(QString{});
+    setSetupBalance(QString{});
+    setSetupTarget(QString{});
+    setSetupClaims(0);
+
     m_messagingPollTimer.setInterval(2000);
     connect(&m_messagingPollTimer, &QTimer::timeout,
             this, &SwapUiPlugin::pollMessagingStatus);
@@ -739,6 +747,117 @@ void SwapUiPlugin::resetConfig()
     setStatus(QStringLiteral("App data reset to defaults"));
 }
 
+// ---------------------------------------------------------------------------
+// Guided first-run Setup (SetupView.qml)
+// ---------------------------------------------------------------------------
+//
+// Generation is instant/local (no network) and writes straight into the
+// existing eth*/lez* config PROPs through the SAME setConfigValue-style
+// path manual entry uses (validateConfig + scheduleConfigSave, which now
+// saves synchronously and chmod 0600s the file, see #89) — so a generated
+// key is persisted exactly like a pasted one, and the rest of the app can't
+// tell the difference.
+
+void SwapUiPlugin::setupGenerateEthKey()
+{
+    if (!m_swap) {
+        setErrorMessage(QStringLiteral("Swap client not ready"));
+        setStatus(errorMessage());
+        return;
+    }
+    m_swap->generateEthKeyAsync([this](QString result) {
+        const auto error = jsonError(result);
+        if (!error.isEmpty()) {
+            setSetupError(error);
+            setStatus(QStringLiteral("Failed to generate ETH key: %1").arg(error));
+            return;
+        }
+        const auto obj = parseObject(result);
+        // A taker's recipient is its own address: it locks ETH and later
+        // claims it back to itself (or is refunded to itself), so the
+        // generated key's own address is always the right default here.
+        setEthPrivateKey(valueString(obj, QStringLiteral("private_key")));
+        setEthRecipientAddress(valueString(obj, QStringLiteral("address")));
+        setSetupError(QString{});
+        validateConfig();
+        scheduleConfigSave();
+        fetchBalances();
+    });
+}
+
+void SwapUiPlugin::setupGenerateLezAccount()
+{
+    if (!m_swap) {
+        setErrorMessage(QStringLiteral("Swap client not ready"));
+        setStatus(errorMessage());
+        return;
+    }
+    m_swap->generateLezAccountAsync([this](QString result) {
+        const auto error = jsonError(result);
+        if (!error.isEmpty()) {
+            setSetupError(error);
+            setStatus(QStringLiteral("Failed to generate LEZ account: %1").arg(error));
+            return;
+        }
+        const auto obj = parseObject(result);
+        // Only the signing key is a config field (raw-key auth derives its
+        // account ID from it) — lezAccountId is the WALLET-mode field
+        // (paired with lezWalletHome) and stays untouched here; fetchBalances
+        // below is what surfaces the derived account ID (as lezAccount) for
+        // display, exactly like every other raw-key profile.
+        setLezSigningKey(valueString(obj, QStringLiteral("signing_key")));
+        setSetupError(QString{});
+        validateConfig();
+        scheduleConfigSave();
+        fetchBalances();
+    });
+}
+
+void SwapUiPlugin::setupStartFunding()
+{
+    if (!m_swap || setupRunning()) {
+        return;
+    }
+    if (lezSequencerUrl().trimmed().isEmpty() || lezSigningKey().trimmed().isEmpty()) {
+        setSetupError(QStringLiteral("Generate or import a LEZ account before funding"));
+        setStatus(setupError());
+        return;
+    }
+
+    setSetupRunning(true);
+    setSetupJobId(QString{});
+    setSetupError(QString{});
+    setSetupStep(QStringLiteral("Initializing"));
+    setSetupBalance(QString{});
+    setSetupClaims(0);
+    // 150 LEZ: exactly one native pinata claim. A taker mostly RECEIVES LEZ
+    // (it locks ETH and claims LEZ a maker already escrowed), so onboarding
+    // needs the account to exist and be initialized far more than it needs a
+    // big balance — see the fuller rationale on
+    // SwapImpl::startLezFundingJob / kDefaultSetupFundingTargetLez, which
+    // this mirrors so the two can't drift.
+    setSetupTarget(QStringLiteral("150"));
+    setStatus(QStringLiteral("Setting up your LEZ account..."));
+
+    m_swap->startLezFundingJobAsync(lezSequencerUrl(), lezSigningKey(), setupTarget(),
+                                    [this](QString result) {
+        const auto error = jsonError(result);
+        if (!error.isEmpty()) {
+            setSetupError(error);
+            setStatus(QStringLiteral("Failed to start LEZ setup: %1").arg(error));
+            setSetupRunning(false);
+            return;
+        }
+        // Late start-ack guard, mirroring handleJobStartResult's maker/taker
+        // handling: a fast lez_setup.finished may have already landed and
+        // cleared setupRunning before this ack arrived.
+        if (!setupRunning()) {
+            return;
+        }
+        setSetupJobId(jobIdFromResult(result));
+    });
+}
+
 void SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
 {
     setEthRecipientAddress(valueString(offer, QStringLiteral("maker_eth_address")));
@@ -979,6 +1098,11 @@ bool SwapUiPlugin::shouldHandleJobEvent(const QString& eventName, const QJsonObj
     const auto step = valueString(payload, QStringLiteral("step"));
     const auto payloadRole = valueString(payload, QStringLiteral("role"));
 
+    if (eventName.startsWith(QStringLiteral("lez_setup."))) {
+        activeJobId = setupJobId();
+        activeKind = QStringLiteral("setupJobId");
+    }
+
     QString expectedRole;
     bool active = false;
     if (eventName.startsWith(QStringLiteral("maker_loop."))) {
@@ -990,6 +1114,9 @@ bool SwapUiPlugin::shouldHandleJobEvent(const QString& eventName, const QJsonObj
     } else if (eventName.startsWith(QStringLiteral("taker."))) {
         expectedRole = QStringLiteral("taker");
         active = takerRunning();
+    } else if (eventName.startsWith(QStringLiteral("lez_setup."))) {
+        expectedRole = QStringLiteral("lez_setup");
+        active = setupRunning();
     } else {
         swapUiTrace(QStringLiteral("DROP event=%1 reason=unknown_event_name").arg(eventName));
         return false;
@@ -1265,6 +1392,31 @@ void SwapUiPlugin::handleAutoAcceptFinished(const QString& resultJson)
                     QStringLiteral("Auto-accept stopped"),
                     QStringLiteral("Auto-accept failed"));
     fetchBalancesFromLoadedEnv();
+}
+
+void SwapUiPlugin::handleSetupFundingFinished(const QString& resultJson)
+{
+    const auto error = jsonError(resultJson);
+    setSetupRunning(false);
+    setSetupJobId(QString{});
+    if (!error.isEmpty()) {
+        setSetupError(error);
+        setStatus(QStringLiteral("LEZ account setup failed: %1").arg(error));
+        return;
+    }
+
+    const auto obj = parseObject(resultJson);
+    if (obj.contains(QStringLiteral("balance"))) {
+        setSetupBalance(valueString(obj, QStringLiteral("balance")));
+    }
+    setSetupError(QString{});
+    setSetupStep(QStringLiteral("Done"));
+    setStatus(QStringLiteral("LEZ account ready"));
+    // Refresh the header's ethAddress/lezAccount/lezBalance display now that
+    // the account actually has funds — SetupView's own PROPs above only
+    // cover the in-progress job, not the post-funding balance readout the
+    // rest of the app already shows.
+    fetchBalances();
 }
 
 void SwapUiPlugin::handleJobStartResult(const QString& role, const QString& resultJson)
@@ -1627,9 +1779,11 @@ bool SwapUiPlugin::subscribeToSwapEvents()
         QStringLiteral("maker.progress"),
         QStringLiteral("taker.progress"),
         QStringLiteral("maker_loop.progress"),
+        QStringLiteral("lez_setup.progress"),
         QStringLiteral("maker.finished"),
         QStringLiteral("taker.finished"),
-        QStringLiteral("maker_loop.finished")
+        QStringLiteral("maker_loop.finished"),
+        QStringLiteral("lez_setup.finished")
     };
 
     for (const QString& eventName : eventNames) {
@@ -1712,6 +1866,25 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         } else if (step == QStringLiteral("EthLocked")) {
             const auto swapId = valueString(data, QStringLiteral("swap_id"));
             coordinationPublishTakerAccept(coordinationActiveHashlock(), swapId);
+        }
+        return;
+    }
+
+    if (eventName == QStringLiteral("lez_setup.progress")) {
+        if (!shouldHandleJobEvent(eventName, payload)) {
+            return;
+        }
+        // Steps mirror src/lez/onboard.rs::FundingProgress: Initializing,
+        // AlreadyInitialized, Initialized, CheckingBalance, Claimed,
+        // ClaimFailed, TargetReached. Surfacing the raw step name (rather
+        // than translating it) keeps SetupView.qml's progress text in sync
+        // with the Rust doc comments describing each phase.
+        setSetupStep(step);
+        if (data.contains(QStringLiteral("balance"))) {
+            setSetupBalance(valueString(data, QStringLiteral("balance")));
+        }
+        if (step == QStringLiteral("Claimed")) {
+            setSetupClaims(data.value(QStringLiteral("total_claims")).toInt(setupClaims() + 1));
         }
         return;
     }
@@ -1843,6 +2016,8 @@ void SwapUiPlugin::handleFinishedEvent(const QString& eventName, const QJsonObje
         handleTakerFinished(resultJson);
     } else if (eventName == QStringLiteral("maker_loop.finished")) {
         handleAutoAcceptFinished(resultJson);
+    } else if (eventName == QStringLiteral("lez_setup.finished")) {
+        handleSetupFundingFinished(resultJson);
     }
 }
 

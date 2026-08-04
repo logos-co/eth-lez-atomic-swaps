@@ -63,6 +63,10 @@ public:
 
     void resetConfig() override;
 
+    void setupGenerateEthKey() override;
+    void setupGenerateLezAccount() override;
+    void setupStartFunding() override;
+
 private:
     QString configJson() const;
     QString messagingConfigJson() const;
@@ -127,6 +131,7 @@ private:
     void handleTakerFinished(const QString& resultJson);
     void handleAutoAcceptFinished(const QString& resultJson);
     void handleJobStartResult(const QString& role, const QString& resultJson);
+    void handleSetupFundingFinished(const QString& resultJson);
     void startBackgroundServices();
     void pollMessagingStatus();
     void ensureMessagingReady(std::function<void()> continuation = {}, bool automatic = false);

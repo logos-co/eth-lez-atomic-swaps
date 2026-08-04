@@ -29,12 +29,29 @@ use lee::{
     public_transaction::{Message, WitnessSet},
 };
 use sequencer_service_protocol::LeeTransaction;
-use sequencer_service_rpc::{RpcClient as _, SequencerClient};
+use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuilder};
 use serde::Serialize;
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::config::LezAuth;
 use crate::lez::faucet;
+
+/// Build a bare [`SequencerClient`] from a URL string.
+///
+/// Onboarding callers (a not-yet-configured GUI setup flow, `swap-ffi`, the
+/// `onboard_maker_account` example) only have a sequencer URL and a freshly
+/// generated [`Signer`] — no full `SwapConfig` (no ETH side, no LEZ HTLC
+/// program ID yet, since neither exists before onboarding runs). Building a
+/// dummy `SwapConfig` just to reach [`crate::lez::client::LezClient`] would
+/// mean inventing unrelated fields; this mirrors `LezClient::from_raw_key`'s
+/// own client construction instead, so there is exactly one way sequencer
+/// clients get built in this codebase.
+pub fn sequencer_client(sequencer_url: &str) -> Result<SequencerClient, String> {
+    let url = url::Url::parse(sequencer_url).map_err(|e| format!("invalid sequencer URL: {e}"))?;
+    SequencerClientBuilder::default()
+        .build(url)
+        .map_err(|e| format!("failed to create sequencer client: {e}"))
+}
 
 /// How long [`ensure_initialized`] waits for a submitted `Initialize` to
 /// commit before giving up. Public-testnet blocks can be a minute or more
@@ -58,6 +75,16 @@ const MAX_CONSECUTIVE_CLAIM_FAILURES: u32 = 5;
 /// plain read that gates the loop.
 const BALANCE_READ_RETRIES: u32 = 3;
 const BALANCE_READ_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Bounded retries for a single `get_account` read in [`ensure_initialized`].
+/// Same rationale/values as [`BALANCE_READ_RETRIES`] (a separate constant
+/// because the two reads serve different callers, not because the tuning
+/// should differ) — live-verified necessary against the public testnet
+/// while building the onboarding flow: `get_account` timed out transiently
+/// on 2 of 3 real runs against `testnet.lez.logos.co`, both on the very
+/// first (previously unretried) read.
+const ACCOUNT_READ_RETRIES: u32 = 3;
+const ACCOUNT_READ_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// How many candidate keys [`Signer::generate`] will try before giving up.
 /// `PrivateKey::try_new` rejecting 32 cryptographically random bytes is
@@ -178,10 +205,25 @@ pub async fn ensure_initialized(
 ) -> Result<InitOutcome, String> {
     let program_id = programs::authenticated_transfer().id();
 
-    let existing = sequencer
-        .get_account(signer.account_id)
-        .await
-        .map_err(|e| format!("get_account failed: {e}"))?;
+    let existing = {
+        let mut last_err = String::new();
+        let mut result = None;
+        for attempt in 0..ACCOUNT_READ_RETRIES {
+            match sequencer.get_account(signer.account_id).await {
+                Ok(account) => {
+                    result = Some(account);
+                    break;
+                }
+                Err(e) => {
+                    last_err = format!("get_account failed: {e}");
+                    if attempt + 1 < ACCOUNT_READ_RETRIES {
+                        tokio::time::sleep(ACCOUNT_READ_RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+        result.ok_or_else(|| format!("{last_err} (after {ACCOUNT_READ_RETRIES} attempts)"))?
+    };
     if existing.program_owner == program_id {
         return Ok(InitOutcome::AlreadyInitialized);
     }
@@ -212,12 +254,16 @@ pub async fn ensure_initialized(
     // `ensure_initialized`'s own idempotency check reads.
     let deadline = tokio::time::Instant::now() + INIT_COMMIT_TIMEOUT;
     loop {
-        let account = sequencer
-            .get_account(signer.account_id)
-            .await
-            .map_err(|e| format!("get_account failed: {e}"))?;
-        if account.program_owner == program_id {
-            return Ok(InitOutcome::Initialized { tx_hash });
+        // A transient read error here is treated the same as "not yet
+        // committed" rather than aborting the whole confirmation wait: the
+        // deadline above already bounds how long this can run, and a single
+        // dropped request (measured against the public testnet) must not
+        // fail an Initialize that actually landed.
+        match sequencer.get_account(signer.account_id).await {
+            Ok(account) if account.program_owner == program_id => {
+                return Ok(InitOutcome::Initialized { tx_hash });
+            }
+            Ok(_) | Err(_) => {}
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
@@ -232,9 +278,13 @@ pub async fn ensure_initialized(
 // ── Faucet funding ──────────────────────────────────────────────────────
 
 /// Progress events emitted by [`claim_to_target`]. Serializable so a caller
-/// can forward these straight to a UI, mirroring `SwapProgress`.
+/// can forward these straight to a UI, mirroring `SwapProgress` — including
+/// its `#[serde(tag = "step", content = "data")]` wire shape (not just the
+/// derive), so `swap-ffi`/`swap-module`'s existing progress-envelope code
+/// (which reads a `step` key) forwards `lez_setup.progress` events exactly
+/// like `maker.progress`/`taker.progress` with no separate parsing path.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "event", content = "data")]
+#[serde(tag = "step", content = "data")]
 pub enum FundingProgress {
     /// Ensuring the account is initialized before any claim is attempted.
     Initializing,

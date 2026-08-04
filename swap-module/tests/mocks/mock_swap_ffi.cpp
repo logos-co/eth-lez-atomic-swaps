@@ -81,6 +81,33 @@ char* swap_ffi_default_lez_htlc_program_id()
     return copyJson("27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070");
 }
 
+char* swap_ffi_generate_eth_key()
+{
+    return copyJson(R"({"private_key":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","address":"0x1111111111111111111111111111111111111111"})");
+}
+
+char* swap_ffi_generate_lez_account()
+{
+    return copyJson(R"({"signing_key":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","account_id":"11111111111111111111111111111111"})");
+}
+
+char* swap_ffi_lez_ensure_initialized(const char*, const char*)
+{
+    return copyJson(R"({"outcome":"Initialized","data":{"tx_hash":"0xmockinit"}})");
+}
+
+char* swap_ffi_lez_claim_to_target(const char*, const char*, const char*, ProgressCallback cb, void* user_data)
+{
+    if (cb) {
+        cb(R"({"event":"Initializing"})", user_data);
+        cb(R"({"event":"CheckingBalance","data":{"balance":0,"target":150}})", user_data);
+        cb(R"({"event":"Claimed","data":{"tx_hash":"0xmockclaim","total_claims":1}})", user_data);
+        cb(R"({"event":"TargetReached","data":{"balance":150}})", user_data);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    return copyJson(R"({"balance":"150"})");
+}
+
 char* swap_ffi_fetch_balances(const char* config_json)
 {
     fetchBalancesCalls.fetch_add(1);

@@ -159,6 +159,14 @@ LOGOS_TEST(run_maker_forwards_progress_events) {
 }
 
 LOGOS_TEST(load_env_returns_config_json) {
+    // Pre-existing test-order bug, surfaced while adding the onboarding
+    // tests below: fetch_balances_from_env_returns_load_env_error_without_fetching
+    // sets the mock's global loadEnvShouldError flag and never clears it, so
+    // this test fails with "forced load env failure" whenever the test
+    // framework happens to run that one first. Not exercised by this test at
+    // all (it doesn't touch the error path), so reset defensively rather than
+    // rely on execution order across tests.
+    mock_swap_ffi_reset();
     SwapImpl impl;
     const auto config = impl.loadEnv(".env");
     LOGOS_ASSERT_CONTAINS(config, R"("eth_rpc_url")");
@@ -257,6 +265,74 @@ LOGOS_TEST(run_maker_emits_hashlock_in_eth_lock_detected) {
     LOGOS_ASSERT_CONTAINS(impl.runMaker("{}", ""), R"("method":"runMaker")");
     LOGOS_ASSERT_CONTAINS(progressData, R"("step":"EthLockDetected")");
     LOGOS_ASSERT_CONTAINS(progressData, R"("hashlock":")");
+}
+
+// ── Onboarding (generate/init/fund) ─────────────────────────────────────────
+
+LOGOS_TEST(generate_eth_key_returns_ffi_json) {
+    SwapImpl impl;
+    const auto result = impl.generateEthKey();
+    LOGOS_ASSERT_CONTAINS(result, R"("private_key":"0x)");
+    LOGOS_ASSERT_CONTAINS(result, R"("address":"0x)");
+}
+
+LOGOS_TEST(generate_lez_account_returns_ffi_json) {
+    SwapImpl impl;
+    const auto result = impl.generateLezAccount();
+    LOGOS_ASSERT_CONTAINS(result, R"("signing_key":")");
+    LOGOS_ASSERT_CONTAINS(result, R"("account_id":")");
+}
+
+LOGOS_TEST(lez_ensure_initialized_returns_ffi_json) {
+    SwapImpl impl;
+    const auto result = impl.lezEnsureInitialized("https://testnet.lez.logos.co", "aa");
+    LOGOS_ASSERT_CONTAINS(result, R"("outcome":"Initialized")");
+    LOGOS_ASSERT_CONTAINS(result, R"("tx_hash":")");
+}
+
+LOGOS_TEST(lez_funding_job_returns_status_and_finished_event) {
+    SwapImpl impl;
+    std::mutex mutex;
+    std::vector<std::string> events;
+    impl.emitEvent = [&](const std::string& name, const std::string& data) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back(name + ":" + data);
+    };
+
+    const auto started = impl.startLezFundingJob("https://testnet.lez.logos.co", "aa", "150");
+    LOGOS_ASSERT_CONTAINS(started, R"("ok":true)");
+    LOGOS_ASSERT_CONTAINS(started, R"("role":"lez_setup")");
+    const auto jobId = extractJobId(started);
+    LOGOS_ASSERT_FALSE(jobId.empty());
+    LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
+
+    LOGOS_ASSERT_TRUE(waitForEvent(mutex, events,
+                                   "lez_setup.progress:",
+                                   std::string{R"("job_id":")"} + jobId + R"(")"));
+    LOGOS_ASSERT_TRUE(waitForEvent(mutex, events, "lez_setup.finished:", R"("balance":"150")"));
+}
+
+LOGOS_TEST(conflicting_lez_funding_job_is_rejected) {
+    SwapImpl impl;
+    const auto first = impl.startLezFundingJob("https://testnet.lez.logos.co", "aa", "150");
+    const auto jobId = extractJobId(first);
+    LOGOS_ASSERT_FALSE(jobId.empty());
+
+    const auto second = impl.startLezFundingJob("https://testnet.lez.logos.co", "aa", "150");
+    LOGOS_ASSERT_CONTAINS(second, R"("ok":false)");
+    LOGOS_ASSERT_CONTAINS(second, "lez_setup job already running");
+    LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
+}
+
+LOGOS_TEST(lez_funding_job_defaults_empty_target_to_one_pinata_claim) {
+    SwapImpl impl;
+    // An empty target string falls back to kDefaultSetupFundingTargetLez
+    // (150 — one pinata claim); this just proves the job still starts and
+    // completes rather than rejecting an empty argument.
+    const auto started = impl.startLezFundingJob("https://testnet.lez.logos.co", "aa", "");
+    const auto jobId = extractJobId(started);
+    LOGOS_ASSERT_FALSE(jobId.empty());
+    LOGOS_ASSERT(waitForContains(impl, jobId, R"("status":"completed")"));
 }
 
 // Note: the rest of the API delegates straight into libswap_ffi.{dylib,so} which

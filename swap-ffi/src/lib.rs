@@ -18,7 +18,10 @@ use swap_orchestrator::{
         parse_program_id,
     },
     eth::client::EthClient,
-    lez::client::LezClient,
+    lez::{
+        client::LezClient,
+        onboard::{FundingProgress, Signer as LezSigner, claim_to_target, sequencer_client},
+    },
     ops::OpsLedger,
     swap::{
         maker::{AutoAcceptConfig, run_maker, run_maker_loop},
@@ -326,6 +329,37 @@ async fn drain_progress_forwarder(handle: Option<tokio::task::JoinHandle<()>>) {
     if let Some(handle) = handle {
         let _ = handle.await;
     }
+}
+
+/// Same shape as [`forward_progress`], for [`FundingProgress`] events (the
+/// onboarding funding job) rather than [`SwapProgress`] (maker/taker swaps).
+/// Kept separate rather than made generic: the two event enums are forwarded
+/// on entirely different job roles and a shared generic would buy nothing but
+/// an extra type parameter at every call site.
+fn forward_funding_progress(
+    cb: ProgressCallback,
+    user_data: *mut c_void,
+) -> (
+    Option<tokio::sync::mpsc::UnboundedSender<FundingProgress>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    let Some(cb) = cb else {
+        return (None, None);
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FundingProgress>();
+
+    let ud = user_data as usize;
+    let handle = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&progress)
+                && let Ok(c_str) = CString::new(json)
+            {
+                unsafe { cb(c_str.as_ptr(), ud as *mut c_void) };
+            }
+        }
+    });
+
+    (Some(tx), Some(handle))
 }
 
 // ---------------------------------------------------------------------------
@@ -842,6 +876,172 @@ pub extern "C" fn swap_ffi_default_lez_htlc_program_id() -> *mut c_char {
     to_c_string(LEZ_HTLC_PROGRAM_ID_HEX)
 }
 
+// ---------------------------------------------------------------------------
+// Onboarding: key generation + LEZ account init/funding
+// ---------------------------------------------------------------------------
+//
+// Replaces the worst part of first-run setup — hand-typing two private keys
+// and two long account IDs into the Config tab (see #87/#91) — with buttons.
+// No new crypto: ETH generation mirrors the existing `eth_private_key.parse()`
+// path at the top of this file (`PrivateKeySigner`), and LEZ account
+// creation/init/funding are thin wrappers over `src/lez/onboard.rs` (lifted
+// from `lez-mcp` in #77 and live-verified against the public testnet).
+
+/// Generate a fresh random ETH signing key. No network call.
+///
+/// Returns JSON `{"private_key":"0x...","address":"0x..."}`. The address is
+/// what a taker should publish as its own `eth_recipient_address` — it is
+/// the same key that will sign/claim its own ETH lock.
+///
+/// The returned pointer must be freed with `swap_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn swap_ffi_generate_eth_key() -> *mut c_char {
+    let signer = PrivateKeySigner::random();
+    let private_key = format!("0x{}", hex::encode(signer.to_bytes()));
+    let address = format!("{}", signer.address());
+    to_c_string(
+        &serde_json::json!({
+            "private_key": private_key,
+            "address": address,
+        })
+        .to_string(),
+    )
+}
+
+/// Generate a fresh LEZ signing key + its derived account ID. No network
+/// call — the account does not exist on-chain until
+/// `swap_ffi_lez_ensure_initialized` (or `swap_ffi_lez_claim_to_target`, which
+/// calls that first) runs.
+///
+/// Returns JSON `{"signing_key":"<64-char hex>","account_id":"<base58>"}`.
+///
+/// The returned pointer must be freed with `swap_ffi_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn swap_ffi_generate_lez_account() -> *mut c_char {
+    let signer = match LezSigner::generate() {
+        Ok(s) => s,
+        Err(e) => return json_err(&e),
+    };
+    to_c_string(
+        &serde_json::json!({
+            "signing_key": signer.signing_key.to_string(),
+            "account_id": account_id_to_base58(&signer.account_id),
+        })
+        .to_string(),
+    )
+}
+
+/// Idempotently ensure a LEZ account is initialized (owned by the
+/// `authenticated_transfer` program) on-chain. Safe to call at any time —
+/// checks on-chain ownership first and only submits a transaction if it
+/// isn't already initialized.
+///
+/// `swap_ffi_lez_claim_to_target` below also calls this first internally
+/// (see `src/lez/onboard.rs::claim_to_target`), so a caller that skips
+/// straight to funding still gets init-before-claim: that ordering guarantee
+/// lives in the Rust layer, not in whichever order a UI happens to call
+/// these two functions.
+///
+/// Returns JSON `{"outcome":"AlreadyInitialized"}` or
+/// `{"outcome":"Initialized","data":{"tx_hash":"..."}}` on success.
+///
+/// # Safety
+/// `sequencer_url` and `signing_key_hex` must be valid null-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_lez_ensure_initialized(
+    sequencer_url: *const c_char,
+    signing_key_hex: *const c_char,
+) -> *mut c_char {
+    let sequencer_url = match unsafe { c_str_to_str(sequencer_url) } {
+        Some(s) => s,
+        None => return json_err("null or invalid sequencer_url"),
+    };
+    let signing_key_hex = match unsafe { c_str_to_str(signing_key_hex) } {
+        Some(s) => s,
+        None => return json_err("null or invalid signing_key_hex"),
+    };
+
+    let signer = match LezSigner::from_raw_key(signing_key_hex) {
+        Ok(s) => s,
+        Err(e) => return json_err(&e),
+    };
+    let sequencer = match sequencer_client(sequencer_url) {
+        Ok(c) => c,
+        Err(e) => return json_err(&e),
+    };
+
+    runtime().block_on(async {
+        match swap_orchestrator::lez::onboard::ensure_initialized(&sequencer, &signer).await {
+            Ok(outcome) => match serde_json::to_string(&outcome) {
+                Ok(json) => to_c_string(&json),
+                Err(e) => json_err(&format!("failed to serialize outcome: {e}")),
+            },
+            Err(e) => json_err(&e),
+        }
+    })
+}
+
+/// Ensure a LEZ account is initialized, then claim from the native pinata
+/// faucet (150 LEZ/claim, CPU-bound proof-of-work) until its balance reaches
+/// `target_lez`. Blocks the calling thread until the target is reached or the
+/// funding loop aborts (5 consecutive claim failures) — callers on a UI
+/// thread must run this on a worker thread, exactly like
+/// `swap_ffi_run_maker`/`swap_ffi_run_taker`. Reports progress (each
+/// initialize/claim attempt) via `cb` if non-null; see
+/// `src/lez/onboard.rs::FundingProgress` for the event shapes.
+///
+/// Returns JSON `{"balance":"<final balance, decimal LEZ>"}` on success.
+///
+/// # Safety
+/// `sequencer_url`, `signing_key_hex` and `target_lez` must be valid
+/// null-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_lez_claim_to_target(
+    sequencer_url: *const c_char,
+    signing_key_hex: *const c_char,
+    target_lez: *const c_char,
+    cb: ProgressCallback,
+    user_data: *mut c_void,
+) -> *mut c_char {
+    let sequencer_url = match unsafe { c_str_to_str(sequencer_url) } {
+        Some(s) => s,
+        None => return json_err("null or invalid sequencer_url"),
+    };
+    let signing_key_hex = match unsafe { c_str_to_str(signing_key_hex) } {
+        Some(s) => s,
+        None => return json_err("null or invalid signing_key_hex"),
+    };
+    let target_str = match unsafe { c_str_to_str(target_lez) } {
+        Some(s) => s,
+        None => return json_err("null or invalid target_lez"),
+    };
+    let target: u128 = match target_str.trim().parse() {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid target_lez: {e}")),
+    };
+
+    let signer = match LezSigner::from_raw_key(signing_key_hex) {
+        Ok(s) => s,
+        Err(e) => return json_err(&e),
+    };
+    let sequencer = match sequencer_client(sequencer_url) {
+        Ok(c) => c,
+        Err(e) => return json_err(&e),
+    };
+
+    runtime().block_on(async {
+        let (progress, progress_forwarder) = forward_funding_progress(cb, user_data);
+        let result = match claim_to_target(&sequencer, &signer, target, progress).await {
+            Ok(balance) => {
+                to_c_string(&serde_json::json!({ "balance": balance.to_string() }).to_string())
+            }
+            Err(e) => json_err(&e),
+        };
+        drain_progress_forwarder(progress_forwarder).await;
+        result
+    })
+}
+
 /// Free a string previously returned by any `swap_ffi_*` function.
 ///
 /// # Safety
@@ -960,5 +1160,168 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
         let err = resolve_maker_state_file(None, &LezAuth::RawKey("aa".into())).unwrap_err();
         assert!(err.contains("MAKER_STATE_FILE"), "missing env remedy: {err}");
         assert!(err.contains("lez_wallet_home"), "missing wallet remedy: {err}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Onboarding FFI (generate/init/fund) — see swap_ffi_generate_eth_key,
+    // swap_ffi_generate_lez_account, swap_ffi_lez_ensure_initialized,
+    // swap_ffi_lez_claim_to_target above.
+    // ---------------------------------------------------------------------
+
+    /// Free-standing helper: read a C string returned by an FFI call and free
+    /// it, mirroring the C++ module's `takeAndFree`.
+    fn take_c_string(ptr: *mut c_char) -> String {
+        assert!(!ptr.is_null(), "FFI call returned a null pointer");
+        let s = unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .expect("FFI result was not valid UTF-8")
+            .to_string();
+        unsafe { swap_ffi_free_string(ptr) };
+        s
+    }
+
+    /// Pure, no-network: `swap_ffi_generate_eth_key` produces a well-formed
+    /// key/address pair. This is the one every fresh install hits first when
+    /// clicking "Generate new key", so it's covered unconditionally (unlike
+    /// the testnet-dependent test below).
+    #[test]
+    fn generate_eth_key_produces_well_formed_pair() {
+        let json = take_c_string(swap_ffi_generate_eth_key());
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let private_key = value["private_key"].as_str().unwrap();
+        let address = value["address"].as_str().unwrap();
+
+        assert!(private_key.starts_with("0x"));
+        assert_eq!(private_key.len(), 66, "expected 0x + 64 hex chars");
+        assert!(address.starts_with("0x"));
+        assert_eq!(address.len(), 42, "expected 0x + 40 hex chars");
+
+        // The generated key must actually parse back into a signer whose
+        // address matches what we returned — otherwise "Generate new key"
+        // would silently hand the UI an address it can never sign for.
+        let signer: PrivateKeySigner = private_key.parse().unwrap();
+        assert_eq!(format!("{}", signer.address()), address);
+
+        // Two calls must not collide (astronomically unlikely, but this is
+        // the whole point of "random").
+        let json2 = take_c_string(swap_ffi_generate_eth_key());
+        let value2: serde_json::Value = serde_json::from_str(&json2).unwrap();
+        assert_ne!(value["private_key"], value2["private_key"]);
+    }
+
+    /// Pure, no-network: `swap_ffi_generate_lez_account` produces a
+    /// well-formed signing key + account ID, and the pair is internally
+    /// consistent (the returned account_id is really derived from the
+    /// returned signing_key) — this is what `swap_ffi_lez_ensure_initialized`
+    /// and `swap_ffi_lez_claim_to_target` will be given by the UI, so a
+    /// mismatch here would silently onboard the wrong account.
+    #[test]
+    fn generate_lez_account_produces_well_formed_and_consistent_pair() {
+        let json = take_c_string(swap_ffi_generate_lez_account());
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let signing_key = value["signing_key"].as_str().unwrap();
+        let account_id = value["account_id"].as_str().unwrap();
+
+        assert_eq!(signing_key.len(), 64, "expected 64 hex chars, no 0x prefix");
+        assert!(!account_id.is_empty());
+
+        let signer = LezSigner::from_raw_key(signing_key).unwrap();
+        assert_eq!(account_id_to_base58(&signer.account_id), account_id);
+    }
+
+    /// LOAD-BEARING EVIDENCE: exercises the full new onboarding FFI surface
+    /// end to end against the REAL public LEZ testnet
+    /// (`https://testnet.lez.logos.co`, same endpoint the Config tab defaults
+    /// to) — generate a LEZ account, initialize it on-chain, and land at
+    /// least one real pinata claim, entirely through the `swap_ffi_*` C ABI
+    /// (not the underlying `src/lez/onboard.rs` functions directly), proving
+    /// the FFI plumbing (marshaling, progress callback, JSON shapes) and not
+    /// just the Rust logic beneath it.
+    ///
+    /// Ignored by default: needs network egress to the public testnet and
+    /// the pinata claim is CPU-bound proof-of-work (difficulty 3), so this is
+    /// slow (real chain block times, real PoW solve — often well over a
+    /// minute). Run explicitly:
+    ///   cargo test -p swap-ffi --lib -- --ignored onboarding_ffi_against_public_testnet
+    #[test]
+    #[ignore = "hits the real public LEZ testnet + does a CPU-bound PoW claim; run explicitly, see doc comment"]
+    fn onboarding_ffi_against_public_testnet() {
+        use std::sync::Mutex;
+
+        // 1) Generate an ETH key through the FFI surface (no network).
+        let eth_json = take_c_string(swap_ffi_generate_eth_key());
+        let eth: serde_json::Value = serde_json::from_str(&eth_json).unwrap();
+        println!("[onboarding_ffi] generated ETH address: {}", eth["address"]);
+
+        // 2) Generate a LEZ account through the FFI surface (no network).
+        let lez_json = take_c_string(swap_ffi_generate_lez_account());
+        let lez: serde_json::Value = serde_json::from_str(&lez_json).unwrap();
+        let signing_key = lez["signing_key"].as_str().unwrap().to_string();
+        let account_id = lez["account_id"].as_str().unwrap().to_string();
+        println!("[onboarding_ffi] generated LEZ account: {account_id}");
+
+        let sequencer_url = CString::new("https://testnet.lez.logos.co").unwrap();
+        let signing_key_c = CString::new(signing_key).unwrap();
+
+        // 3) Initialize it on-chain — the sequencer silently drops claims
+        // against a never-initialized account, so this MUST succeed before
+        // step 4 can mean anything.
+        let init_json = take_c_string(unsafe {
+            swap_ffi_lez_ensure_initialized(sequencer_url.as_ptr(), signing_key_c.as_ptr())
+        });
+        println!("[onboarding_ffi] init result: {init_json}");
+        assert!(
+            !init_json.contains("\"error\""),
+            "ensure_initialized failed: {init_json}"
+        );
+
+        // 4) Fund to 150 LEZ (exactly one pinata claim — see the funding
+        // target rationale on the C++ SwapImpl::startLezFundingJob doc
+        // comment), capturing every progress event through the C callback.
+        let captured: Box<Mutex<Vec<String>>> = Box::new(Mutex::new(Vec::new()));
+        let captured_ptr = Box::into_raw(captured);
+
+        extern "C" fn capture_progress(json: *const c_char, user_data: *mut c_void) {
+            let text = unsafe { CStr::from_ptr(json) }
+                .to_str()
+                .unwrap_or_default()
+                .to_string();
+            let mutex = unsafe { &*(user_data as *const Mutex<Vec<String>>) };
+            mutex.lock().unwrap().push(text);
+        }
+
+        let target = CString::new("150").unwrap();
+        let fund_json = take_c_string(unsafe {
+            swap_ffi_lez_claim_to_target(
+                sequencer_url.as_ptr(),
+                signing_key_c.as_ptr(),
+                target.as_ptr(),
+                Some(capture_progress),
+                captured_ptr as *mut c_void,
+            )
+        });
+
+        // Reclaim ownership so the Box is dropped (and to read the events).
+        let events = unsafe { Box::from_raw(captured_ptr) }.into_inner().unwrap();
+        for event in &events {
+            println!("[onboarding_ffi][progress] {event}");
+        }
+        println!("[onboarding_ffi] final funding result: {fund_json}");
+
+        assert!(
+            !fund_json.contains("\"error\""),
+            "claim_to_target failed: {fund_json}"
+        );
+        let result: serde_json::Value = serde_json::from_str(&fund_json).unwrap();
+        let balance: u128 = result["balance"].as_str().unwrap().parse().unwrap();
+        assert!(balance >= 150, "expected balance >= 150 LEZ, got {balance}");
+        assert!(
+            events.iter().any(|e| e.contains("\"Claimed\"")),
+            "expected at least one Claimed progress event with a real tx hash, got: {events:?}"
+        );
+
+        println!(
+            "[onboarding_ffi] SUCCESS: account {account_id} initialized and funded to {balance} LEZ on testnet.lez.logos.co"
+        );
     }
 }
