@@ -27,10 +27,15 @@ WORKDIR /build
 # circuit/rapidsnark artifacts over HTTPS at compile time (network build is
 # the normal non-nix dev flow for this repo — see .github/workflows/ci.yml).
 # pkg-config/libssl-dev: native TLS deps pulled in transitively.
+# python3-dev: risc0-zkvm's dependency tree links `pyo3`/`pyo3-ffi` against
+# libpython at compile time (unrelated to RISC0_SKIP_BUILD, which only
+# skips building the guest ELF, not this native link requirement) — without
+# it the final link step fails with "cannot find -lpython3.1x".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         pkg-config \
         libssl-dev \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Workspace manifests first (members = [".", "swap-ffi", "lez-mcp"] in
