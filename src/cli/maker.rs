@@ -427,8 +427,15 @@ async fn wait_for_shutdown_signal() {
 fn describe(event: &SwapProgress) -> String {
     match event {
         SwapProgress::WaitingForEthLock => "waiting for taker to lock ETH...".into(),
-        SwapProgress::EthLockDetected { swap_id, hashlock } => {
-            format!("ETH lock detected (swap {swap_id}, hashlock {hashlock})")
+        SwapProgress::EthLockDetected {
+            swap_id,
+            hashlock,
+            tx_hash,
+            chain_id,
+        } => {
+            format!(
+                "ETH lock detected (swap {swap_id}, hashlock {hashlock}, tx {tx_hash}, chain {chain_id})"
+            )
         }
         SwapProgress::EthLockRejected {
             swap_id,

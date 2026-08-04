@@ -42,8 +42,19 @@ sol! {
     }
 }
 
+/// Result of a successful [`EthClient::lock`] call: the swap ID extracted from
+/// the `Locked` event log, plus the transaction hash of the lock tx itself.
+/// The tx hash is what a consumer needs to link a receipt to a block explorer
+/// — `receipt.transaction_hash` was previously computed and thrown away.
+#[derive(Debug, Clone, Copy)]
+pub struct EthLockReceipt {
+    pub swap_id: FixedBytes<32>,
+    pub tx_hash: FixedBytes<32>,
+}
+
 pub struct EthClient {
     contract: EthHTLC::EthHTLCInstance<alloy::providers::DynProvider>,
+    chain_id: u64,
 }
 
 impl EthClient {
@@ -62,19 +73,30 @@ impl EthClient {
             .map_err(|e| SwapError::EthRpc(format!("WebSocket connect failed: {e}")))?
             .erased();
 
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .map_err(|e| SwapError::EthRpc(e.to_string()))?;
+
         let contract = EthHTLC::new(config.eth_htlc_address, provider);
 
-        Ok(Self { contract })
+        Ok(Self { contract, chain_id })
     }
 
-    /// Lock ETH into an HTLC. Returns the swap ID.
+    /// The chain ID of the connected ETH endpoint, so a consumer can tell a
+    /// Sepolia tx hash from an Anvil one when building an explorer link.
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Lock ETH into an HTLC. Returns the swap ID and the lock tx hash.
     pub async fn lock(
         &self,
         hashlock: [u8; 32],
         timelock: u64,
         recipient: Address,
         eth_amount: U256,
-    ) -> Result<FixedBytes<32>> {
+    ) -> Result<EthLockReceipt> {
         let receipt = self
             .contract
             .lock(hashlock.into(), U256::from(timelock), recipient)
@@ -94,7 +116,10 @@ impl EthClient {
             .find_map(|log| log.log_decode::<EthHTLC::Locked>().ok())
             .ok_or_else(|| SwapError::EthReverted("no Locked event in receipt".into()))?;
 
-        Ok(log.inner.data.swapId)
+        Ok(EthLockReceipt {
+            swap_id: log.inner.data.swapId,
+            tx_hash: receipt.transaction_hash,
+        })
     }
 
     /// Claim locked ETH by revealing the preimage. Returns the tx hash.

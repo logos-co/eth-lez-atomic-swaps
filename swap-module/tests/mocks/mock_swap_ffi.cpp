@@ -50,7 +50,7 @@ char* swap_ffi_run_maker(const char*, const char*, ProgressCallback cb, void* us
 {
     if (cb) {
         cb(R"({"step":"WaitingForEthLock"})", user_data);
-        cb(R"({"step":"EthLockDetected","data":{"swap_id":"0xabc","hashlock":"abababababababababababababababababababababababababababababababab"}})", user_data);
+        cb(R"({"step":"EthLockDetected","data":{"swap_id":"0xabc","hashlock":"abababababababababababababababababababababababababababababababab","tx_hash":"0xdeadbeef00000000000000000000000000000000000000000000000000dead","chain_id":31337}})", user_data);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return copyJson(R"({"ok":true,"method":"runMaker"})");
@@ -60,7 +60,7 @@ char* swap_ffi_run_taker(const char*, const char*, ProgressCallback cb, void* us
 {
     if (cb) {
         cb(R"({"step":"PreimageGenerated","data":{"hashlock":"abc"}})", user_data);
-        cb(R"({"step":"EthLocked","data":{"swap_id":"0xdef"}})", user_data);
+        cb(R"({"step":"EthLocked","data":{"swap_id":"0xdef","tx_hash":"0xbeefdead00000000000000000000000000000000000000000000000000beef","chain_id":31337}})", user_data);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return copyJson(R"({"ok":true,"method":"runTaker"})");
