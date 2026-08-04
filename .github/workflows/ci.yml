@@ -170,6 +170,14 @@ jobs:
         with:
           node-version: "22"
 
+      # The portable Basecamp bundle carries its Qt stack, but Qt's Linux
+      # platform support still loads the system OpenGL ABI at process start.
+      # ubuntu-latest does not include libOpenGL.so.0 by default.
+      - name: Install Basecamp system runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libopengl0
+
       - name: Install modules and run Basecamp-native UI smoke test
         run: make basecamp-ui-smoke
 
