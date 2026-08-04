@@ -61,8 +61,54 @@ pinned code).
 | LEZ sequencer RPC | `https://testnet.lez.logos.co` |
 | LEZ HTLC program ID (guest ImageID) | `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` |
 | LEZ HTLC deployment tx | `c1986c2af3fc007731533d958995507c8d8b1f447d5187cc1b8967ec238c7bf9` |
-| EthHTLC contract (Sepolia) | `0x8636Fe66DFee166589a913140f14d5F57394834A` (minTimelockDelta=300s) |
+| EthHTLC contract (Sepolia) | `0x351B0EA07739FA9F6769213927D7836a790A5FAF` (minTimelockDelta=300s, INTERFACE_VERSION=2) |
 | ETH RPC (app requires WebSocket) | `wss://ethereum-sepolia-rpc.publicnode.com` |
+
+### EthHTLC Sepolia deployment record
+
+| Field | Value |
+|---|---|
+| Address | `0x351B0EA07739FA9F6769213927D7836a790A5FAF` |
+| Deploy tx | `0x9ce42d59b141d8fd1759e2f288f11837dca335bb6cd4466e8fd9330c2b25e68f` |
+| Block number | `11417462` |
+| chainId | `11155111` (Sepolia) |
+| `minTimelockDelta` | `300` (seconds) |
+| `INTERFACE_VERSION` | `2` |
+| `lock` signature | `lock(bytes32,uint256,address,bytes32)` |
+| Source commit | `d794f04` |
+| Deployer | `0xc5156296EA9EDF5a5dAc28f4dAdE608b3d8b0a3c` |
+| Gas used | `1162723` |
+| Deployed | 2026-08-04 |
+
+Verified on-chain at deploy time:
+
+```console
+$ cast call 0x351B0EA07739FA9F6769213927D7836a790A5FAF "INTERFACE_VERSION()(uint256)" \
+    --rpc-url https://ethereum-sepolia-rpc.publicnode.com
+2
+$ cast call 0x351B0EA07739FA9F6769213927D7836a790A5FAF "minTimelockDelta()(uint256)" \
+    --rpc-url https://ethereum-sepolia-rpc.publicnode.com
+300
+```
+
+#### Superseded: v1 deployment
+
+`0x8636Fe66DFee166589a913140f14d5F57394834A` (block 11316985) is the previous
+deployment and is **not** interchangeable with the one above: adding
+`takerLezAccount` to `lock()` changed both `lock`'s selector and `Locked`'s
+topic0. A client on the wrong side of that change does not error — it goes
+deaf, because an unmatched log filter returns an empty list rather than a
+failure, and the maker would wait forever while takers burn their timelocks.
+
+That is why v2 ships an `INTERFACE_VERSION` getter and every client reads it
+once at startup. The old contract has no such getter, so the probe reverts and
+a stale client fails loudly instead of hanging:
+
+```console
+$ cast call 0x8636Fe66DFee166589a913140f14d5F57394834A "INTERFACE_VERSION()(uint256)" \
+    --rpc-url https://ethereum-sepolia-rpc.publicnode.com
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+```
 
 ## Setting up a swap peer
 
@@ -96,7 +142,7 @@ pinned code).
 ```sh
 ETH_RPC_URL=wss://ethereum-sepolia-rpc.publicnode.com
 ETH_PRIVATE_KEY=<hex, no 0x>
-ETH_HTLC_ADDRESS=0x8636Fe66DFee166589a913140f14d5F57394834A
+ETH_HTLC_ADDRESS=0x351B0EA07739FA9F6769213927D7836a790A5FAF
 LEZ_SEQUENCER_URL=https://testnet.lez.logos.co
 LEZ_WALLET_HOME=<abs path to wallet home>
 LEZ_ACCOUNT_ID=<this peer's base58 account id>

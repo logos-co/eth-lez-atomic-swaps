@@ -172,7 +172,7 @@ QString defaultEthHtlcAddress()
 {
     const QString override = qEnvironmentVariable("SWAP_UI_ETH_HTLC_ADDRESS");
     return override.isEmpty()
-        ? QStringLiteral("0x8636Fe66DFee166589a913140f14d5F57394834A")
+        ? QStringLiteral("0x351B0EA07739FA9F6769213927D7836a790A5FAF")
         : override;
 }
 

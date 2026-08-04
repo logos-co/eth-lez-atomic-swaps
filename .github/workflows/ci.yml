@@ -60,10 +60,36 @@ jobs:
         run: cargo check -p swap-ffi --locked
 
       # Workspace unit tests (swap-orchestrator, swap-ffi, lez-mcp lib
-      # targets). --lib keeps the localnet/anvil integration tests (tests/,
-      # `demo` feature) out of scope.
+      # targets). --lib keeps the localnet integration tests (which need a
+      # scaffold LEZ sequencer, and are #[ignore]d) out of scope.
       - name: cargo test (lib targets)
         run: cargo test --lib --locked
+
+      # Foundry gives us `forge` (to produce contracts/out/EthHTLC.sol, which
+      # the artifact-backed sol! macros read at COMPILE time) and `anvil` (the
+      # local chain the two suites below drive).
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: forge build (ABI artifacts for the sol! macros)
+        run: cd contracts && forge build
+
+      - name: forge test (contract invariants)
+        run: cd contracts && forge test
+
+      # The anvil-backed suites. These need no LEZ sequencer, so unlike
+      # tests/e2e_swap.rs they can gate every PR — and they are what stops a
+      # silent ABI/binding regression:
+      #
+      #   taker_binding  — the taker's LEZ account must survive intact from its
+      #                    own ETH lock, through the Locked log and the watcher
+      #                    decode, into the LEZ Lock instruction's taker_id.
+      #                    A maker that loses it locks funds nobody can claim.
+      #   eth_integration — lock/claim/refund, the Locked event's
+      #                    takerLezAccount round trip, swapId distinctness for
+      #                    one hashlock, and the INTERFACE_VERSION handshake.
+      - name: cargo test (anvil integration)
+        run: cargo test --locked --test taker_binding --test eth_integration
 
   module-build:
     name: module-build (nix build swap-ui#lgx-portable)
