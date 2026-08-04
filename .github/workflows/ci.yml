@@ -67,12 +67,13 @@ jobs:
 
   module-build:
     name: module-build (nix build swap-ui#lgx)
-    # aarch64-darwin on purpose, NOT linux: the swap-ffi derivation in
-    # swap-module/flake.nix only pins real circuits/rapidsnark hashes for
-    # aarch64-darwin (everything else is lib.fakeSha256), so the linux `lgx`
-    # attrs evaluate but cannot build — the same reason the release
-    # workflows are darwin-arm64 only. Widen to a linux leg once issue #32
-    # (pin the linux artifact hashes) lands.
+    # aarch64-darwin here specifically to keep this PR-time job cheap and
+    # fast; it is no longer the only buildable platform. Issue #32 (PR #53)
+    # pinned real circuits/rapidsnark hashes for linux-amd64 and linux-arm64
+    # too, and .github/workflows/build-modules.yml now compiles both
+    # modules on all three variants (incl. two Linux runners) on every
+    # push/PR — that job is the one that actually proves Linux builds.
+    # This job stays darwin-only as a fast single-variant smoke check.
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
