@@ -96,6 +96,36 @@ pub struct MakerArgs {
     /// tops up before the loop starts.
     #[arg(long, env = "FUND_TO_TARGET", value_name = "TARGET")]
     fund_to: Option<u128>,
+
+    /// Read `--status-file` and assert on it, then exit 0 (healthy) or
+    /// non-zero with a reason (unhealthy) — this is the docker healthcheck
+    /// entry point (issue #93). Deliberately NOT a liveness proxy: a process
+    /// that is merely alive but whose last confirmed offer publish is stale,
+    /// or whose offer-publisher sidecar is dead, is reported unhealthy. Takes
+    /// priority over every other mode.
+    #[arg(long)]
+    status: bool,
+
+    /// Where the standing loop writes its periodic health snapshot (rewritten
+    /// every ~15s) and where `--status` reads it from. Defaults to
+    /// `maker-status.json` next to `--state-file`.
+    #[arg(long, env = "MAKER_STATUS_FILE")]
+    status_file: Option<String>,
+
+    /// Background low-water top-up interval (seconds) for the standing loop:
+    /// every this many seconds, check the LEZ balance and — if below
+    /// `--fund-low-water` — claim from the pinata faucet up to that mark.
+    /// Runs independently of the swap-accept loop, so running out of
+    /// inventory mid-campaign no longer requires an operator to notice and
+    /// restart the process by hand (issue #93 point 3).
+    #[arg(long, env = "FUND_CHECK_SECS", default_value_t = 300)]
+    fund_check_secs: u64,
+
+    /// Low-water mark (LEZ) that triggers the background top-up above.
+    /// Defaults to 3x the offer's `--lez-amount` when unset — enough runway
+    /// for a few more swaps before the maker would otherwise refuse a new one.
+    #[arg(long, env = "FUND_LOW_WATER")]
+    fund_low_water: Option<u128>,
 }
 
 pub async fn cmd_maker(
@@ -104,6 +134,13 @@ pub async fn cmd_maker(
     timelock_minutes: (Option<u64>, Option<u64>),
     json: bool,
 ) -> Result<()> {
+    // Healthcheck entry point (issue #93): read-only, no network clients, no
+    // config validation beyond what already happened while parsing `config`.
+    // Takes priority over every other mode.
+    if args.status {
+        return cmd_maker_status(&args);
+    }
+
     // Faucet-only sidecar mode: fund to target, then exit.
     if let Some(target) = args.fund_to
         && !args.loop_mode
@@ -146,6 +183,102 @@ pub async fn cmd_maker(
     let outcome = run_maker(config, &eth_client, &lez_client, hashlock, None, None, None).await?;
 
     output::print_swap_outcome(&outcome, json);
+    Ok(())
+}
+
+/// `swap-cli maker --status`: read `--status-file` and assert on it. This is
+/// the docker healthcheck's `test` command (see `deploy/docker-compose.yml`).
+/// Exits 0 (via `Ok`) when healthy, non-zero (via `Err`, printed by `main`)
+/// with an actionable reason otherwise. See issue #93 for why this exists —
+/// the healthcheck it replaces asserted against a status file that was never
+/// written, so it was permanently red regardless of whether the bot was
+/// actually working.
+fn cmd_maker_status(args: &MakerArgs) -> Result<()> {
+    let path = args
+        .status_file
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| bot::default_status_file(&args.state_file));
+
+    let status = bot::read_status_file(&path).map_err(|e| {
+        SwapError::InvalidConfig(format!(
+            "unhealthy: {e} (no status file yet — the loop hasn't completed its first ~15s \
+             write cycle, or the writer is dead)"
+        ))
+    })?;
+
+    let now_ms = crate::swap::refund::now_unix() * 1000;
+    let now_secs = now_ms / 1000;
+
+    // The writer itself must be alive: a wedged/crashed process leaves a
+    // status file that simply stops updating, independent of anything it last
+    // recorded.
+    let writer_age_secs = now_secs.saturating_sub(status.updated_at);
+    let max_writer_age_secs = 3 * bot::STATUS_WRITE_INTERVAL_SECS;
+    if writer_age_secs > max_writer_age_secs {
+        return Err(SwapError::InvalidConfig(format!(
+            "unhealthy: status file last updated {writer_age_secs}s ago (max {max_writer_age_secs}s) \
+             — the maker loop is likely wedged or dead"
+        )));
+    }
+
+    // Offer-publish freshness — only meaningful when publishing is enabled
+    // (`--heartbeat-secs 0` disables it deliberately, e.g. for a restricted
+    // test deployment with no board presence).
+    if args.heartbeat_secs > 0 {
+        if !status.publisher_alive {
+            return Err(SwapError::InvalidConfig(
+                "unhealthy: offer-publisher sidecar is not alive — offers are not being \
+                 broadcast to the fleet"
+                    .into(),
+            ));
+        }
+        let max_publish_age_ms = 3 * args.heartbeat_secs * 1000;
+        match status.last_offer_publish_ms {
+            Some(last) => {
+                let age_ms = now_ms.saturating_sub(last);
+                if age_ms > max_publish_age_ms {
+                    return Err(SwapError::InvalidConfig(format!(
+                        "unhealthy: last confirmed offer publish was {}s ago (max {}s = 3x \
+                         --heartbeat-secs) — the fleet connection is likely wedged",
+                        age_ms / 1000,
+                        max_publish_age_ms / 1000
+                    )));
+                }
+            }
+            None => {
+                let since_start_ms = now_ms.saturating_sub(status.started_at * 1000);
+                if since_start_ms > max_publish_age_ms {
+                    return Err(SwapError::InvalidConfig(format!(
+                        "unhealthy: no confirmed offer publish {}s after startup (max {}s)",
+                        since_start_ms / 1000,
+                        max_publish_age_ms / 1000
+                    )));
+                }
+            }
+        }
+    }
+
+    if matches!(status.loop_state.as_str(), "stopped" | "cancelled") {
+        return Err(SwapError::InvalidConfig(format!(
+            "unhealthy: maker loop state is '{}' — the standing loop has exited",
+            status.loop_state
+        )));
+    }
+
+    let summary = serde_json::json!({
+        "healthy": true,
+        "loop_state": status.loop_state,
+        "completed": status.completed,
+        "failed": status.failed,
+        "in_flight": status.in_flight,
+        "quarantined": status.quarantined,
+        "lez_balance": status.lez_balance,
+        "eth_balance_wei": status.eth_balance_wei,
+        "last_offer_publish_ms": status.last_offer_publish_ms,
+        "publisher_alive": status.publisher_alive,
+    });
+    println!("{summary}");
     Ok(())
 }
 
@@ -266,7 +399,12 @@ async fn cmd_maker_loop(
 
     // Free-inventory guard: recovery is complete and the journal is empty, so a
     // shortfall now means we genuinely cannot fund a swap — refuse to start.
-    let balance = lez_client.get_balance(&maker_account).await?;
+    // Bounded-retried on the READ itself (issue #93 point 2): a transient
+    // sequencer error (e.g. a request timeout) is not the same thing as
+    // "reachable and genuinely under-funded" — only the latter is a hard
+    // startup failure below. Without this retry a single sequencer blip
+    // crash-looped the whole process under `restart: unless-stopped`.
+    let balance = bot::read_startup_balance_with_retry(&lez_client, &maker_account).await?;
     if balance < config.lez_amount {
         return Err(SwapError::InvalidConfig(format!(
             "insufficient LEZ inventory: balance {balance} < offer amount {}; \
@@ -276,6 +414,16 @@ async fn cmd_maker_loop(
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
+
+    // Status file (issue #93 point 1): resolved once, written every ~15s by
+    // `spawn_status_writer`, read and asserted on by `swap-cli maker --status`
+    // (the docker healthcheck).
+    let status_file_path = args
+        .status_file
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| bot::default_status_file(&args.state_file));
+    let status = Arc::new(bot::StatusState::new(crate::swap::refund::now_unix()));
 
     // Ctrl-C (SIGINT) or SIGTERM → graceful stop between/within iterations.
     // Handling SIGTERM matters for `systemctl stop` / container shutdown:
@@ -314,6 +462,7 @@ async fn cmd_maker_loop(
                     env,
                     args.heartbeat_secs,
                     cancel.clone(),
+                    status.clone(),
                 ))
             }
             Some(script) => {
@@ -333,6 +482,27 @@ async fn cmd_maker_loop(
         }
     };
 
+    // Periodic status-file writer (issue #93 point 1) and background LEZ
+    // low-water top-up (issue #93 point 3) — both independent of the
+    // swap-accept loop below, so a wedge in one never masks the other.
+    let fund_low_water = args
+        .fund_low_water
+        .unwrap_or_else(|| config.lez_amount.saturating_mul(3));
+    let status_writer_handle = bot::spawn_status_writer(
+        config.clone(),
+        status.clone(),
+        store.clone(),
+        status_file_path.clone(),
+        maker_account,
+        cancel.clone(),
+    );
+    let fund_topper_handle = bot::spawn_fund_topper(
+        config.clone(),
+        args.fund_check_secs,
+        fund_low_water,
+        cancel.clone(),
+    );
+
     if !json {
         println!(
             "Maker loop started: {} LEZ -> {} wei per swap, timelocks LEZ {}m / ETH {}m, \
@@ -346,17 +516,21 @@ async fn cmd_maker_loop(
     // it only on a confirmed terminal state, via the SwapJournal handle passed
     // into run_maker_loop (P1-4/P1-5). A print-only drain cannot race the lock.
     let (tx, mut rx) = mpsc::unbounded_channel::<SwapProgress>();
-    let drain = tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if json {
-                if let Ok(line) = serde_json::to_string(&event) {
-                    println!("{line}");
+    let drain = {
+        let status = status.clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                note_status_from_progress(&status, &event);
+                if json {
+                    if let Ok(line) = serde_json::to_string(&event) {
+                        println!("{line}");
+                    }
+                } else {
+                    println!("[maker-loop] {}", describe(&event));
                 }
-            } else {
-                println!("[maker-loop] {}", describe(&event));
             }
-        }
-    });
+        })
+    };
 
     let auto_config = AutoAcceptConfig {
         lez_timelock_minutes: lez_minutes,
@@ -378,6 +552,21 @@ async fn cmd_maker_loop(
     cancel.store(true, Ordering::Relaxed);
     if let Some(handle) = publisher_handle {
         handle.abort(); // kill_on_drop reaps the node child
+    }
+    status_writer_handle.abort();
+    fund_topper_handle.abort();
+    // Write a final snapshot immediately rather than leaving the last
+    // periodic write (up to STATUS_WRITE_INTERVAL_SECS stale) to imply the
+    // loop is still running — `--status` treats `stopped`/`cancelled` as
+    // unhealthy, and that should be visible the moment the process actually
+    // stops, not up to 15s later.
+    status.set_loop_state("stopped");
+    let final_snapshot = status.snapshot(store.snapshot().len(), store.quarantined_snapshot().len());
+    if let Err(e) = bot::write_status_file(&status_file_path, &final_snapshot) {
+        warn!(
+            "failed to write final status snapshot to {}: {e}",
+            status_file_path.display()
+        );
     }
 
     // (Resumed in-flight swaps were already drained before the loop started, so
@@ -425,6 +614,40 @@ async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Feed the standing loop's progress events into the shared
+/// [`bot::StatusState`] so the periodic status-file writer (and, downstream,
+/// `swap-cli maker --status`) reflect what the loop is actually doing, not
+/// just that the process is alive (issue #93).
+fn note_status_from_progress(status: &bot::StatusState, event: &SwapProgress) {
+    match event {
+        SwapProgress::AutoAcceptStarted => status.set_loop_state("starting"),
+        SwapProgress::AutoAcceptIteration { .. } => status.set_loop_state("waiting_for_taker"),
+        SwapProgress::EthLockDetected { .. } | SwapProgress::LezLocking => {
+            status.set_loop_state("locking_lez")
+        }
+        SwapProgress::LezLocked { .. } | SwapProgress::WaitingForPreimage => {
+            status.set_loop_state("waiting_for_claim")
+        }
+        SwapProgress::PreimageRevealed { .. } | SwapProgress::ClaimingEth => {
+            status.set_loop_state("claiming_eth")
+        }
+        SwapProgress::AutoAcceptSwapCompleted { .. } => {
+            status.incr_completed();
+            status.set_loop_state("waiting_for_taker");
+        }
+        SwapProgress::AutoAcceptSwapFailed { .. } => {
+            status.incr_failed();
+            status.set_loop_state("waiting_for_taker");
+        }
+        SwapProgress::AutoAcceptInsufficientFunds { .. } => {
+            status.set_loop_state("insufficient_funds_waiting")
+        }
+        SwapProgress::AutoAcceptCancelled => status.set_loop_state("cancelled"),
+        SwapProgress::AutoAcceptStopped { .. } => status.set_loop_state("stopped"),
+        _ => {}
     }
 }
 
@@ -485,8 +708,8 @@ fn describe(event: &SwapProgress) -> String {
             lez_balance,
             lez_required,
         } => format!(
-            "out of LEZ inventory ({lez_balance} < {lez_required}) — loop stopping; \
-             top up with --fund-to"
+            "out of LEZ inventory ({lez_balance} < {lez_required}) — waiting for the background \
+             fund-topper (--fund-check-secs / --fund-low-water) instead of stopping"
         ),
         SwapProgress::AutoAcceptStopped {
             total_completed,

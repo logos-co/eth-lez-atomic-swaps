@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use alloy::primitives::{FixedBytes, U256};
 use lee_core::account::AccountId;
@@ -261,6 +262,13 @@ pub fn classify_candidate(
     }
     CandidateDisposition::Accept
 }
+
+/// How long the auto-accept loop waits before re-checking the balance after
+/// an `AutoAcceptInsufficientFunds` iteration (issue #93 point 3). Distinct
+/// from `poll_interval` (2s default): re-checking that fast would hammer the
+/// sequencer for no reason while waiting on a background top-up that runs on
+/// a multi-minute cadence (`--fund-check-secs`, default 300s).
+const INSUFFICIENT_FUNDS_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Wait until the cancel flag is set. Returns immediately if the flag is already set.
 /// If `cancel` is `None`, pends forever (no cancellation configured).
@@ -816,7 +824,23 @@ pub async fn run_maker_loop(
                         lez_required: fresh_config.lez_amount.to_string(),
                     },
                 );
-                break;
+                // Do NOT break (issue #93 point 3): under `restart:
+                // unless-stopped`, exiting here turned "ran out of LEZ
+                // inventory" into a silent crash loop that never refilled —
+                // the process would exit, restart, immediately hit the same
+                // shortfall, and exit again, with no offers on the board the
+                // whole time. The CLI layer runs an independent background
+                // top-up (`cli::bot::spawn_fund_topper`) that claims from the
+                // pinata faucet whenever the balance drops below a low-water
+                // mark; this loop just waits for that to land and re-checks.
+                warn!(
+                    balance = %balance,
+                    required = %fresh_config.lez_amount,
+                    "maker-loop: insufficient LEZ inventory — waiting for the background \
+                     fund-topper instead of exiting"
+                );
+                tokio::time::sleep(INSUFFICIENT_FUNDS_RETRY_DELAY).await;
+                continue;
             }
             Err(e) => {
                 failed += 1;

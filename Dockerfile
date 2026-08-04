@@ -83,8 +83,10 @@ COPY offer-publisher/fleet.mjs offer-publisher/publish-offer.mjs ./
 ########################################
 FROM node:22-bookworm-slim AS runtime
 
-# procps: gives the compose healthcheck a `pgrep` to check swap-cli liveness
-# with (bookworm-slim ships neither procps nor a /proc-walking alternative).
+# procps: retained for operator convenience (manual `docker exec ... pgrep`
+# debugging) even though the healthcheck itself no longer uses it — see below,
+# it now runs `swap-cli maker --status` against the status file (issue #93)
+# instead of a bare liveness `pgrep`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         tini \
@@ -109,6 +111,7 @@ WORKDIR /app
 USER maker
 
 ENV MAKER_STATE_FILE=/app/state/.maker-state.json \
+    MAKER_STATUS_FILE=/app/state/maker-status.json \
     OFFER_PUBLISHER_SCRIPT=/app/offer-publisher/publish-offer.mjs \
     RUST_LOG=info
 

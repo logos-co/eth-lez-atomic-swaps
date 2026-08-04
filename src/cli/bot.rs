@@ -19,14 +19,16 @@
 //!   until the maker balance reaches a target. No external `wallet` binary.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::FixedBytes;
+use alloy::providers::Provider;
 use lee::AccountId;
 use lee_core::program::ProgramId;
 use lez_htlc_program::{HTLCEscrow, HTLCState};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -36,6 +38,13 @@ use crate::eth::client::EthClient;
 use crate::lez::client::{LezClient, RefundOutcome};
 use crate::lez::watcher::{self as lez_watcher, LezHtlcEvent};
 use crate::swap::refund::now_unix;
+
+/// Current Unix time in milliseconds (second-granularity `now_unix` scaled
+/// up). Good enough for the status file's staleness checks, which operate on
+/// tens-of-seconds thresholds — no need for a real sub-second clock.
+fn now_unix_ms() -> u64 {
+    now_unix() * 1000
+}
 
 // ---------------------------------------------------------------------------
 // Timelock / inventory guards
@@ -77,6 +86,48 @@ pub const TIMELOCK_TRANSIT_SLACK_MINUTES: u64 = 2;
 /// runtime gate re-anchors the LEZ expiry at match time, so a boundary-exact
 /// config would start cleanly and then reject every single ETH lock (see the
 /// slack constant's doc for the arithmetic).
+/// Bounded retries for the STARTUP free-inventory balance read in `maker
+/// --loop` (issue #93 point 2). A transient sequencer error (a timeout, a
+/// dropped connection) is NOT the same thing as "reachable and genuinely
+/// under-funded" — the latter is a successful read that just reports a low
+/// number, and is intentionally NOT retried by this function (the caller
+/// still hard-fails on it, immediately). This only retries the `Err` case,
+/// mirroring the retry `claim_to_target` got in #77.
+///
+/// Live-observed on the VPS: two consecutive `get_account_balance` timeouts
+/// followed by a successful third attempt. Without this retry, a single-shot
+/// startup read turned a sub-second sequencer blip into a crash loop (the
+/// whole process exits, `restart: unless-stopped` restarts it, and it can hit
+/// the same blip again) with no offers on the board in between.
+const STARTUP_BALANCE_READ_ATTEMPTS: u32 = 5;
+const STARTUP_BALANCE_READ_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+pub async fn read_startup_balance_with_retry(
+    lez_client: &LezClient,
+    account: &lee::AccountId,
+) -> Result<u128> {
+    let mut delay = STARTUP_BALANCE_READ_INITIAL_DELAY;
+    let mut last_err = None;
+    for attempt in 1..=STARTUP_BALANCE_READ_ATTEMPTS {
+        match lez_client.get_balance(account).await {
+            Ok(balance) => return Ok(balance),
+            Err(e) => {
+                warn!(
+                    "startup balance read failed (attempt {attempt}/{STARTUP_BALANCE_READ_ATTEMPTS}): \
+                     {e} — retrying (this means the sequencer could not be reached, NOT that the \
+                     account is under-funded)"
+                );
+                last_err = Some(e);
+                if attempt < STARTUP_BALANCE_READ_ATTEMPTS {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                }
+            }
+        }
+    }
+    Err(last_err.expect("loop runs at least once, so an all-Err path always sets this"))
+}
+
 pub fn validate_timelocks(lez_minutes: u64, eth_minutes: u64, margin_minutes: u64) -> Result<()> {
     if margin_minutes < 5 {
         return Err(SwapError::InvalidConfig(format!(
@@ -1256,11 +1307,18 @@ async fn wait_for_cancel(cancel: &AtomicBool) {
     }
 }
 
+/// Spawn and supervise the long-lived Node.js lightpush sidecar, wired into
+/// `status` so `swap-cli maker --status` can tell "the offer publisher process
+/// exists" apart from "the offer publisher actually got an offer accepted by
+/// the fleet" (issue #93 point 1 — a liveness proxy that passes whenever the
+/// process is running is exactly the kind of check that trained everyone to
+/// ignore the healthcheck in the first place).
 pub fn spawn_offer_publisher(
     script: PathBuf,
     env: OfferPublisherEnv,
     heartbeat_secs: u64,
     cancel: Arc<AtomicBool>,
+    status: Arc<StatusState>,
 ) -> tokio::task::JoinHandle<()> {
     let env_vars = env.to_env(heartbeat_secs);
     tokio::spawn(async move {
@@ -1275,17 +1333,38 @@ pub fn spawn_offer_publisher(
             let mut cmd = tokio::process::Command::new("node");
             cmd.arg(&script)
                 .envs(env_vars.iter().cloned())
+                .stdout(std::process::Stdio::piped())
                 .kill_on_drop(true);
             match cmd.spawn() {
                 Ok(mut child) => {
+                    status.set_publisher_alive(true);
+                    // Pipe + re-print stdout (preserves `docker logs`
+                    // visibility for the [offer-publisher] lines) while
+                    // watching for a CONFIRMED publish — "offer published (N
+                    // peer(s))" is only logged after the fleet accepts the
+                    // lightpush send, which is the actual signal the
+                    // healthcheck needs, not merely that the child is up.
+                    let reader = child.stdout.take().map(|stdout| {
+                        let status = status.clone();
+                        tokio::spawn(async move {
+                            let mut lines = BufReader::new(stdout).lines();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                println!("{line}");
+                                if line.contains("offer published (") {
+                                    status.note_offer_publish(now_unix_ms());
+                                }
+                            }
+                        })
+                    });
+
                     // Race the child against cancellation. On SIGTERM/stop we must
                     // KILL and REAP the child immediately — otherwise the Node
                     // sidecar is orphaned and keeps advertising an offline maker
                     // (relying on kill_on_drop alone can race process teardown).
                     tokio::select! {
-                        status = child.wait() => match status {
-                            Ok(status) => {
-                                warn!("offer publisher exited ({status}); restarting in 30s")
+                        wait_result = child.wait() => match wait_result {
+                            Ok(exit_status) => {
+                                warn!("offer publisher exited ({exit_status}); restarting in 30s")
                             }
                             Err(e) => warn!("offer publisher wait failed: {e}; restarting in 30s"),
                         },
@@ -1293,15 +1372,26 @@ pub fn spawn_offer_publisher(
                             info!("offer publisher: cancellation received — killing sidecar");
                             let _ = child.kill().await;
                             let _ = child.wait().await;
+                            if let Some(reader) = reader {
+                                reader.abort();
+                            }
+                            status.set_publisher_alive(false);
                             return;
                         }
                     }
+                    if let Some(reader) = reader {
+                        let _ = reader.await;
+                    }
+                    status.set_publisher_alive(false);
                 }
-                Err(e) => warn!(
-                    "offer publisher spawn failed ({}): {e}; retrying in 30s \
-                     (is node installed and `npm install` run in offer-publisher?)",
-                    script.display()
-                ),
+                Err(e) => {
+                    status.set_publisher_alive(false);
+                    warn!(
+                        "offer publisher spawn failed ({}): {e}; retrying in 30s \
+                         (is node installed and `npm install` run in offer-publisher?)",
+                        script.display()
+                    )
+                }
             }
             for _ in 0..30 {
                 if cancel.load(Ordering::Relaxed) {
@@ -1361,6 +1451,286 @@ pub async fn fund_to_target(config: &SwapConfig, target: u128, json: bool) -> Re
     }
 
     result
+}
+
+/// Background low-water top-up (issue #93 point 3): while the standing loop
+/// runs, top up the maker's LEZ balance from the pinata faucet whenever it
+/// drops below `fund_low_water`, independently of (and without blocking) the
+/// swap-accept loop. Runs every `fund_check_secs` until `cancel` is set.
+///
+/// This exists because `--fund-to` only ever tops up ONCE, before the loop
+/// starts: once inventory is exhausted mid-run, the old behaviour was to log
+/// `AutoAcceptInsufficientFunds` and BREAK the loop, which — under `restart:
+/// unless-stopped` — turned "ran out of LEZ" into a silent crash loop that
+/// never refilled. The loop side of that fix (break → warn-and-wait) lives in
+/// `crate::swap::maker::run_maker_loop`; this is the half that actually
+/// refills the balance.
+pub fn spawn_fund_topper(
+    config: SwapConfig,
+    fund_check_secs: u64,
+    fund_low_water: u128,
+    cancel: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            match LezClient::new(&config) {
+                Ok(lez_client) => {
+                    match lez_client.get_balance(&lez_client.account_id()).await {
+                        Ok(balance) if balance < fund_low_water => {
+                            warn!(
+                                balance,
+                                fund_low_water,
+                                "fund-topper: LEZ balance below low-water mark — claiming from \
+                                 pinata faucet"
+                            );
+                            match lez_client.claim_to_target(fund_low_water, None).await {
+                                Ok(new_balance) => {
+                                    info!(new_balance, "fund-topper: top-up complete")
+                                }
+                                Err(e) => warn!(
+                                    "fund-topper: top-up failed, will retry next interval: {e}"
+                                ),
+                            }
+                        }
+                        Ok(_) => {} // above low-water, nothing to do
+                        Err(e) => warn!("fund-topper: balance read failed: {e}"),
+                    }
+                }
+                Err(e) => warn!("fund-topper: LEZ client init failed: {e}"),
+            }
+            for _ in 0..fund_check_secs {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Status file (issue #93 point 1: make "is the maker healthy" a real,
+// assertable question instead of a liveness proxy)
+// ---------------------------------------------------------------------------
+
+/// How often the running loop rewrites the status file.
+pub const STATUS_WRITE_INTERVAL_SECS: u64 = 15;
+
+/// Point-in-time snapshot of the standing loop's health, serialized to
+/// `--status-file` every [`STATUS_WRITE_INTERVAL_SECS`] and read back by
+/// `swap-cli maker --status` (the docker healthcheck). Every field here is
+/// something an operator or a healthcheck can assert ON — not just "the
+/// process is still running": the maker can be perfectly alive while wedged
+/// on an RPC call, or alive with a dead offer-publisher sidecar, and neither
+/// looks different from "working" to a bare `pgrep`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MakerStatus {
+    /// Unix seconds when this process started the loop.
+    pub started_at: u64,
+    /// Unix millis of the last CONFIRMED offer publish (a lightpush send that
+    /// at least one fleet peer accepted) — `None` if it has never succeeded.
+    /// This is the field the healthcheck actually cares about most: the maker
+    /// can be perfectly healthy on-chain while advertising nothing if the
+    /// publisher sidecar is wedged, and this is the only signal that catches
+    /// that.
+    pub last_offer_publish_ms: Option<u64>,
+    /// LEZ balance of the maker's own account, as a decimal string (u128
+    /// doesn't round-trip cleanly through every JSON consumer's number type).
+    pub lez_balance: String,
+    /// The maker's ETH balance (`ETH_RECIPIENT_ADDRESS`), in wei.
+    pub eth_balance_wei: String,
+    /// Count of in-flight (crash-recovery journal) swaps.
+    pub in_flight: usize,
+    /// Count of permanently-quarantined (unrecoverable) journal entries.
+    pub quarantined: usize,
+    /// Total swaps completed since this process started.
+    pub completed: u32,
+    /// Total swaps failed/refunded since this process started.
+    pub failed: u32,
+    /// Coarse state label for operator/human consumption.
+    pub loop_state: String,
+    /// Whether the offer-publisher Node sidecar is currently alive (a
+    /// respawn-in-progress window reads `false`).
+    pub publisher_alive: bool,
+    /// Unix seconds when this snapshot was written — lets a reader detect a
+    /// wedged/dead writer even independent of the offer-publish check (e.g.
+    /// with `--heartbeat-secs 0`, where publishing is intentionally off).
+    pub updated_at: u64,
+}
+
+/// Shared, mutation-friendly state the running loop keeps updated from
+/// multiple tasks (the progress drain, the offer-publisher supervisor, the
+/// balance-refresh writer); snapshotted into a [`MakerStatus`] and written to
+/// disk every [`STATUS_WRITE_INTERVAL_SECS`].
+pub struct StatusState {
+    started_at: u64,
+    last_offer_publish_ms: AtomicU64, // 0 = never published
+    publisher_alive: AtomicBool,
+    completed: AtomicU32,
+    failed: AtomicU32,
+    loop_state: Mutex<String>,
+    lez_balance: Mutex<u128>,
+    eth_balance_wei: Mutex<u128>,
+}
+
+impl StatusState {
+    pub fn new(started_at: u64) -> Self {
+        Self {
+            started_at,
+            last_offer_publish_ms: AtomicU64::new(0),
+            publisher_alive: AtomicBool::new(false),
+            completed: AtomicU32::new(0),
+            failed: AtomicU32::new(0),
+            loop_state: Mutex::new("starting".to_string()),
+            lez_balance: Mutex::new(0),
+            eth_balance_wei: Mutex::new(0),
+        }
+    }
+
+    pub fn set_loop_state(&self, s: impl Into<String>) {
+        *self.loop_state.lock().expect("status lock") = s.into();
+    }
+
+    pub fn note_offer_publish(&self, now_ms: u64) {
+        self.last_offer_publish_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    pub fn set_publisher_alive(&self, alive: bool) {
+        self.publisher_alive.store(alive, Ordering::Relaxed);
+    }
+
+    pub fn incr_completed(&self) {
+        self.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn incr_failed(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_lez_balance(&self, balance: u128) {
+        *self.lez_balance.lock().expect("status lock") = balance;
+    }
+
+    pub fn set_eth_balance(&self, balance: u128) {
+        *self.eth_balance_wei.lock().expect("status lock") = balance;
+    }
+
+    pub fn snapshot(&self, in_flight: usize, quarantined: usize) -> MakerStatus {
+        let last_publish = self.last_offer_publish_ms.load(Ordering::Relaxed);
+        MakerStatus {
+            started_at: self.started_at,
+            last_offer_publish_ms: (last_publish > 0).then_some(last_publish),
+            lez_balance: self.lez_balance.lock().expect("status lock").to_string(),
+            eth_balance_wei: self
+                .eth_balance_wei
+                .lock()
+                .expect("status lock")
+                .to_string(),
+            in_flight,
+            quarantined,
+            completed: self.completed.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            loop_state: self.loop_state.lock().expect("status lock").clone(),
+            publisher_alive: self.publisher_alive.load(Ordering::Relaxed),
+            updated_at: now_unix(),
+        }
+    }
+}
+
+/// Default status-file path: sibling of the state file, named
+/// `maker-status.json`. `--status-file` (`MAKER_STATUS_FILE`) overrides it.
+pub fn default_status_file(state_file: &str) -> PathBuf {
+    let state_path = Path::new(state_file);
+    match state_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join("maker-status.json"),
+        _ => PathBuf::from("maker-status.json"),
+    }
+}
+
+/// Write the status file: temp file + atomic rename, so a concurrent reader
+/// (the healthcheck) never observes a partial write. This is a monitoring
+/// artifact, not the fund-safety journal, so unlike [`StateStore::persist`] no
+/// fsync is needed — losing the last write on a crash costs nothing but one
+/// stale healthcheck read, which the writer's own `updated_at` staleness check
+/// then catches anyway.
+pub fn write_status_file(path: &Path, status: &MakerStatus) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(status)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Read and parse the status file. Used by `swap-cli maker --status`.
+pub fn read_status_file(path: &Path) -> Result<MakerStatus> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        SwapError::InvalidConfig(format!("cannot read status file {}: {e}", path.display()))
+    })?;
+    serde_json::from_str(&raw).map_err(|e| {
+        SwapError::InvalidConfig(format!("corrupt status file {}: {e}", path.display()))
+    })
+}
+
+/// Refresh balances and rewrite the status file every
+/// [`STATUS_WRITE_INTERVAL_SECS`] until `cancel` is set. Best-effort: a failed
+/// balance read keeps the last known value rather than aborting — this is a
+/// monitoring signal, not a fund-safety path.
+pub fn spawn_status_writer(
+    config: SwapConfig,
+    status: Arc<StatusState>,
+    store: Arc<StateStore>,
+    path: PathBuf,
+    maker_account: AccountId,
+    cancel: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+
+            match LezClient::new(&config) {
+                Ok(lez_client) => match lez_client.get_balance(&maker_account).await {
+                    Ok(balance) => status.set_lez_balance(balance),
+                    Err(e) => debug!("status writer: LEZ balance read failed: {e}"),
+                },
+                Err(e) => debug!("status writer: LEZ client init failed: {e}"),
+            }
+
+            match EthClient::new(&config).await {
+                Ok(eth_client) => {
+                    match eth_client
+                        .provider()
+                        .get_balance(config.eth_recipient_address)
+                        .await
+                    {
+                        Ok(balance) => status.set_eth_balance(balance.to::<u128>()),
+                        Err(e) => debug!("status writer: ETH balance read failed: {e}"),
+                    }
+                }
+                Err(e) => debug!("status writer: ETH client init failed: {e}"),
+            }
+
+            let snapshot = status.snapshot(store.snapshot().len(), store.quarantined_snapshot().len());
+            if let Err(e) = write_status_file(&path, &snapshot) {
+                warn!(
+                    "status writer: failed to write {}: {e}",
+                    path.display()
+                );
+            }
+
+            for _ in 0..STATUS_WRITE_INTERVAL_SECS {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2147,5 +2517,100 @@ mod tests {
         assert!(store.quarantined_snapshot().is_empty());
         assert!(!store.has_in_flight());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Status file (issue #93) ─────────────────────────────────────────
+
+    // Every field a healthcheck might assert on must reflect the latest
+    // update from whichever task set it — this is the whole point of moving
+    // off a bare liveness proxy.
+    #[test]
+    fn status_state_snapshot_reflects_updates() {
+        let status = StatusState::new(1_000);
+        // Fresh state: never published, nothing completed/failed, publisher
+        // not yet known alive.
+        let snap = status.snapshot(0, 0);
+        assert_eq!(snap.started_at, 1_000);
+        assert_eq!(snap.last_offer_publish_ms, None);
+        assert!(!snap.publisher_alive);
+        assert_eq!(snap.completed, 0);
+        assert_eq!(snap.failed, 0);
+        assert_eq!(snap.loop_state, "starting");
+
+        status.set_loop_state("waiting_for_taker");
+        status.note_offer_publish(5_000);
+        status.set_publisher_alive(true);
+        status.incr_completed();
+        status.incr_completed();
+        status.incr_failed();
+        status.set_lez_balance(150);
+        status.set_eth_balance(42);
+
+        let snap = status.snapshot(2, 1);
+        assert_eq!(snap.loop_state, "waiting_for_taker");
+        assert_eq!(snap.last_offer_publish_ms, Some(5_000));
+        assert!(snap.publisher_alive);
+        assert_eq!(snap.completed, 2);
+        assert_eq!(snap.failed, 1);
+        assert_eq!(snap.lez_balance, "150");
+        assert_eq!(snap.eth_balance_wei, "42");
+        assert_eq!(snap.in_flight, 2);
+        assert_eq!(snap.quarantined, 1);
+    }
+
+    // The status file is a plain JSON artifact (unlike the fsync'd
+    // crash-recovery journal) but still round-trips exactly, and a
+    // concurrent reader never sees a half-written file — enforced by the
+    // temp-file + rename in `write_status_file`.
+    #[test]
+    fn status_file_write_read_roundtrip() {
+        let path =
+            std::env::temp_dir().join(format!("maker-status-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let status = StatusState::new(100);
+        status.set_loop_state("waiting_for_claim");
+        status.note_offer_publish(12_345);
+        status.set_publisher_alive(true);
+        status.incr_completed();
+        status.set_lez_balance(10);
+        status.set_eth_balance(999);
+        let snap = status.snapshot(1, 0);
+
+        write_status_file(&path, &snap).expect("write");
+        let read_back = read_status_file(&path).expect("read");
+        assert_eq!(read_back, snap);
+
+        // The tmp file used for the atomic rename must not be left behind.
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_status_file_missing_is_an_error_not_a_panic() {
+        let path = std::env::temp_dir().join(format!(
+            "maker-status-missing-{}-{}.json",
+            std::process::id(),
+            now_unix()
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert!(read_status_file(&path).is_err());
+    }
+
+    // `default_status_file` derives a sibling path in the state file's
+    // directory (the container's real layout: `/app/state/.maker-state.json`
+    // → `/app/state/maker-status.json`), and falls back to a bare relative
+    // path when the state file itself has no directory component.
+    #[test]
+    fn default_status_file_derives_sibling_path() {
+        assert_eq!(
+            default_status_file("/app/state/.maker-state.json"),
+            PathBuf::from("/app/state/maker-status.json")
+        );
+        assert_eq!(
+            default_status_file(".maker-state.json"),
+            PathBuf::from("maker-status.json")
+        );
     }
 }

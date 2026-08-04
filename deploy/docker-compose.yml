@@ -27,18 +27,18 @@ services:
     # No ports published: the maker only makes outbound connections (Sepolia
     # RPC, LEZ sequencer RPC, the waku fleet over TCP) — nothing listens.
     healthcheck:
-      # swap-cli has no HTTP endpoint; use liveness of the swap-cli process
-      # itself plus a fresh write to the state directory as the signal. A
-      # stuck-but-still-running process (e.g. wedged on an RPC call) will
-      # eventually get flagged unhealthy once the journal goes stale.
-      test:
-        [
-          "CMD-SHELL",
-          "pgrep -x swap-cli >/dev/null && find /app/state -newermt '-15 minutes' | grep -q . || exit 1",
-        ]
+      # `swap-cli maker --status` reads the periodic health snapshot
+      # (`MAKER_STATUS_FILE`, rewritten every ~15s by the running loop) and
+      # asserts on it — e.g. fails when the last CONFIRMED offer publish is
+      # older than 3x the heartbeat, or when the offer-publisher sidecar is
+      # dead. This replaced a bare `pgrep` liveness check (issue #93): a
+      # process that is merely alive but wedged on an RPC call, or whose
+      # offer-publisher sidecar died, looked identical to "working" under
+      # that check and to this one it does not.
+      test: ["CMD-SHELL", "swap-cli maker --status"]
       interval: 60s
       timeout: 10s
-      start_period: 120s
+      start_period: 180s
       retries: 3
     logging:
       driver: json-file
