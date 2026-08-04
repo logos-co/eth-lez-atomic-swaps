@@ -15,6 +15,7 @@ pub enum EthHtlcEvent {
         amount: alloy::primitives::U256,
         hashlock: FixedBytes<32>,
         timelock: alloy::primitives::U256,
+        tx_hash: FixedBytes<32>,
     },
     Claimed {
         swap_id: FixedBytes<32>,
@@ -76,8 +77,9 @@ pub async fn watch_events(
                 .await
             {
                 Ok(events) => {
-                    for (event, _) in events {
-                        debug!(swap_id = %event.swapId, "Locked event");
+                    for (event, log) in events {
+                        let tx_hash = log.transaction_hash.unwrap_or_default();
+                        debug!(swap_id = %event.swapId, %tx_hash, "Locked event");
                         let ev = EthHtlcEvent::Locked {
                             swap_id: event.swapId,
                             sender: event.sender,
@@ -85,6 +87,7 @@ pub async fn watch_events(
                             amount: event.amount,
                             hashlock: event.hashlock,
                             timelock: event.timelock,
+                            tx_hash,
                         };
                         if tx.send(ev).await.is_err() {
                             return Ok(());

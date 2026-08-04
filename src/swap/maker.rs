@@ -254,6 +254,7 @@ pub async fn run_maker(
                     amount,
                     hashlock: event_hashlock,
                     timelock: event_timelock,
+                    tx_hash: event_tx_hash,
                     ..
                 } = event
                 {
@@ -341,10 +342,12 @@ pub async fn run_maker(
                             continue;
                         }
 
-                        info!(%swap_id, "maker: matched ETH Locked event");
+                        info!(%swap_id, tx_hash = %event_tx_hash, "maker: matched ETH Locked event");
                         progress::report(&progress, SwapProgress::EthLockDetected {
                             swap_id: format!("{swap_id}"),
                             hashlock: hex::encode(hl),
+                            tx_hash: format!("{event_tx_hash}"),
+                            chain_id: eth_client.chain_id(),
                         });
                         break (swap_id, hl, lez_expiry_secs);
                     }

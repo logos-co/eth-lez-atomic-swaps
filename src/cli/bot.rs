@@ -1677,7 +1677,7 @@ mod tests {
             || {
                 let n = calls.fetch_add(1, Ordering::Relaxed);
                 async move {
-                    if n % 2 == 0 {
+                    if n.is_multiple_of(2) {
                         Err(SwapError::LezSequencer("transient".into()))
                     } else {
                         Ok(None)

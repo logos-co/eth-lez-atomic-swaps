@@ -48,7 +48,7 @@ pub async fn run_taker(
 
     // 2. Lock ETH (long timelock).
     progress::report(&progress, SwapProgress::LockingEth);
-    let swap_id = eth_client
+    let lock_receipt = eth_client
         .lock(
             hashlock,
             config.eth_timelock,
@@ -56,11 +56,14 @@ pub async fn run_taker(
             U256::from(config.eth_amount),
         )
         .await?;
-    info!(%swap_id, "taker: ETH locked");
+    let swap_id = lock_receipt.swap_id;
+    info!(%swap_id, tx_hash = %lock_receipt.tx_hash, "taker: ETH locked");
     progress::report(
         &progress,
         SwapProgress::EthLocked {
             swap_id: format!("{swap_id}"),
+            tx_hash: format!("{}", lock_receipt.tx_hash),
+            chain_id: eth_client.chain_id(),
         },
     );
 
