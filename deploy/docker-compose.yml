@@ -3,12 +3,17 @@
 
 services:
   maker:
+    # Both `image` and `build` are active on purpose: `docker compose build`
+    # builds from source and tags the result with this same name, so
+    # `docker compose up -d` works identically whether the image was just
+    # built on this host or pulled from GHCR (`docker compose pull`) once
+    # .github/workflows/release-maker-image.yml has published a tag there.
+    # No manual comment/uncomment dance needed for the first build-on-host
+    # deploy vs. later registry-pull deploys.
     image: ghcr.io/logos-co/eth-lez-atomic-swaps-maker:latest
-    # Uncomment to build on the host instead of pulling from GHCR (e.g. before
-    # the first tagged release, or while iterating on the Dockerfile):
-    # build:
-    #   context: ..
-    #   dockerfile: Dockerfile
+    build:
+      context: ..
+      dockerfile: Dockerfile
     container_name: eth-lez-maker
     restart: unless-stopped
     env_file:

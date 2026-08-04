@@ -108,9 +108,11 @@ docker compose up -d
 docker compose logs -f maker
 ```
 
-Or, once `.github/workflows/release-maker-image.yml` has published a tag to
-GHCR, uncomment the `image:` line and comment out `build:` in
-`docker-compose.yml`, then `docker compose pull && docker compose up -d`.
+`docker-compose.yml` declares both `image:` and `build:` for the same
+service, so this works unchanged later too: once
+`.github/workflows/release-maker-image.yml` has published a tag to GHCR,
+`docker compose pull && docker compose up -d` picks up the registry image
+instead — no file edits needed either way.
 
 State (the crash-recovery journal `.maker-state.json` and any status file)
 lives on the named `maker-state` volume, mounted at `/app/state` — never a
