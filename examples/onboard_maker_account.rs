@@ -33,17 +33,21 @@ struct Args {
     /// Target LEZ balance to reach via pinata claims (150 LEZ per claim).
     #[arg(long, default_value_t = 150)]
     target: u128,
+
+    /// Only generate a keypair + account ID — skip on-chain init/funding
+    /// entirely (no network call at all). Useful for the placeholder
+    /// LEZ_TAKER_ACCOUNT_ID a restricted-mode maker deployment needs before
+    /// a real public taker exists: it just has to be a well-formed account
+    /// ID, not an initialized/funded one, since restricted mode never
+    /// actually pays out to it.
+    #[arg(long)]
+    generate_only: bool,
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-
-    let url = Url::parse(&args.sequencer_url).expect("invalid --sequencer-url");
-    let sequencer = SequencerClientBuilder::default()
-        .build(url)
-        .expect("failed to build sequencer client");
 
     let signer = Signer::generate().expect("LEZ key generation failed");
     let account_b58 = account_id_to_base58(&signer.account_id);
@@ -55,6 +59,20 @@ async fn main() {
         "Copy the signing_key above into deploy/maker.env as LEZ_SIGNING_KEY — it is not \
          printed again."
     );
+
+    if args.generate_only {
+        println!(
+            "{}",
+            serde_json::json!({ "account_id": account_b58, "generated_only": true })
+        );
+        return;
+    }
+
+    let url = Url::parse(&args.sequencer_url).expect("invalid --sequencer-url");
+    let sequencer = SequencerClientBuilder::default()
+        .build(url)
+        .expect("failed to build sequencer client");
+
     eprintln!("initializing + funding to target {} LEZ...", args.target);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<FundingProgress>();
