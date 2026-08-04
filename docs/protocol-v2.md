@@ -1,13 +1,13 @@
 # Atomic Swaps signed protocol v2
 
-- Status: reviewed freeze candidate; independent vector re-review complete
+- Status: corrected freeze candidate; independent re-review required
 - Applies to: public Sepolia ↔ LEZ testnet mode only
 - Repository baseline: `80f36e9a67530ad20995084f2f6ca04a9be350b4`
 - Date: 2026-08-04
 
 ## Decision
 
-**Specification result: independent vector re-review complete.** The exact type strings, deterministic EIP-712 vectors, signatures, and recovered addresses were independently reproduced. This document resolves the previously identified Critical and High protocol-design findings with normative, code-facing rules.
+**Specification correction result: READY FOR INDEPENDENT RE-REVIEW.** The exact type strings, corrected deterministic EIP-712 vectors, signatures, recovered addresses, interface-v2 deployment pin, and six-field swap-ID derivation are executable through the fixture gate. A reviewer who did not implement this correction MUST independently reproduce them before this candidate can be frozen. This document retains the normative, code-facing rules that address the previously identified Critical and High protocol-design findings.
 
 **Public-mode implementation result: NO-GO.** Public-mode implementation and enablement remain blocked until the release-specific values and external capabilities listed under [Remaining blockers](#remaining-blockers) are approved. Code may not substitute a URL, display name, zero, current config, or a self-signed value for a missing release pin. No v1 or on-chain-only fallback is permitted.
 
@@ -662,7 +662,7 @@ These are external values or approvals, not unspecified protocol behavior:
 1. **BLOCKED — authoritative LEZ chain identity:** LEZ must expose the stable 32-byte `get_network_identity` capability above, and two independent endpoints must return the same release-pinned value.
 2. **BLOCKED — maker trust deployment:** choose the actual maker EOA/LEZ account, publish the exact `TrustedMakerV2` record and seven-day validity/renewal process, and approve package-based rotation/revocation.
 3. **BLOCKED — contract provenance:** the runtime hash agrees across two independent Sepolia providers and the repository carries the deployment record/source pointer, but an independent provenance review still must reproduce the reviewed build and link its runtime bytecode to that deployment.
-4. **CLEARED AT SPECIFICATION LEVEL — independent vector review:** a separate security reviewer reproduced both vectors, signatures, and recovered addresses with `cast` and approved the exact type strings, units, time equations, and signature rules. Merge still requires committing them as shared Rust fixtures plus the full mutation suite.
+4. **BLOCKED — independent corrected-vector review:** the executable fixture gate reproduces both corrected vectors, signatures, recovered addresses, interface-v2 domain pin, and six-field swap ID. A reviewer who did not implement this correction still must independently reproduce and approve them. Merge also requires shared Rust fixture coverage plus the full mutation suite.
 5. **BLOCKED — LEZ submission/recovery API:** split create/fund submission or expose deterministic transaction identity/status so ambiguous broadcasts cannot be automatically duplicated.
 6. **BLOCKED — durable taker integration:** the current client returns only `swapId` after receipt and keeps preimage/progress in memory. It must prepare/persist tx hash/raw transaction and implement the journal stages above.
 7. **BLOCKED — Rust authorization ownership:** current C++/Delivery and watcher path is not the Rust-owned v2 gate. No public implementation is approved until the single entry point and no-fallback proof exist.
