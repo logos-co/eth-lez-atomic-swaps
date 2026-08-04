@@ -44,6 +44,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate public-feedback evidence boundary
+        run: node tests/check-feedback-evidence.mjs
+
       # Installs the toolchain pinned in rust-toolchain.toml (1.93.0).
       # Must run before rust-cache so the cache key sees the right rustc.
       - name: Install pinned Rust toolchain
