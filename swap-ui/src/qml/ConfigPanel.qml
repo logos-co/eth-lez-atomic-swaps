@@ -238,7 +238,10 @@ ScrollView {
         id: field
 
         property alias label: labelText.text
-        property alias text: input.text
+        // NOTE: `text` is intentionally a plain property, not `property alias text: input.text`.
+        // It represents the backend's value flowing IN. `input.text` is the field's own local
+        // buffer. Keeping them separate breaks the echo loop below.
+        property string text: ""
         property alias echoMode: input.echoMode
         property alias placeholderText: input.placeholderText
         property bool fieldEnabled: true
@@ -247,6 +250,20 @@ ScrollView {
         signal valueEdited(string val)
 
         spacing: 4
+
+        // Apply an externally-driven value (from the backend) into the visible field, but only
+        // when it's safe to do so: never while the user has focus and is actively typing, and
+        // never if it's a no-op. This is what stops an async setConfigValue() round trip from
+        // stomping the caret / reordering keystrokes while the user is still mid-edit.
+        function applyExternalText(value) {
+            if (input.activeFocus) return
+            if (input.text === value) return
+            var pos = input.cursorPosition
+            input.text = value
+            input.cursorPosition = Math.min(pos, input.text.length)
+        }
+
+        onTextChanged: applyExternalText(field.text)
 
         Text {
             id: labelText
@@ -274,7 +291,12 @@ ScrollView {
                 radius: Theme.radiusSmall
                 opacity: input.enabled ? 1.0 : 0.5
             }
-            onTextChanged: field.valueEdited(input.text)
+            // onTextEdited fires only for genuine user keystrokes (not programmatic assignment),
+            // so this no longer re-triggers itself when the backend echo below writes back.
+            onTextEdited: field.valueEdited(input.text)
+            // When focus is lost, apply whatever the backend's latest value is (it may have been
+            // normalized/validated while the user was typing and held back by the guard above).
+            onActiveFocusChanged: if (!activeFocus) field.applyExternalText(field.text)
         }
         Text {
             visible: field.errorText !== ""

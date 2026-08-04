@@ -50,7 +50,7 @@ char* swap_ffi_run_maker(const char*, const char*, ProgressCallback cb, void* us
 {
     if (cb) {
         cb(R"({"step":"WaitingForEthLock"})", user_data);
-        cb(R"({"step":"EthLockDetected","data":{"swap_id":"0xabc","hashlock":"abababababababababababababababababababababababababababababababab","tx_hash":"0xdeadbeef00000000000000000000000000000000000000000000000000dead","chain_id":31337}})", user_data);
+        cb(R"({"step":"EthLockDetected","data":{"swap_id":"0xabc","hashlock":"abababababababababababababababababababababababababababababababab","taker_lez_account":"7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e","tx_hash":"0xdeadbeef00000000000000000000000000000000000000000000000000dead","chain_id":31337}})", user_data);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     return copyJson(R"({"ok":true,"method":"runMaker"})");

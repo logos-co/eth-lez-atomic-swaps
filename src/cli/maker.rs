@@ -63,16 +63,19 @@ pub struct MakerArgs {
     #[arg(long, env = "TIMELOCK_MARGIN_MINUTES", default_value_t = 5)]
     timelock_margin_minutes: u64,
 
-    /// Acknowledge that `--loop` serves only the single designated taker given
-    /// by `--lez-taker-account` (env `LEZ_TAKER_ACCOUNT_ID`).
+    /// Restrict `--loop` to the single designated taker given by
+    /// `--lez-taker-account` (env `LEZ_TAKER_ACCOUNT_ID`).
     ///
-    /// The LEZ HTLC `Claim` instruction is gated on `signer == taker_id`, and
-    /// the loop has no inbound channel to learn a public taker's LEZ account
-    /// per-swap (the offer board is publish-only). Every escrow is therefore
-    /// locked to the static configured taker; an arbitrary public taker cannot
-    /// claim. To avoid silently shipping that broken-for-the-public default,
-    /// `--loop` refuses to start unless this flag is set, making the
-    /// designated-counterparty limitation explicit.
+    /// This flag used to be MANDATORY, and its absence a hard startup failure:
+    /// the LEZ HTLC gates `Claim` on `signer == taker_id`, and the loop had no
+    /// way to learn a public taker's LEZ account per-swap, so every escrow was
+    /// locked to one statically configured account and no other taker could
+    /// claim. That is fixed — the taker now publishes its LEZ account in its own
+    /// ETH lock (`Locked.takerLezAccount`) and the maker binds each escrow to
+    /// that, so the default (flag unset) correctly serves anyone.
+    ///
+    /// Setting it turns `--lez-taker-account` into an allowlist for operators
+    /// who deliberately want a private, one-counterparty maker.
     ///
     /// Accepts a boolish value from the env/flag (`1`/`0`, `true`/`false`,
     /// `yes`/`no`, `on`/`off`) so `RESTRICT_COUNTERPARTY=1` works, not just
@@ -87,15 +90,12 @@ pub struct MakerArgs {
     )]
     restrict_counterparty: bool,
 
-    /// Faucet sidecar: loop `wallet pinata claim` (150 LEZ each) until the
-    /// maker LEZ balance reaches this target. Standalone (exits when reached)
-    /// unless combined with --loop, where it tops up before the loop starts.
+    /// Faucet sidecar: natively claim from the pinata faucet (150 LEZ each,
+    /// no `wallet` binary) until the maker LEZ balance reaches this target.
+    /// Standalone (exits when reached) unless combined with --loop, where it
+    /// tops up before the loop starts.
     #[arg(long, env = "FUND_TO_TARGET", value_name = "TARGET")]
     fund_to: Option<u128>,
-
-    /// Path to the LEZ `wallet` binary used for pinata claims.
-    #[arg(long, env = "LEZ_WALLET_BIN", default_value = "wallet")]
-    wallet_bin: String,
 }
 
 pub async fn cmd_maker(
@@ -108,7 +108,7 @@ pub async fn cmd_maker(
     if let Some(target) = args.fund_to
         && !args.loop_mode
     {
-        let balance = bot::fund_to_target(config, &args.wallet_bin, target, json).await?;
+        let balance = bot::fund_to_target(config, target, json).await?;
         if json {
             println!("{}", serde_json::json!({ "balance": balance.to_string() }));
         }
@@ -173,21 +173,26 @@ async fn cmd_maker_loop(
     // Startup guard 1: timelock safety invariant.
     bot::validate_timelocks(lez_minutes, eth_minutes, args.timelock_margin_minutes)?;
 
-    // Startup guard 2 (P1-2): the loop can only serve the single configured
-    // taker, because the LEZ HTLC gates Claim on `signer == taker_id` and there
-    // is no inbound channel to learn a public taker's LEZ account per-swap.
-    // Refuse to run the silently-broken-for-the-public default unless the
-    // operator explicitly opts into the designated-counterparty semantics.
-    if !args.restrict_counterparty {
+    // Startup guard 2 (was P1-2): the loop no longer needs a designated
+    // counterparty — the taker's LEZ account arrives on its own ETH lock and
+    // each escrow is bound to it — so serving the public is now the default and
+    // this is no longer a refusal. What remains is the inverse consistency
+    // check: asking to restrict without naming anyone is a config error, and
+    // silently serving everyone would be the opposite of what was asked.
+    if args.restrict_counterparty && config.lez_taker_account_id.is_none() {
         return Err(SwapError::InvalidConfig(
-            "refusing to start --loop: it can only serve the single designated taker set via \
-             --lez-taker-account (LEZ_TAKER_ACCOUNT_ID). The LEZ HTLC Claim is gated on \
-             signer == taker_id and the loop has no way to learn an arbitrary public taker's \
-             LEZ account per-swap, so every escrow would be locked to that one account and no \
-             other taker could claim. Pass --restrict-counterparty (RESTRICT_COUNTERPARTY=true) to \
-             acknowledge this and run the loop for the designated taker."
+            "--restrict-counterparty (RESTRICT_COUNTERPARTY) was set but no designated taker was \
+             given: pass --lez-taker-account (LEZ_TAKER_ACCOUNT_ID) with the counterparty's base58 \
+             LEZ account, or drop the flag to serve any taker (each taker now publishes its own \
+             LEZ account in its ETH lock)."
                 .into(),
         ));
+    }
+    if !args.restrict_counterparty && config.lez_taker_account_id.is_some() {
+        warn!(
+            "LEZ_TAKER_ACCOUNT_ID is set but --restrict-counterparty is not — it will be used as \
+             an allowlist and locks from other takers will be rejected. Unset it to serve anyone."
+        );
     }
 
     let lez_client = LezClient::new(config)?;
@@ -195,7 +200,7 @@ async fn cmd_maker_loop(
 
     // Optional pre-loop top-up.
     if let Some(target) = args.fund_to {
-        bot::fund_to_target(config, &args.wallet_bin, target, json).await?;
+        bot::fund_to_target(config, target, json).await?;
     }
 
     // Crash recovery FIRST (P1-3): reconcile journaled in-flight swaps before
@@ -265,7 +270,7 @@ async fn cmd_maker_loop(
     if balance < config.lez_amount {
         return Err(SwapError::InvalidConfig(format!(
             "insufficient LEZ inventory: balance {balance} < offer amount {}; \
-             top up with `swap-cli maker --fund-to <target>` or `wallet pinata claim`",
+             top up with `swap-cli maker --fund-to <target>`",
             config.lez_amount
         )));
     }
@@ -430,13 +435,24 @@ fn describe(event: &SwapProgress) -> String {
         SwapProgress::EthLockDetected {
             swap_id,
             hashlock,
+            taker_lez_account,
             tx_hash,
             chain_id,
         } => {
             format!(
-                "ETH lock detected (swap {swap_id}, hashlock {hashlock}, tx {tx_hash}, chain {chain_id})"
+                "ETH lock detected (swap {swap_id}, hashlock {hashlock}, tx {tx_hash}, chain \
+                 {chain_id}); LEZ escrow will be claimable only by taker account \
+                 {taker_lez_account}"
             )
         }
+        SwapProgress::EthLockRejectedTakerAccount {
+            swap_id,
+            taker_lez_account,
+            reason,
+        } => format!(
+            "ETH lock rejected (swap {swap_id}): takerLezAccount {taker_lez_account} — {reason}; \
+             still waiting"
+        ),
         SwapProgress::EthLockRejected {
             swap_id,
             eth_expiry_secs,
@@ -470,7 +486,7 @@ fn describe(event: &SwapProgress) -> String {
             lez_required,
         } => format!(
             "out of LEZ inventory ({lez_balance} < {lez_required}) — loop stopping; \
-             top up with --fund-to or `wallet pinata claim`"
+             top up with --fund-to"
         ),
         SwapProgress::AutoAcceptStopped {
             total_completed,

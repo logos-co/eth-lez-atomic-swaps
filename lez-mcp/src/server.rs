@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lee::{AccountId, PrivateKey, PublicKey, PublicTransaction, public_transaction::WitnessSet};
+use lee::{AccountId, PublicTransaction, public_transaction::WitnessSet};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::Parameters,
@@ -17,7 +17,7 @@ use sequencer_service_rpc::{RpcClient as _, SequencerClient, SequencerClientBuil
 use serde::Deserialize;
 use serde_json::{Value, json};
 use swap_orchestrator::{
-    config::{LezAuth, account_id_to_base58, parse_base58_account_id},
+    config::{account_id_to_base58, parse_base58_account_id},
     lez::client::LezClient,
 };
 use tokio::sync::{OnceCell, RwLock, Semaphore};
@@ -135,49 +135,14 @@ impl Gate {
     }
 }
 
-/// Signing identity resolved at startup. The key never leaves this struct
-/// and is never logged or echoed through tool results.
-pub struct Signer {
-    pub account_id: AccountId,
-    key: PrivateKey,
-}
-
-impl Signer {
-    pub fn from_auth(auth: &LezAuth) -> Result<Self, String> {
-        match auth {
-            LezAuth::RawKey(hex_key) => {
-                let bytes: [u8; 32] = hex::decode(hex_key.trim())
-                    .map_err(|e| format!("invalid LEZ signing key hex: {e}"))?
-                    .try_into()
-                    .map_err(|_| "LEZ signing key must be 32 bytes".to_string())?;
-                let key = PrivateKey::try_new(bytes)
-                    .map_err(|e| format!("invalid LEZ private key: {e}"))?;
-                let public_key = PublicKey::new_from_private_key(&key);
-                Ok(Self {
-                    account_id: AccountId::from(&public_key),
-                    key,
-                })
-            }
-            LezAuth::Wallet { home, account_id } => {
-                let wc = swap_orchestrator::scaffold::wallet_core(home)
-                    .map_err(|e| format!("wallet home: {e}"))?;
-                let key = wc
-                    .get_account_public_signing_key(*account_id)
-                    .ok_or_else(|| {
-                        format!(
-                            "wallet has no signing key for account {}",
-                            account_id_to_base58(account_id)
-                        )
-                    })?
-                    .clone();
-                Ok(Self {
-                    account_id: *account_id,
-                    key,
-                })
-            }
-        }
-    }
-}
+/// Signing identity resolved at startup. Re-exported from the app crate so
+/// the MCP server, the CLI/bot, and (later) the GUI FFI share exactly one
+/// `Signer` type and one `from_auth` resolution — see
+/// `swap_orchestrator::lez::onboard` for the definition and the account
+/// creation / initialization / faucet operations built on it. The signing
+/// key never leaves this struct and is never logged or echoed through tool
+/// results.
+pub use swap_orchestrator::lez::onboard::Signer;
 
 pub struct Ctx {
     pub cfg: McpConfig,
@@ -581,7 +546,7 @@ impl Ctx {
             authenticated_transfer_core::Instruction::Initialize,
         )
         .map_err(|e| format!("failed to build Initialize message: {e}"))?;
-        let witness_set = WitnessSet::for_message(&message, &[&signer.key]);
+        let witness_set = WitnessSet::for_message(&message, &[&signer.signing_key]);
         let tx = PublicTransaction::new(message, witness_set);
 
         let tx_hash = self

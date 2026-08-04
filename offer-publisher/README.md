@@ -30,7 +30,12 @@ cd offer-publisher
 npm install
 ```
 
-Requires Node.js >= 20.
+Requires Node.js >= 22. (Previously documented as >= 20, but the current
+`@waku/sdk`/libp2p dependency chain uses `Promise.withResolvers`
+(`@libp2p/peer-store` -> `mortice` -> `it-queue`), which Node 20.x does not
+provide — confirmed live: `node:20-bookworm-slim` throws
+`TypeError: Promise.withResolvers is not a function` at runtime. Found while
+containerizing the maker bot, see `Dockerfile`.)
 
 ## Usage
 

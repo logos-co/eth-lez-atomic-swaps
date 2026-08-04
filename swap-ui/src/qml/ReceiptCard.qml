@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import SwapTheme
+import SwapLinks
 
 // Receipt card — the full evidence surface for the just-completed swap.
 // Composes the board's trust vocabulary (TrustRow, section dividers,
@@ -74,6 +75,19 @@ Rectangle {
         ? parsed.eth_refund_tx : ""
     readonly property string lezRefundTx: parsed && parsed.lez_refund_tx
         ? parsed.lez_refund_tx : ""
+    // eth.lock_tx / network are not part of the legacy result-JSON schema
+    // (src/swap/types.rs outcome_to_json) — they only exist on the
+    // persisted receipt / session context, so ctx is their only source.
+    readonly property string ethLockTx: ctx.ethLockTx || ""
+    readonly property var networkCtx: ctx.network || ({})
+    readonly property string lezSequencer: networkCtx.lezSequencer || ""
+    readonly property string ethRpc: networkCtx.ethRpc || ""
+    readonly property double ethChainId: Number(networkCtx.ethChainId || 0)
+    readonly property var iterationValue: ctx.iteration !== undefined && ctx.iteration !== null
+        ? ctx.iteration : null
+    // The LEZ explorer only indexes the public testnet — gate lezTx/
+    // lezAccount links on the run's actual sequencer, not a config claim.
+    readonly property bool lezExplorerAvailable: Links.isLezTestnet(lezSequencer)
 
     // --- Session context ------------------------------------------------
     readonly property string lezAmount: ctx.lezAmount || ""
@@ -160,6 +174,7 @@ Rectangle {
             eth_amount: ethAmountEth || null,
             eth: {
                 swap_id: ethSwapId || null,
+                lock_tx: ethLockTx || null,
                 claim_tx: ethClaimTx || null,
                 refund_tx: ethRefundTx || null,
                 htlc_address: ethHtlcAddress || null,
@@ -179,8 +194,15 @@ Rectangle {
                 eth_minutes: ethTimelockMinutes || null
             },
             started_ms: startedMs > 0 ? startedMs : null,
-            finished_ms: finishedMs > 0 ? finishedMs : null
+            finished_ms: finishedMs > 0 ? finishedMs : null,
+            network: {
+                lez_sequencer: lezSequencer || null,
+                eth_rpc: ethRpc || null,
+                eth_chain_id: ethChainId > 0 ? ethChainId : null
+            }
         }
+        if (iterationValue !== null)
+            r.iteration = iterationValue
         if (isError && parsed)
             r.error = parsed.error
         return JSON.stringify(r, null, 2)
@@ -338,7 +360,17 @@ Rectangle {
             }
         }
 
-        // Chain references, labeled per role (completed swaps)
+        // Chain references, labeled per role (completed swaps). The ETH
+        // swap ID stays copy-only everywhere — it's a contract-internal
+        // bytes32 key, not a tx hash, and linking it to /tx/ would be a
+        // mislabel (the reason ReceiptCard disambiguates eth_tx per role
+        // in the first place).
+        TrustRow {
+            visible: card.isCompleted && card.ethLockTx !== ""
+            label: "ETH lock tx"
+            value: card.ethLockTx
+            link: Links.ethTx(card.ethLockTx, card.ethChainId)
+        }
         TrustRow {
             visible: card.isCompleted && card.role === "taker"
             label: "ETH swap ID (lock)"
@@ -348,6 +380,7 @@ Rectangle {
             visible: card.isCompleted && card.role === "taker"
             label: "LEZ claim tx"
             value: card.lezClaimTx
+            link: card.lezExplorerAvailable ? Links.lezTx(card.lezClaimTx) : ""
         }
         TrustRow {
             visible: card.isCompleted && card.role === "maker" && card.ethSwapId !== ""
@@ -358,11 +391,13 @@ Rectangle {
             visible: card.isCompleted && card.role === "maker"
             label: "LEZ lock tx"
             value: card.lezLockTx
+            link: card.lezExplorerAvailable ? Links.lezTx(card.lezLockTx) : ""
         }
         TrustRow {
             visible: card.isCompleted && card.role === "maker"
             label: "ETH claim tx"
             value: card.ethClaimTx
+            link: Links.ethTx(card.ethClaimTx, card.ethChainId)
         }
 
         // Refund evidence (refunded swaps)
@@ -370,11 +405,13 @@ Rectangle {
             visible: card.isRefunded
             label: "ETH refund tx"
             value: card.ethRefundTx !== "" ? card.ethRefundTx : "n/a"
+            link: Links.ethTx(card.ethRefundTx, card.ethChainId)
         }
         TrustRow {
             visible: card.isRefunded
             label: "LEZ refund tx"
             value: card.lezRefundTx !== "" ? card.lezRefundTx : "n/a"
+            link: card.lezExplorerAvailable ? Links.lezTx(card.lezRefundTx) : ""
         }
 
         // Counterparty identity
@@ -382,11 +419,13 @@ Rectangle {
             visible: !card.isError && card.counterpartyEth !== ""
             label: card.counterpartyName + " ETH address"
             value: card.counterpartyEth
+            link: Links.ethAddress(card.counterpartyEth, card.ethChainId)
         }
         TrustRow {
             visible: !card.isError && card.counterpartyLez !== ""
             label: card.counterpartyName + " LEZ account"
             value: card.counterpartyLez
+            link: card.lezExplorerAvailable ? Links.lezAccount(card.counterpartyLez) : ""
         }
 
         // Contract identity
@@ -394,6 +433,7 @@ Rectangle {
             visible: !card.isError && card.ethHtlcAddress !== ""
             label: "ETH HTLC contract"
             value: card.ethHtlcAddress
+            link: Links.ethAddress(card.ethHtlcAddress, card.ethChainId)
         }
         TrustRow {
             visible: !card.isError && card.lezProgramId !== ""

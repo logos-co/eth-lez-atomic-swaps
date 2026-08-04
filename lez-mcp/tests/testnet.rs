@@ -6,8 +6,7 @@
 //! ```
 
 use lez_mcp::{
-    config::{DEFAULT_ETH_HTLC_ADDRESS, DEFAULT_ETH_HTLC_FROM_BLOCK, DEFAULT_ETH_RPC_URL,
-             DEFAULT_SEQUENCER_URL},
+    config::{DEFAULT_ETH_RPC_URL, DEFAULT_SEQUENCER_URL},
     eth::{EthReader, parse_bytes32, state_str},
     fingerprint::run_fingerprint,
 };
@@ -20,6 +19,13 @@ const KNOWN_ACCOUNT: &str = "AU4z2Ae7RFab1BFrWeCngeAp3Yq8P47jFC7x7zUK6pgv";
 /// Hashlock and swap id of the first public swap (2026-07-21).
 const KNOWN_HASHLOCK: &str = "ecca22673f2bba423a5689cfaf6d3f6d34dc076a57a8747b21f64714e06cee21";
 const KNOWN_SWAP_ID: &str = "ebffdf016e5940338f53bafad13da936d44fd3a1c6957bc8f4c06594bc6247d4";
+
+/// The swap above lives on the SUPERSEDED v1 EthHTLC, so this fixture is pinned
+/// to that address rather than to `DEFAULT_ETH_HTLC_ADDRESS` (now the v2
+/// deployment, which has no history yet). `getHTLC`/`Locked` are shape-
+/// compatible for reads, so the reader still exercises both lookup paths.
+const V1_ETH_HTLC_ADDRESS: &str = "0x8636Fe66DFee166589a913140f14d5F57394834A";
+const V1_ETH_HTLC_FROM_BLOCK: u64 = 11_316_985;
 
 fn sequencer() -> sequencer_service_rpc::SequencerClient {
     SequencerClientBuilder::default()
@@ -63,8 +69,8 @@ async fn balance_of_known_account_reads() {
 async fn sepolia_htlc_readable_by_swap_id_and_hashlock() {
     let eth = EthReader::connect(
         DEFAULT_ETH_RPC_URL,
-        DEFAULT_ETH_HTLC_ADDRESS,
-        DEFAULT_ETH_HTLC_FROM_BLOCK,
+        V1_ETH_HTLC_ADDRESS,
+        V1_ETH_HTLC_FROM_BLOCK,
     )
     .await
     .expect("ws connect");

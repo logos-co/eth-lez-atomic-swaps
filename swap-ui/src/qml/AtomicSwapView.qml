@@ -28,6 +28,26 @@ Item {
                     leftPadding: 20
                     rightPadding: 20
                     font.pixelSize: Theme.fontNormal
+                    // Accessibility: a bare TabButton surfaces to macOS as an
+                    // AXRadioButton but advertises no AXPress action, so
+                    // assistive tech and UI automation can't switch tabs
+                    // (issue #59). Qt's PageTab role has the same limitation on
+                    // macOS, so use its radio-button fallback there: Cocoa maps
+                    // AXPress on that role to toggleAction. Keep PageTab on
+                    // other platforms so the tabs retain native tab-list
+                    // membership and semantics.
+                    Accessible.role: Qt.platform.os === "osx"
+                                     ? Accessible.RadioButton
+                                     : Accessible.PageTab
+                    Accessible.name: modelData
+                    Accessible.checkable: Qt.platform.os === "osx"
+                    Accessible.checked: Qt.platform.os === "osx"
+                                        && tabBar.currentIndex === index
+                    Accessible.selectable: Qt.platform.os !== "osx"
+                    Accessible.selected: Qt.platform.os !== "osx"
+                                         && tabBar.currentIndex === index
+                    Accessible.onPressAction: tabBar.currentIndex = index
+                    Accessible.onToggleAction: tabBar.currentIndex = index
                     contentItem: Text {
                         text: parent.text
                         font: parent.font

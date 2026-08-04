@@ -1,0 +1,30 @@
+# Keep the build context small and reproducible: only the Rust workspace
+# (root crate + swap-ffi + lez-mcp + programs/) and offer-publisher/ are
+# needed to build swap-cli + the sidecar (see Dockerfile).
+.git
+target/
+**/target/
+node_modules/
+**/node_modules/
+
+# Desktop app + Nix module packaging — irrelevant to the maker container.
+swap-ui/
+swap-module/
+canary/
+contracts/
+docs/
+tests/
+scripts/
+.scaffold/
+.cursor/
+.vscode/
+.github/
+
+*.md
+!README.md
+
+# Local dev state that must never leak into an image layer.
+.env
+.env.*
+.maker-state.json
+*.status.json
