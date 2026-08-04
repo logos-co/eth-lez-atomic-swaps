@@ -2,7 +2,7 @@
 
 - Status: reviewed freeze candidate; independent vector re-review complete
 - Applies to: public Sepolia ↔ LEZ testnet mode only
-- Repository baseline: `0f6824918ad5e937b4aada7628300ef097501873`
+- Repository baseline: `80f36e9a67530ad20995084f2f6ca04a9be350b4`
 - Date: 2026-08-04
 
 ## Decision
@@ -42,8 +42,9 @@ The release policy object is immutable for a running process and MUST be loaded 
 | Ethereum network | Sepolia, chain ID `11155111` |
 | Ethereum confirmations | `3`, including the transaction's block |
 | Reorg replay window | `256` Ethereum blocks |
-| ETH HTLC | `0x8636fe66dfee166589a913140f14d5f57394834a` |
-| ETH HTLC runtime code hash | `0x7457fc9107a30b16dfc558713c651f53214c7a0249d84cd8738c8102429e6833` |
+| ETH HTLC | `0x351b0ea07739fa9f6769213927d7836a790a5faf` |
+| ETH HTLC interface | `INTERFACE_VERSION = 2` |
+| ETH HTLC runtime code hash | `0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2` |
 | LEZ HTLC program ID | `0x27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` |
 | LEZ chain ID | one nonzero authoritative 32-byte release pin; currently blocked |
 | Maker offer signer | one pinned EOA; currently blocked |
@@ -61,7 +62,7 @@ The release policy object is immutable for a running process and MUST be loaded 
 | Maximum fills | exactly `1` |
 | Allowed signer class | canonical low-`s` secp256k1 EOA only |
 
-The Ethereum values above were freshly read on 2026-08-04 from two independent public providers, `https://ethereum-sepolia-rpc.publicnode.com` and `https://sepolia.drpc.org`: both returned chain ID `11155111` and the same runtime-code hash. The first provider returned 4,885 bytes of runtime code. Release acceptance still requires linking that bytecode to the reviewed build/deployment artifact.
+The Ethereum values above were freshly read on 2026-08-04 from two independent public providers, `https://ethereum-sepolia-rpc.publicnode.com` and `https://sepolia.drpc.org`: both returned chain ID `11155111`, `INTERFACE_VERSION = 2`, `minTimelockDelta = 300`, and the same runtime-code hash. Both providers returned 5,146 bytes of runtime code. The repository records deployment transaction `0x9ce42d59b141d8fd1759e2f288f11837dca335bb6cd4466e8fd9330c2b25e68f` at block `11417462` from source commit `d794f04`. Release acceptance still requires independent provenance review linking the reviewed build, deployment record, and runtime bytecode.
 
 The LEZ program value is the repository's checked-in public-testnet ImageID and deploy target. It is a program identity, not a network identity.
 
@@ -282,7 +283,7 @@ If any liveness prerequisite fails, stop heartbeats. Existing journal recovery c
    ```
 
    All operations are checked. These equations are later enforced by the maker.
-5. Prepare and sign the Ethereum lock transaction for the exact sender, maker recipient, wei amount, hashlock, and `ethRefundAfter`. Compute its transaction hash and deterministic swap ID before broadcast; durably persist the raw signed transaction/hash/swap ID.
+5. Prepare and sign the Ethereum lock transaction for the exact sender, maker recipient, wei amount, hashlock, `ethRefundAfter`, and taker LEZ account. Compute its transaction hash and deterministic swap ID before broadcast; durably persist the raw signed transaction/hash/swap ID.
 6. Broadcast, obtain a successful receipt containing exactly one matching `Locked` log, and persist receipt metadata.
 7. Construct the accept with `issuedAt = T0` and `expiresAt = T0 + 180`. The accept signer MUST be the transaction sender. Persist the signed accept before reporting `EthLocked` or publishing.
 8. Republish the identical signed accept every 5 seconds plus random `0..500` ms jitter. Do not change timestamps or signature. Stop at exact funded LEZ observation, `expiresAt`, canonical ETH refund, or fatal validation error.
@@ -319,8 +320,8 @@ The implementation order is fixed:
 6. Query `eth_chainId` and exact runtime code at the candidate's address. Both MUST equal pins.
 7. Fetch `ethLockTxHash` receipt. Require status 1, `to == ethereumHtlc`, canonical block number/hash, and exactly one decodable `Locked` log emitted by that contract. Missing or multiple matching logs are errors.
 8. Require three confirmations, defined as `canonicalHead.number >= receipt.blockNumber + 2`. Re-fetch the receipt. Fetch its block by hash and by number; both lookups MUST return the same hash. Receipt block/hash/log index MUST be unchanged.
-9. Recompute `ethSwapId = keccak256(abi.encodePacked(sender, recipient, amount, hashlock, timelock))`. Require exact log and accept equality: swap ID, sender/signer/taker, maker recipient, amount, hashlock, timelock, transaction hash, and contract.
-10. Call `getHTLC(ethSwapId)`. Any RPC/decode error is fatal for this attempt. Require exact sender, recipient, amount, hashlock, timelock, and `OPEN` state.
+9. Recompute `ethSwapId = keccak256(abi.encodePacked(sender, recipient, amount, hashlock, timelock, takerLezAccount))`. Require exact log and accept equality: swap ID, sender/signer/taker, maker recipient, amount, hashlock, timelock, taker LEZ account, transaction hash, and contract.
+10. Call `getHTLC(ethSwapId)`. Any RPC/decode error is fatal for this attempt. Require exact sender, recipient, amount, hashlock, timelock, taker LEZ account, and `OPEN` state.
 11. Validate canonical chain time, exact duration equations, margin, 600-second LEZ headroom, maker inventory, and release/trust validity. Through the pinned LEZ network/program, derive the PDA and require authoritative absence of any escrow for this hashlock.
 12. Enter the exclusive authorization section. A single process-wide mutex plus an exclusive OS file lock on the maker journal prevents same-host multi-process funding. Recheck in-memory and durable indexes for `offerId`, `ethSwapId`, `acceptDigest`, and hashlock. Exactly one candidate wins; deterministic tie-breaking is the first successful durable reservation.
 13. Fsync a complete immutable `VerifiedReserved` snapshot and all four replay indexes using temp-file write, file fsync, atomic rename, and directory fsync. Any persistence error rolls back the in-memory reservation and produces zero LEZ calls.
@@ -519,7 +520,7 @@ Every result exposed to C++/QML uses decimal strings and canonical identifiers. 
 
 ## Golden EIP-712 vectors
 
-These are synthetic, nondeployment values. They freeze encoding and signature recovery. The two private keys are public test keys and MUST never be used for funds.
+These vectors use the release-current Sepolia chain, contract, and runtime-code pins. All actor identities, LEZ identities, messages, and private keys remain synthetic nondeployment values. The two private keys are public test keys and MUST never be used for funds.
 
 ```text
 maker private key = 0x59c6995e998f97a5a0044976f7d13e8e7f6fbba83ce7f0b1037f6142155b28f0
@@ -532,17 +533,17 @@ Domain/vector constants:
 
 ```text
 ethereumChainId       = 11155111
-ethereumHtlc          = 0x1111111111111111111111111111111111111111
+ethereumHtlc          = 0x351b0ea07739fa9f6769213927d7836a790a5faf
 lezChainId            = 0x2222222222222222222222222222222222222222222222222222222222222222
 lezHtlcProgramId      = 0x3333333333333333333333333333333333333333333333333333333333333333
-ethereumHtlcCodeHash  = 0x4444444444444444444444444444444444444444444444444444444444444444
+ethereumHtlcCodeHash  = 0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2
 makerLezAccount bytes = 0x5555555555555555555555555555555555555555555555555555555555555555
 makerLezAccount JSON  = 6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6
 takerLezAccount bytes = 0x9999999999999999999999999999999999999999999999999999999999999999
 takerLezAccount JSON  = BLbDu5FZUdSfLrGejhuaWw5iMJBo3j3TVRyPv9rfJyMA
 domain type hash      = 0xd87cd6ef79d4e2b95e15ce8abf732db51ec771f1ca2edccf22a46c729ac56472
 domain salt           = 0xa068a79e8729e9a3722281426753c1ad84cd1c749aa83c9e08be6f541c0df9a7
-domain separator      = 0x18714d48fbc6c85e2eacf923dfcc2d8d6a94b51611f87084353978733579c30f
+domain separator      = 0xc520ac51bfbdde77a788eb01b046af1028d343084a932896f5fbab9538a5f906
 ```
 
 Offer typed values:
@@ -551,8 +552,8 @@ Offer typed values:
 {
   "offer_id":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "ethereum_chain_id":"11155111",
-  "ethereum_htlc":"0x1111111111111111111111111111111111111111",
-  "ethereum_htlc_code_hash":"0x4444444444444444444444444444444444444444444444444444444444444444",
+  "ethereum_htlc":"0x351b0ea07739fa9f6769213927d7836a790a5faf",
+  "ethereum_htlc_code_hash":"0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2",
   "lez_chain_id":"0x2222222222222222222222222222222222222222222222222222222222222222",
   "lez_htlc_program_id":"0x3333333333333333333333333333333333333333333333333333333333333333",
   "maker_eth_address":"0x4deef74c0c46e1267a126b16af3a7c151b3c6c85",
@@ -572,9 +573,9 @@ Expected offer results:
 
 ```text
 offer type hash   = 0x8336c1e25297cee0ed720120007651c362617dc754421b905c6d24ad473f0e6f
-offer struct hash = 0x63a37a445d7ceaa020167a1f1e4be2356f05ce51edc546b028b2a745df5a2c51
-offer digest      = 0x4b7c0f82fb122cf3ec3f072d6133400bc1ba3e7266836fee42a6fcf82967109c
-offer signature   = 0xf19297be63fb793b07caab5a5fc1782b4bc4336c1965c37394e421395ecbc97f4aa2a4b3b3e4b6317b5c0c5ec7f0cdcdc7e305c40791c68d381fa9fd807c47411c
+offer struct hash = 0x3c90b0b5f24883e0b933405a1bab7248d58bff8d117b54d874c53e3a532a54a9
+offer digest      = 0x81773d63672ebc0d0338213cda7b81e880f6b6b92950462adbcf277b9c501f3a
+offer signature   = 0x657314eb0442a7b4b4050756e8ab806be801b44043c7b0af99148778c63bb4022f73783c4abfc60135c95a5ca195e7ca67138629d4775bd1cf604a6003297c6b1b
 recovered signer  = 0x4deef74c0c46e1267a126b16af3a7c151b3c6c85
 ```
 
@@ -589,9 +590,10 @@ ethSwapId        = keccak256(abi.encodePacked(
                      makerAddress,
                      uint256(100000000000000),
                      hashlock,
-                     uint256(2000002400)
+                     uint256(2000002400),
+                     takerLezAccount
                    ))
-                 = 0x628aeb42d303f5c9a9ce8cdea6727143d9d97f1063c3acfcfc48d98105004753
+                 = 0x31d9f1691a1533b8bb69de5f466fc65e5e28733260cd721dfbdb266d0e6ff039
 ethLockTxHash    = 0x7777777777777777777777777777777777777777777777777777777777777777
 issuedAt         = 2000000000
 expiresAt        = 2000000180
@@ -602,17 +604,17 @@ Accept typed values use the offer values above plus:
 ```json
 {
   "offer_id":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "offer_digest":"0x4b7c0f82fb122cf3ec3f072d6133400bc1ba3e7266836fee42a6fcf82967109c",
+  "offer_digest":"0x81773d63672ebc0d0338213cda7b81e880f6b6b92950462adbcf277b9c501f3a",
   "ethereum_chain_id":"11155111",
-  "ethereum_htlc":"0x1111111111111111111111111111111111111111",
-  "ethereum_htlc_code_hash":"0x4444444444444444444444444444444444444444444444444444444444444444",
+  "ethereum_htlc":"0x351b0ea07739fa9f6769213927d7836a790a5faf",
+  "ethereum_htlc_code_hash":"0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2",
   "lez_chain_id":"0x2222222222222222222222222222222222222222222222222222222222222222",
   "lez_htlc_program_id":"0x3333333333333333333333333333333333333333333333333333333333333333",
   "maker_eth_address":"0x4deef74c0c46e1267a126b16af3a7c151b3c6c85",
   "maker_lez_account":"6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
   "eth_amount_wei":"100000000000000",
   "lez_amount":"150",
-  "eth_swap_id":"0x628aeb42d303f5c9a9ce8cdea6727143d9d97f1063c3acfcfc48d98105004753",
+  "eth_swap_id":"0x31d9f1691a1533b8bb69de5f466fc65e5e28733260cd721dfbdb266d0e6ff039",
   "eth_lock_tx_hash":"0x7777777777777777777777777777777777777777777777777777777777777777",
   "hashlock":"0x8888888888888888888888888888888888888888888888888888888888888888",
   "taker_eth_address":"0x4e4cdb4676d22a569ff136ff79dcdff5d1766734",
@@ -628,9 +630,9 @@ Expected accept results:
 
 ```text
 accept type hash   = 0x8ceda785542cc8cff7ebbb8d2dadc525c1b45249f0833a8dc2d839dc7d28dcad
-accept struct hash = 0x7ae0a5d9914d386e5dc71292c7565d73415791d220db71aee6aa97956e723810
-accept digest      = 0x4adfa5cc78b6883e003fe6960ad9a2c4f185cb0aef3b8bf1fa74982622508a54
-accept signature   = 0xc08558f58a7b8bba8c8f8a0d522799635a9e5872a74b931f69e8872d24ab683b75dc2d889a914a2153e4d585b8c3e6903cbc0f06e5cf171f568e5358b7f296d31b
+accept struct hash = 0xc4547967954a25efbba4fee4a6a8b5ed7c4f68474f622053c7562c897d358f19
+accept digest      = 0x2c49d007e29f513b1b8c86f4d10d064a6fcfeaedb0a31dab77665091c0d7e721
+accept signature   = 0x5a4989399efa4ff493f80399970b0218a5e796edd64414b8c2f5b156e863d9183538b7f04232461691ed38431c84930d2c1ea3afb992ebfaf82b52304b80feb31c
 recovered signer   = 0x4e4cdb4676d22a569ff136ff79dcdff5d1766734
 ```
 
@@ -659,7 +661,7 @@ These are external values or approvals, not unspecified protocol behavior:
 
 1. **BLOCKED — authoritative LEZ chain identity:** LEZ must expose the stable 32-byte `get_network_identity` capability above, and two independent endpoints must return the same release-pinned value.
 2. **BLOCKED — maker trust deployment:** choose the actual maker EOA/LEZ account, publish the exact `TrustedMakerV2` record and seven-day validity/renewal process, and approve package-based rotation/revocation.
-3. **BLOCKED — contract provenance:** the runtime hash agrees across two independent Sepolia providers, but the address/code hash still must be linked to the reviewed build/deployment artifact.
+3. **BLOCKED — contract provenance:** the runtime hash agrees across two independent Sepolia providers and the repository carries the deployment record/source pointer, but an independent provenance review still must reproduce the reviewed build and link its runtime bytecode to that deployment.
 4. **CLEARED AT SPECIFICATION LEVEL — independent vector review:** a separate security reviewer reproduced both vectors, signatures, and recovered addresses with `cast` and approved the exact type strings, units, time equations, and signature rules. Merge still requires committing them as shared Rust fixtures plus the full mutation suite.
 5. **BLOCKED — LEZ submission/recovery API:** split create/fund submission or expose deterministic transaction identity/status so ambiguous broadcasts cannot be automatically duplicated.
 6. **BLOCKED — durable taker integration:** the current client returns only `swapId` after receipt and keeps preimage/progress in memory. It must prepare/persist tx hash/raw transaction and implement the journal stages above.

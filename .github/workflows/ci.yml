@@ -71,6 +71,9 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
+      - name: verify protocol-v2 EIP-712 fixture
+        run: scripts/verify-protocol-v2-fixture.sh
+
       - name: forge build (ABI artifacts for the sol! macros)
         run: cd contracts && forge build
 
