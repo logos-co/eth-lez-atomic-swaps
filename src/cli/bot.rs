@@ -37,6 +37,7 @@ use crate::error::{Result, SwapError};
 use crate::eth::client::EthClient;
 use crate::lez::client::{LezClient, RefundOutcome};
 use crate::lez::watcher::{self as lez_watcher, LezHtlcEvent};
+use crate::ops::{FailureCode, OpsLedger, OpsRecorder};
 use crate::swap::refund::now_unix;
 
 /// Current Unix time in milliseconds (second-granularity `now_unix` scaled
@@ -805,6 +806,7 @@ async fn recover_claimed_escrow(
     entry: &InFlightSwap,
     escrow: &HTLCEscrow,
     store: &Arc<StateStore>,
+    ops: &Arc<OpsLedger>,
 ) {
     match escrow
         .preimage
@@ -816,6 +818,12 @@ async fn recover_claimed_escrow(
             let outcome = claim_eth(config, &entry.swap_id, preimage).await;
             if !retain_after_eth_claim(outcome) {
                 store.remove(&entry.hashlock);
+                // issue #98: a taker claim recovered here (or already-terminal
+                // on re-check) IS a completed trial swap, whether observed by
+                // the original process or — as here — by a restart's
+                // reconcile pass. Durable + idempotent, so this can never
+                // double-count the same hashlock.
+                ops.completed(&entry.hashlock);
             }
         }
         None => {
@@ -826,6 +834,7 @@ async fn recover_claimed_escrow(
                 "reconcile: escrow claimed but preimage missing/invalid, dropping (ETH unrecoverable)"
             );
             store.remove(&entry.hashlock);
+            ops.failed(&entry.hashlock, FailureCode::EthClaimUnresolved);
         }
     }
 }
@@ -839,6 +848,7 @@ async fn resume_swap(
     hashlock: [u8; 32],
     timelock_ms: u64,
     store: Arc<StateStore>,
+    ops: Arc<OpsLedger>,
 ) {
     let lez_client = match LezClient::new(&config) {
         Ok(c) => c,
@@ -881,7 +891,11 @@ async fn resume_swap(
                         Ok(preimage) => {
                             info!(hashlock = %entry.hashlock, "resume: taker claimed LEZ, claiming ETH");
                             let outcome = claim_eth(&config, &entry.swap_id, preimage).await;
-                            break !retain_after_eth_claim(outcome);
+                            let resolved = !retain_after_eth_claim(outcome);
+                            if resolved {
+                                ops.completed(&entry.hashlock);
+                            }
+                            break resolved;
                         }
                         Err(_) => {
                             warn!(hashlock = %entry.hashlock, "resume: preimage wrong length, keeping entry");
@@ -891,6 +905,7 @@ async fn resume_swap(
                 }
                 LezHtlcEvent::Refunded { .. } => {
                     info!(hashlock = %entry.hashlock, "resume: escrow already refunded");
+                    ops.refunded(&entry.hashlock);
                     break true;
                 }
                 LezHtlcEvent::Locked { .. } => {}
@@ -902,12 +917,17 @@ async fn resume_swap(
                         if !tx.is_empty() {
                             info!(%tx, "resume: LEZ refunded");
                         }
+                        ops.refunded(&entry.hashlock);
                         break true;
                     }
                     Ok(RefundOutcome::ClaimedByTaker(preimage)) => {
                         info!(hashlock = %entry.hashlock, "resume: taker claimed during refund race, claiming ETH");
                         let outcome = claim_eth(&config, &entry.swap_id, preimage).await;
-                        break !retain_after_eth_claim(outcome);
+                        let resolved = !retain_after_eth_claim(outcome);
+                        if resolved {
+                            ops.completed(&entry.hashlock);
+                        }
+                        break resolved;
                     }
                     Err(e) => {
                         warn!(hashlock = %entry.hashlock, "resume: LEZ refund not confirmed, keeping entry: {e}");
@@ -936,6 +956,7 @@ pub async fn reconcile(
     config: &SwapConfig,
     store: &Arc<StateStore>,
     json: bool,
+    ops: &Arc<OpsLedger>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut resume_handles = Vec::new();
     let entries = store.snapshot();
@@ -964,6 +985,7 @@ pub async fn reconcile(
                 entry.hashlock
             );
             store.remove(&entry.hashlock);
+            ops.failed(&entry.hashlock, FailureCode::CorruptEntry);
             continue;
         };
 
@@ -985,11 +1007,12 @@ pub async fn reconcile(
                 match escrow.state {
                 HTLCState::Claimed => {
                     // Taker revealed the preimage while we were down — collect the ETH.
-                    recover_claimed_escrow(config, &entry, &escrow, store).await;
+                    recover_claimed_escrow(config, &entry, &escrow, store, ops).await;
                 }
                 HTLCState::Refunded => {
                     info!(hashlock = %entry.hashlock, "reconcile: escrow already refunded, dropping");
                     store.remove(&entry.hashlock);
+                    ops.refunded(&entry.hashlock);
                 }
                 HTLCState::Locked => {
                     // P1-4: detect the partial-lock wedge BEFORE the
@@ -1077,6 +1100,7 @@ pub async fn reconcile(
                                          reuse the secret."
                                     ),
                                 );
+                                ops.failed(&entry.hashlock, FailureCode::PartialLockWedge);
                             }
                             WedgeDisposition::RecoverClaimed => {
                                 // Taker claimed after our stale read (possibly in
@@ -1092,7 +1116,7 @@ pub async fn reconcile(
                                         pre.filter(|e| e.state == HTLCState::Claimed)
                                     })
                                     .expect("RecoverClaimed implies a Claimed escrow read");
-                                recover_claimed_escrow(config, &entry, &claimed, store).await;
+                                recover_claimed_escrow(config, &entry, &claimed, store, ops).await;
                             }
                             WedgeDisposition::Dropped => {
                                 info!(
@@ -1100,6 +1124,7 @@ pub async fn reconcile(
                                     "reconcile: escrow refunded on fresh re-read — dropping"
                                 );
                                 store.remove(&entry.hashlock);
+                                ops.refunded(&entry.hashlock);
                             }
                             WedgeDisposition::Retain => {
                                 warn!(
@@ -1123,12 +1148,14 @@ pub async fn reconcile(
                                     info!(%tx, "reconcile: LEZ refunded");
                                 }
                                 store.remove(&entry.hashlock);
+                                ops.refunded(&entry.hashlock);
                             }
                             Ok(RefundOutcome::ClaimedByTaker(preimage)) => {
                                 info!(hashlock = %entry.hashlock, "reconcile: taker claimed during refund race, claiming ETH");
                                 let outcome = claim_eth(config, &entry.swap_id, preimage).await;
                                 if !retain_after_eth_claim(outcome) {
                                     store.remove(&entry.hashlock);
+                                    ops.completed(&entry.hashlock);
                                 }
                             }
                             Err(e) => {
@@ -1144,6 +1171,7 @@ pub async fn reconcile(
                             hashlock,
                             escrow.timelock,
                             store.clone(),
+                            ops.clone(),
                         )));
                     }
                 }
@@ -1182,6 +1210,7 @@ pub async fn reconcile(
                             bounded_read.absent_reads
                         ),
                     );
+                    ops.failed(&entry.hashlock, FailureCode::PreLockAbandoned);
                     }
                     AbsentEscrowAction::RetainInconclusive => {
                     // Round-6 P2: at least one read ERRORED, so absence is not

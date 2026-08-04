@@ -19,6 +19,7 @@ use swap_orchestrator::{
     },
     eth::client::EthClient,
     lez::client::LezClient,
+    ops::OpsLedger,
     swap::{
         maker::{AutoAcceptConfig, run_maker, run_maker_loop},
         progress::SwapProgress,
@@ -767,11 +768,19 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
             Err(e) => return json_err(&e.to_string()),
         };
 
+        // issue #98: durable, privacy-safe ops ledger, sibling of the
+        // fund-safety journal — see `swap_orchestrator::ops` module docs.
+        let ops_file = swap_orchestrator::ops::default_ledger_file(&state_file);
+        let ops_ledger = match OpsLedger::load(&ops_file) {
+            Ok(o) => Arc::new(o),
+            Err(e) => return json_err(&e.to_string()),
+        };
+
         // Crash recovery FIRST, mirroring the CLI loop (P1-3): reconcile
         // journaled in-flight swaps (refund / claim / resume) and fully RESOLVE
         // them before accepting any new swap (P1-A), so the 256-block replay
         // watcher can never rematch a still-OPEN lock and double-fund it.
-        let resume_handles = reconcile(&base_config, &store, /* json = */ true).await;
+        let resume_handles = reconcile(&base_config, &store, /* json = */ true, &ops_ledger).await;
         for handle in resume_handles {
             let _ = handle.await;
         }
@@ -798,6 +807,7 @@ pub unsafe extern "C" fn swap_ffi_run_maker_loop(
             progress,
             store.as_ref(),
             margin_minutes * 60,
+            ops_ledger.as_ref(),
         )
         .await;
         let json = serde_json::json!({

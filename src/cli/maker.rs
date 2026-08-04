@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9,6 +9,7 @@ use tracing::{error, warn};
 use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
 use crate::lez::client::LezClient;
+use crate::ops::OpsLedger;
 use crate::swap::maker::{AutoAcceptConfig, run_maker, run_maker_loop};
 use crate::swap::progress::SwapProgress;
 
@@ -126,6 +127,21 @@ pub struct MakerArgs {
     /// for a few more swaps before the maker would otherwise refuse a new one.
     #[arg(long, env = "FUND_LOW_WATER")]
     fund_low_water: Option<u128>,
+
+    /// Durable, privacy-safe operations ledger (issue #98): one append-only
+    /// record per accepted swap plus its terminal outcome. Defaults to
+    /// `maker-ops.jsonl` next to `--state-file`. Written by the standing
+    /// loop; read by `--ops-report`.
+    #[arg(long, env = "MAKER_OPS_FILE")]
+    ops_file: Option<String>,
+
+    /// Print unique accepted/completed/refunded/failed counts from the
+    /// durable ops ledger, then exit — the operator command issue #98 asks
+    /// for ("how many people actually tried, and how did it go"). Read-only;
+    /// does not require the loop to be running. Takes priority over every
+    /// mode except `--status`.
+    #[arg(long)]
+    ops_report: bool,
 }
 
 pub async fn cmd_maker(
@@ -139,6 +155,11 @@ pub async fn cmd_maker(
     // Takes priority over every other mode.
     if args.status {
         return cmd_maker_status(&args);
+    }
+
+    // Operator report entry point (issue #98): read-only, no network clients.
+    if args.ops_report {
+        return cmd_maker_ops_report(&args, json);
     }
 
     // Faucet-only sidecar mode: fund to target, then exit.
@@ -282,6 +303,42 @@ fn cmd_maker_status(args: &MakerArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the effective ops-ledger path: `--ops-file`/`MAKER_OPS_FILE` if
+/// set, else the sibling of `--state-file` (mirrors `default_status_file`).
+fn resolve_ops_file(args: &MakerArgs) -> PathBuf {
+    args.ops_file
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::ops::default_ledger_file(Path::new(&args.state_file)))
+}
+
+/// `swap-cli maker --ops-report`: the operator command issue #98 asks for —
+/// unique accepted/completed/refunded/failed counts from the durable ops
+/// ledger, read-only, no network. See `docs/counting-the-campaign.md` for
+/// what each number does and does not mean.
+fn cmd_maker_ops_report(args: &MakerArgs, json: bool) -> Result<()> {
+    let path = resolve_ops_file(args);
+    let ledger = OpsLedger::load(&path)?;
+    let report = ledger.report();
+
+    if json {
+        println!("{}", serde_json::to_string(&report).map_err(|e| {
+            SwapError::InvalidConfig(format!("failed to serialize ops report: {e}"))
+        })?);
+    } else {
+        println!("Ops ledger: {}", path.display());
+        println!("  accepted (distinct swaps ever reserved): {}", report.accepted_total);
+        println!("  completed:                               {}", report.completed);
+        println!("  refunded:                                 {}", report.refunded);
+        println!("  failed:                                   {}", report.failed);
+        for (code, count) in &report.failed_by_code {
+            println!("    - {code:?}: {count}");
+        }
+        println!("  in-flight (accepted, no terminal state yet): {}", report.in_flight);
+    }
+    Ok(())
+}
+
 /// The standing liquidity bot: `swap-cli maker --loop`.
 async fn cmd_maker_loop(
     args: MakerArgs,
@@ -341,7 +398,12 @@ async fn cmd_maker_loop(
     // is refunded/claimed (restoring balance) instead of wedging startup into a
     // restart-forever loop that never recovers the funds.
     let store = Arc::new(bot::StateStore::load(&args.state_file)?);
-    let resume_handles = bot::reconcile(config, &store, json).await;
+    // issue #98: durable, privacy-safe ops ledger — loaded alongside the
+    // fund-safety journal so a restart's reconciliation can record the
+    // terminal outcome of a swap that was in-flight when the process died
+    // (see `docs/counting-the-campaign.md`).
+    let ops_ledger = Arc::new(OpsLedger::load(resolve_ops_file(&args))?);
+    let resume_handles = bot::reconcile(config, &store, json, &ops_ledger).await;
 
     // P1-A: fully RESOLVE all reconciled/resumed entries BEFORE the loop accepts
     // any new swap. Running resume watchers concurrently with the loop lets the
@@ -544,6 +606,7 @@ async fn cmd_maker_loop(
         Some(tx),
         store.as_ref(),
         timelock_margin_secs,
+        ops_ledger.as_ref(),
     )
     .await;
 
@@ -572,18 +635,33 @@ async fn cmd_maker_loop(
     // (Resumed in-flight swaps were already drained before the loop started, so
     // there are no background recovery tasks left to await here — P1-A.)
 
+    // issue #98: the durable ops-ledger totals (across ALL restarts of this
+    // maker, not just this process's own uptime) versus `result`'s in-memory
+    // counters (this process only) are deliberately different numbers — see
+    // `docs/counting-the-campaign.md` for why both are printed.
+    let ops_report = ops_ledger.report();
     if json {
         println!(
             "{}",
             serde_json::json!({
                 "total_completed": result.total_completed,
                 "total_failed": result.total_failed,
+                "ops_ledger": ops_report,
             })
         );
     } else {
         println!(
-            "Maker loop stopped: {} completed, {} failed",
+            "Maker loop stopped: {} completed, {} failed (this process's uptime)",
             result.total_completed, result.total_failed
+        );
+        println!(
+            "Durable ops ledger (all-time, {}): accepted={} completed={} refunded={} failed={} in_flight={}",
+            resolve_ops_file(&args).display(),
+            ops_report.accepted_total,
+            ops_report.completed,
+            ops_report.refunded,
+            ops_report.failed,
+            ops_report.in_flight,
         );
     }
     Ok(())
