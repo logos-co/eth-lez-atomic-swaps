@@ -561,16 +561,21 @@ QString SwapUiPlugin::configFilePath()
 void SwapUiPlugin::loadConfigFromDisk()
 {
     // Note for anyone chasing a "my saved config didn't survive a restart"
-    // report in a dev/scaffold environment: `lgs basecamp launch <profile>`
-    // reinstalls the swap_ui plugin package on every invocation, and that
-    // reinstall clears this profile's module_data/swap_ui/ directory as a
-    // side effect (confirmed by polling the file across a real launch — it
-    // disappears seconds into the `lgpm install` step, well before this
-    // plugin's code ever runs). That is an lgpm/package-install behavior
-    // upstream of this function, not a load-order bug here; an
-    // already-installed profile that's simply relaunched (no reinstall)
-    // preserves module_data normally. The open-failed trace below exists so
-    // that distinction is diagnosable instead of silent.
+    // report: for a real installed app, the most likely explanation is that
+    // config.json was simply never written in the first place, not that it
+    // was written and then lost. Before the synchronous-save fix below
+    // (scheduleConfigSave()), the save was debounced behind a timer and only
+    // ever flushed from ~SwapUiPlugin() — but the out-of-process ui-host
+    // that hosts this plugin is torn down on Quit by a raw OS termination
+    // signal, not a graceful Qt shutdown, so that destructor never ran and
+    // the file was never created. (A secondary, since-superseded theory once
+    // recorded here was that `lgs basecamp launch <profile>`'s reinstall step
+    // was wiping an already-written module_data/swap_ui/ — real for that dev
+    // flow, but second-order: it explains a file disappearing, not a file
+    // that was never there for a real installed app in the first place.)
+    // The open-failed trace below stays valuable for telling these apart:
+    // "no config at path" after this fix means either a genuinely fresh
+    // profile or something new, not the old silent-never-wrote failure mode.
     const QString path = configFilePath();
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
