@@ -579,6 +579,41 @@ impl LezClient {
         self.program_id
     }
 
+    /// Idempotently ensure this client's account is initialized on-chain
+    /// (owned by the `authenticated_transfer` program). See
+    /// [`crate::lez::onboard::ensure_initialized`] — the sequencer silently
+    /// drops claims/transfers against a never-initialized account, so this
+    /// must run before either.
+    pub async fn ensure_initialized(&self) -> Result<crate::lez::onboard::InitOutcome> {
+        let signer = self.as_onboard_signer();
+        crate::lez::onboard::ensure_initialized(self.sequencer(), &signer)
+            .await
+            .map_err(SwapError::LezTransaction)
+    }
+
+    /// Claim from the native pinata faucet until this client's account
+    /// balance reaches `target`. See
+    /// [`crate::lez::onboard::claim_to_target`] for the full semantics
+    /// (auto-initializes first, 3s between claims, aborts after 5
+    /// consecutive failures).
+    pub async fn claim_to_target(
+        &self,
+        target: u128,
+        progress: Option<crate::lez::onboard::FundingProgressSender>,
+    ) -> Result<u128> {
+        let signer = self.as_onboard_signer();
+        crate::lez::onboard::claim_to_target(self.sequencer(), &signer, target, progress)
+            .await
+            .map_err(SwapError::LezTransaction)
+    }
+
+    fn as_onboard_signer(&self) -> crate::lez::onboard::Signer {
+        crate::lez::onboard::Signer {
+            account_id: self.account_id,
+            signing_key: self.private_key().clone(),
+        }
+    }
+
     // ── Internal helpers ──────────────────────────────────────────────
 
     /// Build, sign, and submit an HTLC program instruction.
