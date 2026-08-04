@@ -47,6 +47,12 @@ COPY src ./src
 COPY swap-ffi ./swap-ffi
 COPY lez-mcp ./lez-mcp
 COPY programs ./programs
+# examples/ (onboard_maker_account: one-off account provisioning, see its
+# doc comment) is NOT part of the shipped image — only target/release/
+# swap-cli is copied into the runtime stage below — but building it here
+# lets this same builder stage double as the provisioning tool during
+# deploy without a second toolchain image.
+COPY examples ./examples
 
 # RISC0_SKIP_BUILD=1: without it, cargo reaches for the risc0 guest
 # toolchain (rzup) while evaluating the workspace and breaks in a plain
