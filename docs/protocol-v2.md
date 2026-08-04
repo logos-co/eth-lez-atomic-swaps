@@ -247,6 +247,14 @@ SwapAcceptV2(bytes32 offerId,bytes32 offerDigest,uint256 ethereumChainId,address
 
 The duplicated offer fields MUST equal the verified nested offer's typed values. `offerDigest` MUST be recomputed from that nested offer. `ethSwapId`, `ethLockTxHash`, and `hashlock` are nonzero.
 
+The current type authenticates the taker's Ethereum EOA but only carries a
+self-declared `takerLezAccount`; it does not prove control of that LEZ account.
+Public mode therefore remains blocked until a LEZ-native proof-of-possession
+mechanism is specified, signed over this exact acceptance/offer binding, and
+verified before reservation. Treating a syntactically valid account identifier
+as possession is forbidden: it lets an attacker repeatedly strand the maker's
+single inventory slot in an escrow nobody can claim.
+
 ### EOA signature rules
 
 - Signature is exactly 65 bytes `r || s || v`.
@@ -657,18 +665,21 @@ For both messages, flip one bit or choose a distinct valid value in every field,
 
 ## Remaining blockers
 
-These are external values or approvals, not unspecified protocol behavior:
+These are the remaining protocol, integration, external-value, and approval gates:
 
 1. **BLOCKED — authoritative LEZ chain identity:** LEZ must expose the stable 32-byte `get_network_identity` capability above, and two independent endpoints must return the same release-pinned value.
 2. **BLOCKED — maker trust deployment:** choose the actual maker EOA/LEZ account, publish the exact `TrustedMakerV2` record and seven-day validity/renewal process, and approve package-based rotation/revocation.
 3. **BLOCKED — contract provenance:** the runtime hash agrees across two independent Sepolia providers and the repository carries the deployment record/source pointer, but an independent provenance review still must reproduce the reviewed build and link its runtime bytecode to that deployment.
-4. **BLOCKED — independent corrected-vector review:** the executable fixture gate reproduces both corrected vectors, signatures, recovered addresses, interface-v2 domain pin, and six-field swap ID. A reviewer who did not implement this correction still must independently reproduce and approve them. Merge also requires shared Rust fixture coverage plus the full mutation suite.
-5. **BLOCKED — LEZ submission/recovery API:** split create/fund submission or expose deterministic transaction identity/status so ambiguous broadcasts cannot be automatically duplicated.
-6. **BLOCKED — durable taker integration:** the current client returns only `swapId` after receipt and keeps preimage/progress in memory. It must prepare/persist tx hash/raw transaction and implement the journal stages above.
-7. **BLOCKED — Rust authorization ownership:** current C++/Delivery and watcher path is not the Rust-owned v2 gate. No public implementation is approved until the single entry point and no-fallback proof exist.
-8. **BLOCKED — operations approval:** approve 600-second LEZ headroom, 3 Sepolia confirmations, 256-block replay, rate limits, and the seven-day trust-pin lifetime for the public trial.
+4. **BLOCKED — shared typed fixtures and mutation coverage:** an independent reviewer reproduced the corrected interface-v2 deployment values, six-field swap ID, EIP-712 hashes, signatures, recovered EOAs, and both base58 account decodings. The executable fixture gate now enforces the duplicated typed fields and account encodings, but merge still requires a shared Rust consumer plus the full mutation suite above.
+5. **BLOCKED — taker LEZ proof of possession:** `SwapAcceptV2` currently proves only the Ethereum EOA and accepts a self-declared LEZ account. Specify and independently review a LEZ-native proof bound to the exact accept/offer digest, then verify it before reservation or any LEZ call. Without it, a cheap attacker can monopolize the one-fill maker by repeatedly locking inventory to third-party accounts nobody can claim.
+6. **BLOCKED — shared Basecamp wallet ownership:** the current app still owns raw LEZ key/wallet-path configuration. Public Basecamp mode must consume the released shared `lez_core` account/signing boundary and expose no raw signing key, wallet path, or fallback secret-bearing configuration.
+7. **BLOCKED — identity-linkability and retention disclosure:** the protocol links the taker Ethereum address/transaction/hashlock to `takerLezAccount` on a public chain and retains durable replay tombstones. Approve the minimum retention policy and require an explicit tester-facing disclosure before acceptance.
+8. **BLOCKED — LEZ submission/recovery API:** split create/fund submission or expose deterministic transaction identity/status so ambiguous broadcasts cannot be automatically duplicated.
+9. **BLOCKED — durable taker integration:** the current client returns `{swap_id, tx_hash}` only after receipt and keeps preimage/progress in memory. It must prepare and persist the raw signed transaction, transaction hash, swap ID, receipt metadata, and journal stages above before broadcast/progress reporting.
+10. **BLOCKED — Rust authorization ownership:** current C++/Delivery and watcher path is not the Rust-owned v2 gate. No public implementation is approved until the single entry point and no-fallback proof exist.
+11. **BLOCKED — operations approval:** approve 600-second LEZ headroom, 3 Sepolia confirmations, 256-block replay, rate limits, and the seven-day trust-pin lifetime for the public trial.
 
-When all eight items are cleared and the required test matrix passes, the decision changes to **GO for public-mode implementation and release testing**. Until then the only safe result is **NO-GO**.
+When all eleven items are cleared and the required test matrix passes, the decision changes to **GO for public-mode implementation and release testing**. Until then the only safe result is **NO-GO**.
 
 ## Current-code deltas implied by this contract
 

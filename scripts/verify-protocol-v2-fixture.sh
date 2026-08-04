@@ -3,9 +3,14 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-fixture="$repo_root/tests/fixtures/protocol-v2-eip712.json"
+fixture="${1:-$repo_root/tests/fixtures/protocol-v2-eip712.json}"
 
-for command in cast jq; do
+if [[ ! -f "$fixture" ]]; then
+  echo "error: fixture not found: $fixture" >&2
+  exit 1
+fi
+
+for command in cast jq node; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "error: $command is required to verify $fixture" >&2
     exit 1
@@ -14,6 +19,32 @@ done
 
 json() {
   jq -er "$1" "$fixture"
+}
+
+base58_to_bytes32() {
+  node - "$1" <<'NODE'
+const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const value = process.argv[2];
+let number = 0n;
+for (const character of value) {
+  const digit = alphabet.indexOf(character);
+  if (digit < 0) {
+    throw new Error(`invalid base58 character: ${character}`);
+  }
+  number = number * 58n + BigInt(digit);
+}
+let hex = number === 0n ? "" : number.toString(16);
+if (hex.length % 2 !== 0) hex = `0${hex}`;
+let leadingZeroBytes = 0;
+while (leadingZeroBytes < value.length && value[leadingZeroBytes] === "1") {
+  leadingZeroBytes += 1;
+}
+hex = "00".repeat(leadingZeroBytes) + hex;
+if (hex.length !== 64) {
+  throw new Error(`base58 account decoded to ${hex.length / 2} bytes, expected 32`);
+}
+process.stdout.write(`0x${hex.toLowerCase()}`);
+NODE
 }
 
 expect_equal() {
@@ -61,13 +92,23 @@ offer_type=$(json '.offer.primary_type')
 offer_type_hash=$(cast keccak "$offer_type")
 expect_equal "offer type hash" "$offer_type_hash" "$(json '.offer.expected.type_hash')"
 
+maker_address=$(json '.actors.maker.address')
+maker_lez_json=$(json '.actors.maker.lez_account_json')
+maker_lez=$(base58_to_bytes32 "$(json '.offer.typed_values.maker_lez_account')")
+expect_equal "offer maker ETH actor" \
+  "$(json '.offer.typed_values.maker_eth_address')" "$maker_address"
+expect_equal "offer maker LEZ JSON actor" \
+  "$(json '.offer.typed_values.maker_lez_account')" "$maker_lez_json"
+expect_equal "offer maker LEZ bytes" "$maker_lez" \
+  "$(json '.actors.maker.lez_account_bytes')"
+
 offer_struct_hash=$(cast keccak "$(cast abi-encode \
   'f(bytes32,bytes32,uint256,address,bytes32,bytes32,bytes32,address,bytes32,uint256,uint128,uint64,uint64,uint64,uint32,uint64,uint64)' \
   "$offer_type_hash" \
   "$(json '.offer.typed_values.offer_id')" \
   "$chain_id" "$contract" "$code_hash" "$lez_chain" "$lez_program" \
-  "$(json '.offer.typed_values.maker_eth_address')" \
-  "$(json '.actors.maker.lez_account_bytes')" \
+  "$maker_address" \
+  "$maker_lez" \
   "$(json '.offer.typed_values.eth_amount_wei')" \
   "$(json '.offer.typed_values.lez_amount')" \
   "$(json '.offer.typed_values.lez_timelock_duration_sec')" \
@@ -83,7 +124,6 @@ expect_equal "offer digest" "$offer_digest" "$(json '.offer.expected.digest')"
 expect_equal "accept offer digest" "$(json '.accept.typed_values.offer_digest')" "$offer_digest"
 
 maker_key=$(json '.actors.maker.private_key')
-maker_address=$(json '.actors.maker.address')
 derived_maker=$(cast wallet address --private-key "$maker_key" | tr '[:upper:]' '[:lower:]')
 expect_equal "maker key address" "$derived_maker" "$maker_address"
 expect_equal "offer recovered signer" "$(json '.offer.expected.recovered_signer')" "$maker_address"
@@ -93,7 +133,14 @@ cast wallet verify --no-hash --address "$maker_address" \
   "$offer_digest" "$offer_signature" >/dev/null
 
 taker_address=$(json '.actors.taker.address')
-taker_lez=$(json '.actors.taker.lez_account_bytes')
+taker_lez_json=$(json '.actors.taker.lez_account_json')
+taker_lez=$(base58_to_bytes32 "$(json '.accept.typed_values.taker_lez_account')")
+expect_equal "accept taker ETH actor" \
+  "$(json '.accept.typed_values.taker_eth_address')" "$taker_address"
+expect_equal "accept taker LEZ JSON actor" \
+  "$(json '.accept.typed_values.taker_lez_account')" "$taker_lez_json"
+expect_equal "accept taker LEZ bytes" "$taker_lez" \
+  "$(json '.actors.taker.lez_account_bytes')"
 swap_id=$(cast keccak "$(cast abi-encode --packed \
   'f(address,address,uint256,bytes32,uint256,bytes32)' \
   "$taker_address" "$maker_address" \
@@ -108,6 +155,13 @@ expect_equal "accept contract" "$(json '.accept.typed_values.ethereum_htlc')" "$
 expect_equal "accept code hash" "$(json '.accept.typed_values.ethereum_htlc_code_hash')" "$code_hash"
 expect_equal "accept LEZ chain" "$(json '.accept.typed_values.lez_chain_id')" "$lez_chain"
 expect_equal "accept LEZ program" "$(json '.accept.typed_values.lez_htlc_program_id')" "$lez_program"
+for field in offer_id ethereum_chain_id ethereum_htlc ethereum_htlc_code_hash \
+  lez_chain_id lez_htlc_program_id maker_eth_address maker_lez_account \
+  eth_amount_wei lez_amount; do
+  expect_equal "accept duplicates offer ${field}" \
+    "$(json ".accept.typed_values.${field}")" \
+    "$(json ".offer.typed_values.${field}")"
+done
 
 accept_type=$(json '.accept.primary_type')
 accept_type_hash=$(cast keccak "$accept_type")
@@ -118,8 +172,8 @@ accept_struct_hash=$(cast keccak "$(cast abi-encode \
   "$accept_type_hash" \
   "$(json '.accept.typed_values.offer_id')" "$offer_digest" \
   "$chain_id" "$contract" "$code_hash" "$lez_chain" "$lez_program" \
-  "$(json '.accept.typed_values.maker_eth_address')" \
-  "$(json '.actors.maker.lez_account_bytes')" \
+  "$maker_address" \
+  "$maker_lez" \
   "$(json '.accept.typed_values.eth_amount_wei')" \
   "$(json '.accept.typed_values.lez_amount')" \
   "$swap_id" \
