@@ -11,6 +11,9 @@ contract EthHTLCTest is Test {
     address payable maker;
 
     bytes32 constant PREIMAGE = "secret_preimage_for_testing_1234";
+    /// @dev Stand-ins for LEZ AccountIds (exactly 32 bytes each).
+    bytes32 constant TAKER_LEZ = bytes32(uint256(0xA11CE));
+    bytes32 constant TAKER_LEZ_ALT = bytes32(uint256(0xB0B));
     bytes32 HASHLOCK;
     uint256 TIMELOCK;
     uint256 constant AMOUNT = 1 ether;
@@ -27,7 +30,7 @@ contract EthHTLCTest is Test {
 
     function _lockDefault() internal returns (bytes32 swapId) {
         vm.prank(taker);
-        swapId = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker);
+        swapId = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
     }
 
     // -------------------------------------------------------------------------
@@ -39,9 +42,9 @@ contract EthHTLCTest is Test {
 
         vm.expectEmit(true, true, true, true);
         bytes32 expectedId = keccak256(
-            abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK)
+            abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ)
         );
-        emit EthHTLC.Locked(expectedId, taker, maker, AMOUNT, HASHLOCK, TIMELOCK);
+        emit EthHTLC.Locked(expectedId, taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ);
 
         bytes32 swapId = _lockDefault();
 
@@ -52,9 +55,64 @@ contract EthHTLCTest is Test {
     function test_lock_computesCorrectSwapId() public {
         bytes32 swapId = _lockDefault();
         bytes32 expected = keccak256(
-            abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK)
+            abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ)
         );
         assertEq(swapId, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // takerLezAccount: swapId must bind the taker's LEZ account
+    // -------------------------------------------------------------------------
+
+    /// @dev The property the maker's matching logic depends on: two locks that
+    ///      are identical in EVERY parameter except takerLezAccount must still
+    ///      produce distinct swap ids, so both can coexist and each maps back
+    ///      to exactly one designated LEZ claimant.
+    function test_lock_distinctSwapIdsForDifferentTakerLezAccount() public {
+        vm.prank(taker);
+        bytes32 swapId1 = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
+
+        vm.prank(taker);
+        bytes32 swapId2 = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ_ALT);
+
+        // Same sender, recipient, amount, hashlock and timelock ...
+        EthHTLC.HTLC memory h1 = htlc.getHTLC(swapId1);
+        EthHTLC.HTLC memory h2 = htlc.getHTLC(swapId2);
+        assertEq(h1.sender, h2.sender);
+        assertEq(h1.recipient, h2.recipient);
+        assertEq(h1.amount, h2.amount);
+        assertEq(h1.hashlock, h2.hashlock);
+        assertEq(h1.timelock, h2.timelock);
+
+        // ... but distinct ids, distinct live entries, distinct LEZ claimants.
+        assertTrue(swapId1 != swapId2);
+        assertEq(h1.takerLezAccount, TAKER_LEZ);
+        assertEq(h2.takerLezAccount, TAKER_LEZ_ALT);
+        assertEq(uint8(h1.state), uint8(EthHTLC.SwapState.OPEN));
+        assertEq(uint8(h2.state), uint8(EthHTLC.SwapState.OPEN));
+    }
+
+    function test_lock_takerLezAccountRoundTripsThroughGetHTLC() public {
+        bytes32 swapId = _lockDefault();
+        assertEq(htlc.getHTLC(swapId).takerLezAccount, TAKER_LEZ);
+    }
+
+    function test_lock_revertsWithZeroTakerLezAccount() public {
+        vm.prank(taker);
+        vm.expectRevert(EthHTLC.InvalidTakerLezAccount.selector);
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, bytes32(0));
+    }
+
+    function testFuzz_lock_swapIdBindsTakerLezAccount(bytes32 lezA, bytes32 lezB) public {
+        vm.assume(lezA != bytes32(0) && lezB != bytes32(0));
+        vm.assume(lezA != lezB);
+
+        vm.prank(taker);
+        bytes32 idA = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, lezA);
+        vm.prank(taker);
+        bytes32 idB = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, lezB);
+
+        assertTrue(idA != idB);
     }
 
     // -------------------------------------------------------------------------
@@ -99,6 +157,7 @@ contract EthHTLCTest is Test {
         assertEq(h.amount, AMOUNT);
         assertEq(h.hashlock, HASHLOCK);
         assertEq(h.timelock, TIMELOCK);
+        assertEq(h.takerLezAccount, TAKER_LEZ);
         assertEq(uint8(h.state), uint8(EthHTLC.SwapState.OPEN));
     }
 
@@ -152,32 +211,32 @@ contract EthHTLCTest is Test {
     function test_lock_revertsWithZeroValue() public {
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidAmount.selector);
-        htlc.lock{value: 0}(HASHLOCK, TIMELOCK, maker);
+        htlc.lock{value: 0}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
     }
 
     function test_lock_revertsWithPastTimelock() public {
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidTimelock.selector);
-        htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp, maker);
+        htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp, maker, TAKER_LEZ);
     }
 
     function test_lock_revertsWithInsufficientTimelockDelta() public {
         uint256 delta = htlc.minTimelockDelta();
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidTimelock.selector);
-        htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp + delta, maker);
+        htlc.lock{value: AMOUNT}(HASHLOCK, block.timestamp + delta, maker, TAKER_LEZ);
     }
 
     function test_lock_revertsWithZeroHashlock() public {
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidHashLock.selector);
-        htlc.lock{value: AMOUNT}(bytes32(0), TIMELOCK, maker);
+        htlc.lock{value: AMOUNT}(bytes32(0), TIMELOCK, maker, TAKER_LEZ);
     }
 
     function test_lock_revertsWithZeroRecipient() public {
         vm.prank(taker);
         vm.expectRevert(EthHTLC.InvalidRecipient.selector);
-        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, payable(address(0)));
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, payable(address(0)), TAKER_LEZ);
     }
 
     function test_lock_revertsOnDuplicate() public {
@@ -186,7 +245,7 @@ contract EthHTLCTest is Test {
         vm.deal(taker, 10 ether);
         vm.prank(taker);
         vm.expectRevert(EthHTLC.SwapAlreadyExists.selector);
-        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker);
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
     }
 
     // -------------------------------------------------------------------------
@@ -292,7 +351,7 @@ contract EthHTLCTest is Test {
         address payable badRecipient = payable(address(rejector));
 
         vm.prank(taker);
-        bytes32 swapId = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, badRecipient);
+        bytes32 swapId = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, badRecipient, TAKER_LEZ);
 
         vm.prank(badRecipient);
         vm.expectRevert(EthHTLC.TransferFailed.selector);
@@ -305,10 +364,10 @@ contract EthHTLCTest is Test {
         vm.deal(badSender, 10 ether);
 
         vm.prank(badSender);
-        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker);
+        htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
 
         bytes32 swapId = keccak256(
-            abi.encodePacked(badSender, maker, AMOUNT, HASHLOCK, TIMELOCK)
+            abi.encodePacked(badSender, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ)
         );
 
         vm.warp(TIMELOCK);
@@ -342,7 +401,7 @@ contract EthHTLCTest is Test {
         uint256 timelock = block.timestamp + 600;
 
         vm.prank(taker);
-        bytes32 swapId = htlc.lock{value: AMOUNT}(XCHAIN_HASHLOCK, timelock, maker);
+        bytes32 swapId = htlc.lock{value: AMOUNT}(XCHAIN_HASHLOCK, timelock, maker, TAKER_LEZ);
 
         // Maker claims by revealing the preimage (as they would after locking on LEZ)
         vm.prank(maker);
@@ -358,7 +417,7 @@ contract EthHTLCTest is Test {
         uint256 timelock = block.timestamp + 600;
 
         vm.prank(taker);
-        bytes32 swapId = htlc.lock{value: AMOUNT}(XCHAIN_HASHLOCK, timelock, maker);
+        bytes32 swapId = htlc.lock{value: AMOUNT}(XCHAIN_HASHLOCK, timelock, maker, TAKER_LEZ);
 
         // Timelock expires, Taker reclaims ETH
         vm.warp(timelock);
@@ -380,7 +439,7 @@ contract EthHTLCTest is Test {
         // Swap 2: different params (different timelock)
         uint256 timelock2 = TIMELOCK + 300;
         vm.prank(taker);
-        bytes32 swapId2 = htlc.lock{value: 2 ether}(HASHLOCK, timelock2, maker);
+        bytes32 swapId2 = htlc.lock{value: 2 ether}(HASHLOCK, timelock2, maker, TAKER_LEZ);
 
         assertTrue(swapId1 != swapId2);
 
@@ -418,7 +477,7 @@ contract EthHTLCTest is Test {
 
         vm.deal(taker, amount);
         vm.prank(taker);
-        bytes32 swapId = htlc.lock{value: amount}(fuzzHashlock, fuzzTimelock, maker);
+        bytes32 swapId = htlc.lock{value: amount}(fuzzHashlock, fuzzTimelock, maker, TAKER_LEZ);
 
         EthHTLC.HTLC memory h = htlc.getHTLC(swapId);
         assertEq(h.amount, amount);
@@ -442,7 +501,7 @@ contract EthHTLCTest is Test {
 
         vm.deal(taker, amount);
         vm.prank(taker);
-        bytes32 swapId = htlc.lock{value: amount}(HASHLOCK, fuzzTimelock, maker);
+        bytes32 swapId = htlc.lock{value: amount}(HASHLOCK, fuzzTimelock, maker, TAKER_LEZ);
 
         uint256 takerBalBefore = taker.balance;
         vm.warp(fuzzTimelock);
