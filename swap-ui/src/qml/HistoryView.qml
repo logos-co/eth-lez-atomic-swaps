@@ -91,10 +91,12 @@ ScrollView {
         var eth = r.eth || {}
         var lez = r.lez || {}
         var tl = r.timelocks || {}
+        var net = r.network || {}
         return {
             status: r.status || "",
             hashlock: r.hashlock || "",
             ethSwapId: eth.swap_id || "",
+            ethLockTx: eth.lock_tx || "",
             lezAmount: r.lez_amount || "",
             ethAmountWei: r.eth_amount_wei || "",
             ethAmountEth: r.eth_amount || "",
@@ -107,7 +109,18 @@ ScrollView {
             lezTimelockMinutes: tl.lez_minutes || "",
             ethTimelockMinutes: tl.eth_minutes || "",
             startedMs: Number(r.started_ms || 0),
-            finishedMs: Number(r.finished_ms || 0)
+            finishedMs: Number(r.finished_ms || 0),
+            // network is a fact about the run (which chain/sequencer the
+            // evidence was produced against), not evidence itself — kept
+            // as its own sub-object so ReceiptCard can derive explorer
+            // links (SwapLinks) without guessing at the chain.
+            network: {
+                lezSequencer: net.lez_sequencer || "",
+                ethRpc: net.eth_rpc || "",
+                ethChainId: Number(net.eth_chain_id || 0)
+            },
+            iteration: r.iteration !== undefined && r.iteration !== null
+                ? r.iteration : null
         }
     }
 

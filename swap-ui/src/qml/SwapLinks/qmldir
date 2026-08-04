@@ -1,0 +1,2 @@
+module SwapLinks
+singleton Links 1.0 Links.qml

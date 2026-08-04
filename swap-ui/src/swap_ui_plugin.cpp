@@ -1554,6 +1554,7 @@ void SwapUiPlugin::snapshotEvidenceFromConfig(QJsonObject& evidence) const
     evidence.insert(QStringLiteral("lez_timelock_minutes"), lezTimelockMinutes());
     evidence.insert(QStringLiteral("eth_timelock_minutes"), ethTimelockMinutes());
     evidence.insert(QStringLiteral("lez_sequencer"), lezSequencerUrl());
+    evidence.insert(QStringLiteral("eth_rpc"), ethRpcUrl());
 }
 
 // Taker evidence starts at startTaker/refundEth. After applyOfferObject the
@@ -1613,6 +1614,10 @@ void SwapUiPlugin::captureTakerProgressEvidence(const QString& step,
     } else if (step == QStringLiteral("EthLocked")) {
         m_takerEvidence.insert(QStringLiteral("eth_swap_id"),
                                valueString(data, QStringLiteral("swap_id")));
+        m_takerEvidence.insert(QStringLiteral("eth_lock_tx"),
+                               valueString(data, QStringLiteral("tx_hash")));
+        m_takerEvidence.insert(QStringLiteral("eth_chain_id"),
+                               data.value(QStringLiteral("chain_id")).toDouble(0));
     } else if (step == QStringLiteral("LezClaimed")) {
         m_takerEvidence.insert(QStringLiteral("lez_claim_tx"),
                                valueString(data, QStringLiteral("tx_hash")));
@@ -1632,6 +1637,10 @@ void SwapUiPlugin::captureMakerProgressEvidence(const QString& step,
                                valueString(data, QStringLiteral("swap_id")));
         m_makerEvidence.insert(QStringLiteral("hashlock"),
                                valueString(data, QStringLiteral("hashlock")));
+        m_makerEvidence.insert(QStringLiteral("eth_lock_tx"),
+                               valueString(data, QStringLiteral("tx_hash")));
+        m_makerEvidence.insert(QStringLiteral("eth_chain_id"),
+                               data.value(QStringLiteral("chain_id")).toDouble(0));
     } else if (step == QStringLiteral("LezLocked")) {
         m_makerEvidence.insert(QStringLiteral("lez_lock_tx"),
                                valueString(data, QStringLiteral("tx_hash")));
@@ -1683,8 +1692,7 @@ QJsonObject SwapUiPlugin::buildReceipt(const QString& role,
     eth.insert(QStringLiteral("swap_id"),
                jstr(maker ? str(evidence, "eth_swap_id")
                           : pick(resultEthTx, str(evidence, "eth_swap_id"))));
-    // ETH lock tx hash is not on the wire yet — PR3 adds it to EthLocked.
-    eth.insert(QStringLiteral("lock_tx"), QJsonValue::Null);
+    eth.insert(QStringLiteral("lock_tx"), jstr(str(evidence, "eth_lock_tx")));
     eth.insert(QStringLiteral("claim_tx"),
                jstr(maker ? pick(resultEthTx, str(evidence, "eth_claim_tx"))
                           : QString{}));
@@ -1728,7 +1736,11 @@ QJsonObject SwapUiPlugin::buildReceipt(const QString& role,
                    static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
     receipt.insert(QStringLiteral("network"),
                    QJsonObject{{QStringLiteral("lez_sequencer"),
-                                jstr(str(evidence, "lez_sequencer"))}});
+                                jstr(str(evidence, "lez_sequencer"))},
+                               {QStringLiteral("eth_rpc"),
+                                jstr(str(evidence, "eth_rpc"))},
+                               {QStringLiteral("eth_chain_id"),
+                                jnum("eth_chain_id")}});
     if (!error.isEmpty()) {
         receipt.insert(QStringLiteral("error"), error);
     }
