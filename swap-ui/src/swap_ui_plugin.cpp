@@ -1093,6 +1093,7 @@ void SwapUiPlugin::refundLez(const QString& hashlockHex)
     m_makerEvidence.insert(QStringLiteral("hashlock"), normaliseHashlock(hashlockHex));
     m_makerEvidence.insert(QStringLiteral("lez_program_id"), lezHtlcProgramId());
     m_makerEvidence.insert(QStringLiteral("lez_sequencer"), lezSequencerUrl());
+    m_makerEvidence.insert(QStringLiteral("eth_rpc"), ethRpcUrl());
     setMakerCurrentStep(QStringLiteral("Refunding"));
     addMakerProgressStep(QStringLiteral("Refunding"));
     setStatus(QStringLiteral("Refunding LEZ..."));
@@ -1141,6 +1142,7 @@ void SwapUiPlugin::refundEth(const QString& swapIdHex)
     m_takerEvidence.insert(QStringLiteral("eth_swap_id"), swapIdHex.trimmed());
     m_takerEvidence.insert(QStringLiteral("eth_htlc_address"), ethHtlcAddress());
     m_takerEvidence.insert(QStringLiteral("lez_sequencer"), lezSequencerUrl());
+    m_takerEvidence.insert(QStringLiteral("eth_rpc"), ethRpcUrl());
     setTakerCurrentStep(QStringLiteral("Refunding"));
     addTakerProgressStep(QStringLiteral("Refunding"));
     setStatus(QStringLiteral("Refunding ETH..."));
