@@ -15,6 +15,7 @@ use crate::{
     lez::client::{LezClient, RefundOutcome},
     lez::watcher as lez_watcher,
     lez::watcher::LezHtlcEvent,
+    ops::OpsRecorder,
     swap::{
         progress::{self, ProgressSender, SwapProgress},
         refund::now_unix,
@@ -71,6 +72,12 @@ pub struct LoopGuards<'a> {
     pub lez_timelock_secs: u64,
     /// Durable in-flight journal for crash recovery.
     pub journal: &'a dyn SwapJournal,
+    /// Durable, privacy-safe operations ledger (issue #98) — records
+    /// `accepted`/`completed`/`refunded`/`failed` counts for public-trial
+    /// reporting. Written strictly AFTER `journal` on every path, so an
+    /// ops-ledger failure can never gate or corrupt a swap decision (see
+    /// `crate::ops::OpsLedger`'s doc).
+    pub ops: &'a dyn OpsRecorder,
 }
 
 /// Compute the absolute LEZ expiry (unix seconds) to lock with, evaluated FRESH
@@ -595,6 +602,12 @@ pub async fn run_maker(
         guards
             .journal
             .record(&hashlock_hex, &format!("{swap_id}"))?;
+        // issue #98: record the durable, privacy-safe "accepted" ops event
+        // AFTER the fund-safety journal write succeeded, and only in loop
+        // mode (a single-shot interactive run is not public-trial
+        // operations). Idempotent on hashlock — never double-counts a
+        // restart-resumed swap, which never re-reaches this call site.
+        guards.ops.accepted(&hashlock_hex, &format!("{swap_id}"));
     }
 
     // 2. Lock LEZ (short timelock), naming the taker's OWN LEZ account as read
@@ -654,6 +667,7 @@ pub async fn run_maker(
                         lez_watcher_handle.abort();
                         if let Some(guards) = guards {
                             guards.journal.clear(&hashlock_hex);
+                            guards.ops.refunded(&hashlock_hex);
                         }
                         return Ok(SwapOutcome::Refunded {
                             eth_refund_tx: None,
@@ -679,6 +693,7 @@ pub async fn run_maker(
                         progress::report(&progress, SwapProgress::RefundComplete);
                         if let Some(guards) = guards {
                             guards.journal.clear(&hashlock_hex);
+                            guards.ops.refunded(&hashlock_hex);
                         }
                         return Ok(SwapOutcome::Refunded {
                             eth_refund_tx: None,
@@ -693,15 +708,16 @@ pub async fn run_maker(
                         progress::report(&progress, SwapProgress::ClaimingEth);
                         // Retry in-process with bounded backoff; on persistent
                         // failure this returns EthClaimUnresolved (Err propagates
-                        // → journal retained) so the loop STOPS for a supervised
-                        // restart rather than racing past an unresolved fund-
-                        // bearing entry (P1-B).
+                        // → journal retained, ops NOT recorded terminal yet) so
+                        // the loop STOPS for a supervised restart rather than
+                        // racing past an unresolved fund-bearing entry (P1-B).
                         let eth_claim_tx = claim_eth_after_reveal(eth_client, swap_id, preimage).await?;
                         progress::report(&progress, SwapProgress::EthClaimed {
                             tx_hash: format!("{eth_claim_tx}"),
                         });
                         if let Some(guards) = guards {
                             guards.journal.clear(&hashlock_hex);
+                            guards.ops.completed(&hashlock_hex);
                         }
                         return Ok(SwapOutcome::Completed {
                             preimage,
@@ -738,6 +754,7 @@ pub async fn run_maker(
 
     if let Some(guards) = guards {
         guards.journal.clear(&hashlock_hex);
+        guards.ops.completed(&hashlock_hex);
     }
 
     Ok(SwapOutcome::Completed {
@@ -770,6 +787,7 @@ pub async fn run_maker_loop(
     progress: Option<ProgressSender>,
     journal: &dyn SwapJournal,
     timelock_margin_secs: u64,
+    ops: &dyn OpsRecorder,
 ) -> AutoAcceptResult {
     let mut completed: u32 = 0;
     let mut failed: u32 = 0;
@@ -778,6 +796,7 @@ pub async fn run_maker_loop(
     let guards = LoopGuards {
         timelock_margin_secs,
         lez_timelock_secs: auto_config.lez_timelock_minutes * 60,
+        ops,
         journal,
     };
 
