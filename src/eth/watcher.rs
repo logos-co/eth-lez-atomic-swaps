@@ -73,12 +73,24 @@ pub async fn watch_events(
             }
         };
 
-        if latest >= from_block {
+        // Query up to one block BEHIND the reported head, not the head itself.
+        // `publicnode`/other load-balanced RPC providers route consecutive
+        // requests to different backend nodes; `get_block_number` can return a
+        // height that the node serving the immediately-following `eth_getLogs`
+        // hasn't indexed yet, which that node rejects with "block range
+        // extends beyond current head block" (-32602) even though `to_block`
+        // exactly equals what we were just told the head was. This is not
+        // fatal (the existing retry handles it), but it wastes a poll cycle
+        // and adds noise on every occurrence. A one-block safety margin costs
+        // one extra ~12s block of latency on Sepolia and eliminates the race.
+        let to_block = latest.saturating_sub(1);
+
+        if to_block >= from_block {
             // Locked
             match contract
                 .Locked_filter()
                 .from_block(from_block)
-                .to_block(latest)
+                .to_block(to_block)
                 .query()
                 .await
             {
@@ -112,7 +124,7 @@ pub async fn watch_events(
             match contract
                 .Claimed_filter()
                 .from_block(from_block)
-                .to_block(latest)
+                .to_block(to_block)
                 .query()
                 .await
             {
@@ -139,7 +151,7 @@ pub async fn watch_events(
             match contract
                 .Refunded_filter()
                 .from_block(from_block)
-                .to_block(latest)
+                .to_block(to_block)
                 .query()
                 .await
             {
@@ -161,8 +173,9 @@ pub async fn watch_events(
                 }
             }
 
-            // All three ranges succeeded — advance the cursor.
-            from_block = latest + 1;
+            // All three ranges succeeded — advance the cursor to just past the
+            // (deliberately lagged) range we just queried, not past the raw head.
+            from_block = to_block + 1;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;

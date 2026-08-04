@@ -19,30 +19,39 @@ thing reproducible on a bare box:
   repo checkout (which is also why `.maker-state.json` must never live
   CWD-relative in this deployment — see below).
 
-## Current mode: RESTRICTED counterparty
+## Current mode: PUBLIC (serves any taker)
 
-**This deployment runs in restricted (single-taker) mode by operator
-choice, not because the code requires it.**
+**This deployment runs in public mode: `RESTRICT_COUNTERPARTY=false` AND
+`LEZ_TAKER_ACCOUNT_ID` unset (commented out) in `maker.env`.**
 
-Historical note, since this changed mid-flight: PR #64 (Sepolia `EthHTLC`
-ABI — `Locked` now carries `takerLezAccount`) and PR #76 (engine binds each
-swap to that taker-supplied LEZ account) merged into `master` on 2026-08-04,
-*while this container was being built*, flipping `--restrict-counterparty`
-from a mandatory flag to an opt-in allowlist — `RESTRICT_COUNTERPARTY`
-unset/false is now the correct, fully-supported **public** default (the
-loop learns each taker's LEZ account from their own ETH lock; no static
-designated counterparty needed). The matching Sepolia `EthHTLC` redeploy
+PR #64 (Sepolia `EthHTLC` ABI — `Locked` now carries `takerLezAccount`) and
+PR #76 (engine binds each swap to that taker-supplied LEZ account) merged
+into `master` on 2026-08-04, flipping `--restrict-counterparty` from a
+mandatory flag to an opt-in allowlist — `RESTRICT_COUNTERPARTY` unset/false
+is the correct, fully-supported **public** default (the loop learns each
+taker's LEZ account from their own ETH lock; no static designated
+counterparty needed). The matching Sepolia `EthHTLC` redeploy
 (`0x351B0EA07739FA9F6769213927D7836a790A5FAF`, `INTERFACE_VERSION=2`) landed
 in the same window — see `docs/testnet.md`.
 
-This deployment nonetheless keeps `RESTRICT_COUNTERPARTY=true` for now,
-serving only the designated taker in `LEZ_TAKER_ACCOUNT_ID`, to keep the
-first live rollout conservative while the new public-taker path gets more
-runway. Flipping to public mode is a single env change — set
-`RESTRICT_COUNTERPARTY=false` (or drop the var) in `maker.env` and restart
-the container — no image rebuild, no Dockerfile change. The image itself
-never bakes `--restrict-counterparty` in as a fixed CLI flag for exactly
-this reason (see the `Dockerfile` CMD comment).
+### Gotcha: BOTH env vars gate restriction, not just `RESTRICT_COUNTERPARTY`
+
+`--restrict-counterparty` (`RESTRICT_COUNTERPARTY`) only gates the STARTUP
+validation (whether the flag/taker-id combination is internally consistent).
+The runtime allowlist check is separate: `classify_candidate`'s
+`designated_taker` is populated straight from `LEZ_TAKER_ACCOUNT_ID`
+**whenever that env var is set at all** — it does NOT check
+`RESTRICT_COUNTERPARTY`'s value. Concretely: if you flip a deployment from
+restricted back to public by only changing `RESTRICT_COUNTERPARTY=true` to
+`RESTRICT_COUNTERPARTY=false` but leave a stale `LEZ_TAKER_ACCOUNT_ID` in
+`maker.env`, the maker silently keeps rejecting every taker except that one
+account — it never becomes actually public. **Both** of the following are
+required for public mode:
+
+```bash
+RESTRICT_COUNTERPARTY=false
+#LEZ_TAKER_ACCOUNT_ID=...   # commented out / absent entirely, not just "false"
+```
 
 **If you rebuild this image from an older commit** (pre-2026-08-04, before
 PR #64/#76), `--restrict-counterparty` is still mandatory there and
@@ -148,11 +157,43 @@ node watch-offers.mjs
 Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 45s) showing
 the maker's LEZ/ETH amounts and `age=0s` on arrival.
 
+## Health & status (issue #93)
+
+`docker compose ps` / `docker inspect --format='{{json .State.Health}}'
+eth-lez-maker` report the container healthy based on
+`swap-cli maker --status`, which reads a periodic JSON snapshot
+(`MAKER_STATUS_FILE`, default `/app/state/maker-status.json`, rewritten every
+~15s by the running loop) and asserts on it — it is deliberately NOT a bare
+liveness proxy:
+
+- unhealthy if the status file itself has gone stale (the writer/loop is
+  wedged or dead),
+- unhealthy if the last CONFIRMED offer publish (a lightpush send the fleet
+  actually accepted, not just "the sidecar process exists") is older than 3x
+  `OFFER_HEARTBEAT_SECS`,
+- unhealthy if the offer-publisher sidecar isn't alive at all,
+- unhealthy if the loop has exited (`stopped`/`cancelled`) while the
+  container is still up.
+
+Inspect it directly:
+
+```bash
+docker exec eth-lez-maker swap-cli maker --status
+docker exec eth-lez-maker cat /app/state/maker-status.json
+```
+
+A permanently-red healthcheck is worse than none — it trains everyone to
+ignore the signal — so if this ever starts failing, treat it as real signal,
+not noise to relax away.
+
 ## Operations
 
 - Logs: `docker compose logs -f maker`
 - Restart: `docker compose restart maker`
 - Stop (graceful — SIGTERM lets swap-cli finish its current wait and reap
   the sidecar): `docker compose down`
-- Top up LEZ inventory without restarting: `swap-cli maker --fund-to
-  <target>` run against the same account (see `src/lez/onboard.rs`).
+- Top up LEZ inventory by hand: `swap-cli maker --fund-to <target>` run
+  against the same account (see `src/lez/onboard.rs`). Not usually needed —
+  the running loop already tops up automatically in the background whenever
+  the LEZ balance drops below `FUND_LOW_WATER` (default 3x `LEZ_AMOUNT`),
+  checked every `FUND_CHECK_SECS` (default 300s).

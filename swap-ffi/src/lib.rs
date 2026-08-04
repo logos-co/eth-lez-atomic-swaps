@@ -687,8 +687,13 @@ fn resolve_maker_state_file(
     }
 }
 
-/// Run the maker in an auto-accept loop. Blocks until cancelled, out of funds,
-/// or an unrecoverable error. Returns JSON: `{ "completed": N, "failed": M }`.
+/// Run the maker in an auto-accept loop. Blocks until cancelled or an
+/// unrecoverable error. Running out of LEZ inventory no longer stops the
+/// loop (issue #93 point 3 on the CLI side): it emits
+/// `AutoAcceptInsufficientFunds` progress and waits, retrying the balance
+/// check, rather than exiting — the caller decides whether to call
+/// `swap_ffi_stop_maker_loop` or top up externally. Returns JSON:
+/// `{ "completed": N, "failed": M }`.
 ///
 /// # Safety
 /// `config_json` must be a valid null-terminated JSON C string.
