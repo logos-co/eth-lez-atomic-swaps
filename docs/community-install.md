@@ -23,7 +23,7 @@ Basecamp — no official-catalog listing required.
 
 ## Prerequisites
 
-- **Logos Basecamp 0.2.1** — download from the
+- **Logos Basecamp 0.2.2** — download from the
   [logos-basecamp releases page](https://github.com/logos-co/logos-basecamp/releases):
   - macOS Apple Silicon: the `aarch64.dmg`; open it and drag Basecamp to
     Applications.
