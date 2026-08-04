@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# leg-swap.sh — the full two-peer atomic swap on localnet, end to end. Wraps the
-# app's own dogfooded demo (`make demo` == `lgs run --profile demo`, which boots
-# the LEZ localnet + Anvil, deploys the HTLC program, and drives a maker/taker
-# swap to completion).
+# leg-swap.sh — a full two-peer HEADLESS protocol regression on localnet. It
+# wraps `make demo` (`lgs run --profile demo`), which boots the LEZ localnet +
+# Anvil, deploys the HTLC program, and drives a maker/taker swap to completion.
+# It never launches Basecamp and must not be used as Basecamp UI acceptance.
 #
 #   PASS  = exit 0 AND both peers report "completed" with the SAME preimage
 #           (the atomicity invariant: one preimage unlocks both chains).

@@ -1,11 +1,19 @@
 # Golden-path canary (stage 1: in-repo)
 
-A continuously-run pipeline that replays the **real builder journey** on the LEZ
-↔ ETH atomic-swaps stack and turns each stage into an assertion. It is the
-smoke alarm for the whole golden path: boot a localnet → prove a valid tx
-reaches finality → prove a deliberately-invalid tx is loudly rejected → build
-the shippable modules (darwin-arm64, linux-amd64, linux-arm64) → verify the
-live release catalog and confirm the module install artifact.
+A continuously-run pipeline that turns protocol, package, and release-catalog
+stages into assertions for the LEZ ↔ ETH atomic-swaps stack: boot a localnet →
+prove a valid tx reaches finality → prove a deliberately-invalid tx is loudly
+rejected → build the shippable modules (darwin-arm64, linux-amd64,
+linux-arm64) → verify the live release catalog and confirm the module install
+artifact.
+
+This is supporting regression coverage, not end-user Basecamp acceptance. In
+particular, the `swap` leg runs the headless CLI demo and never launches
+Basecamp. Basecamp UI acceptance must install the modules and exercise them in
+the real pinned Basecamp host; see the repository README's
+[**Manual Basecamp Run**](../README.md#manual-basecamp-run) section and the
+Basecamp-native smoke work tracked in
+[PR #90](https://github.com/logos-co/eth-lez-atomic-swaps/pull/90).
 
 > **Stage 1** lives inside `logos-co/eth-lez-atomic-swaps` on purpose: zero new
 > repos, zero new permissions. It graduates to its own repo later (see
@@ -23,7 +31,7 @@ CANARY_RESULT {"leg":"chain","status":"red","evidence":"…","duration_s":42}
 | Leg | Script | What it proves | Cost / platform |
 |-----|--------|----------------|-----------------|
 | **chain** | `leg-chain.sh` | On a LEZ localnet: a **valid** typed transfer is accepted, included, and (funded) actually moves balance; and a **deliberately-invalid** `bare-u128` transfer is **loudly rejected**. | localnet + v0.2.0 toolchain |
-| **swap** | `leg-swap.sh` | The full **two-peer atomic swap** completes: both peers report `Completed` with the **same preimage** (the atomicity invariant). Wraps `make demo`. | heaviest: localnet + risc0 + Anvil |
+| **swap** | `leg-swap.sh` | A headless **two-peer protocol swap** completes: both CLI peers report `Completed` with the **same preimage** (the atomicity invariant). Wraps `make demo`; does not test Basecamp. | heaviest: localnet + risc0 + Anvil |
 | **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64, linux-amd64, linux-arm64** (see below) |
 | **catalog** | `leg-catalog.sh` | The **live** release catalog chain is intact: `logos-repo.json → index.json →` each `.lgx` asset URL, with names/versions cross-checked against each module's `metadata.json`. | cheap, network-only, any OS |
 
