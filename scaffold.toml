@@ -4,7 +4,7 @@ cache_root = ".scaffold/lez-cache"
 
 [repos.lez]
 source = "git@github.com:logos-blockchain/logos-execution-zone.git"
-pin = "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a" # tag v0.2.0
+pin = "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 path = ".scaffold/lez-cache/repos/lez/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
 
 [repos.spel]
@@ -13,13 +13,13 @@ pin = "3d639076ec0946a6a6db799dd5a4648007f362ee"
 
 [repos.basecamp]
 source = "https://github.com/logos-co/logos-basecamp.git"
-pin = "8a36a83966b6913072ba211d70056a4181a3f4fb" # tag 0.2.1
+pin = "d41a72bc7d77cfe25dfe2b888a70f16832ec8c53"
 build = "nix-flake"
 attr = { aarch64-darwin = "bin-macos-app", aarch64-linux = "bin-appimage", x86_64-darwin = "bin-macos-app", x86_64-linux = "bin-appimage" }
 
 [repos.lgpm]
 source = "github:logos-co/logos-package-manager"
-pin = "205d6bb295c43e9432aef367dd32dac82e39bddf" # must match the basecamp pin's lgpm rev — see tracker TR-21
+pin = "202af6fa0f0f4493bc59c8a609dff9326f78a18d"
 build = "nix-flake"
 attr = "cli-portable"
 
@@ -71,9 +71,6 @@ log_file = ".scaffold/basecamp/profiles/taker/basecamp.log"
 SWAP_UI_AUTO_ENV_FILE = ".env.taker"
 SWAP_UI_AUTO_ROLE = "taker"
 
-# deploy = false skips scaffold's deploy step (hardcoded methods/guest/src/bin
-# discovery, which this repo's programs/lez-htlc/ layout doesn't match); the
-# app's demo binary deploys the LEZ HTLC program itself.
 [run.profiles.demo]
 deploy = false
 post_deploy = "LEE_WALLET_HOME_DIR=.scaffold/wallet cargo run --features demo -- demo --no-localnet"

@@ -9,6 +9,14 @@ pub enum SwapError {
     #[error("Ethereum transaction reverted: {0}")]
     EthReverted(String),
 
+    /// The deployed EthHTLC does not match the ABI this build compiles against.
+    /// Raised at client construction (a single `eth_call` probe) so a mismatch
+    /// fails LOUDLY at startup instead of silently: a topic0/selector change
+    /// makes `Locked_filter().query()` return `Ok(vec![])` forever, which looks
+    /// exactly like "no taker yet".
+    #[error("EthHTLC ABI mismatch: {0}")]
+    EthAbiMismatch(String),
+
     // --- LEZ ---
     #[error("LEZ sequencer error: {0}")]
     LezSequencer(String),

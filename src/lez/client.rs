@@ -110,6 +110,29 @@ fn escrow_confirms_our_lock(
         && escrow.timelock == timelock_ms
 }
 
+/// Build the LEZ `Lock` instruction. `taker_id` becomes `escrow.taker_id`, the
+/// ONLY account whose signature `execute_claim` accepts — so for an ETH→LEZ
+/// swap it must be the account the taker published in its own ETH lock, never a
+/// statically configured one.
+///
+/// Extracted (and public) so an integration test can assert the whole chain —
+/// on-chain `Locked.takerLezAccount` → watcher decode → maker classification →
+/// this instruction's `taker_id` — without a live sequencer. The LEZ timelock is
+/// milliseconds on the wire; seconds everywhere else in this app.
+pub fn build_lock_instruction(
+    hashlock: [u8; 32],
+    taker_id: AccountId,
+    amount: u128,
+    timelock_secs: u64,
+) -> HTLCInstruction {
+    HTLCInstruction::Lock {
+        hashlock,
+        taker_id,
+        amount,
+        timelock: timelock_secs * 1000,
+    }
+}
+
 impl LezClient {
     /// Create a LezClient from a SwapConfig. Dispatches based on `LezAuth` variant:
     /// - `RawKey`: uses the hex-encoded signing key directly (tests / legacy).
@@ -334,12 +357,7 @@ impl LezClient {
         }
 
         // Step 1: Lock — claims the uninitialized PDA and stores escrow data.
-        let instruction = HTLCInstruction::Lock {
-            hashlock,
-            taker_id,
-            amount,
-            timelock: timelock_secs * 1000,
-        };
+        let instruction = build_lock_instruction(hashlock, taker_id, amount, timelock_secs);
 
         let lock_hash = self
             .send_htlc_instruction(vec![self.account_id, pda], instruction)

@@ -72,8 +72,9 @@ infra: contracts localnet-start
 # The former `swap-module-build`, `swap-ui-build`, `swap-lgx-build`, and
 # `swap-ui-run` targets (raw `nix build` / `nix run`) are gone: `lgs basecamp
 # build` runs the aggregate module build (writing LGX under
-# .scaffold/basecamp/{lgx,portable}/) and `lgs basecamp run swap_ui` runs the
-# standalone UI smoke test. See README "Manual Basecamp Run" / "Build Verification".
+# .scaffold/basecamp/{lgx,portable}/). UI testing always installs those packages
+# into the isolated maker/taker profiles and launches Basecamp. See README
+# "Manual Basecamp Run" / "Build Verification".
 #
 # The former `basecamp-{init,run,clean,paths}-*` targets + scripts/basecamp-instance.sh
 # are gone too. Their install path used the hand-rolled `extract_lgx_variant`
