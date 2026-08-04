@@ -69,7 +69,7 @@ unsafe fn parse_optional_bytes32(
         return Ok(None);
     }
     match unsafe { c_str_to_str(ptr) } {
-        Some(s) if s.is_empty() => Ok(None),
+        Some("") => Ok(None),
         Some(s) => {
             let s = s.strip_prefix("0x").unwrap_or(s);
             match hex::decode(s) {
@@ -310,10 +310,10 @@ fn forward_progress(
     let ud = user_data as usize;
     let handle = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&progress) {
-                if let Ok(c_str) = CString::new(json) {
-                    unsafe { cb(c_str.as_ptr(), ud as *mut c_void) };
-                }
+            if let Ok(json) = serde_json::to_string(&progress)
+                && let Ok(c_str) = CString::new(json)
+            {
+                unsafe { cb(c_str.as_ptr(), ud as *mut c_void) };
             }
         }
     });
