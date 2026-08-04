@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a swap you tried (success or failure)
+    url: https://github.com/logos-co/eth-lez-atomic-swaps/discussions/new?category=swap-reports
+    about: >-
+      Tell us you tried a swap, whether it worked, and what your setup was.
+      This is the front door for testers — no repo/scaffold commit needed.
+  - name: Feedback & help
+    url: https://github.com/logos-co/eth-lez-atomic-swaps/discussions/new?category=feedback-help
+    about: >-
+      Ask a question or report something confusing/broken as a catalog user.
+      Answerable entirely from Basecamp's App Manager screen.

@@ -433,6 +433,7 @@ For more detail on the messaging side, see [delivery-dogfooding.md](delivery-dog
 
 - Bump `[circuits].version` in [`scaffold.toml`](scaffold.toml) when the `lssa` revision in [`Cargo.toml`](Cargo.toml) needs a newer published `logos-blockchain-circuits` release; `lgs setup` fetches the matching bundle.
 - Bump `[repos.lez].pin` in [`scaffold.toml`](scaffold.toml) when intentionally moving to a different LEZ revision.
+- Testers report in via [Discussions](https://github.com/logos-co/eth-lez-atomic-swaps/discussions), not the issue tracker — the issue tracker is the engineering backlog. See [`docs/counting-the-campaign.md`](docs/counting-the-campaign.md) for the `gh api graphql` query that counts Swap reports (the real signal) plus release download counts (a ceiling, not a count).
 
 ## Disclaimer
 

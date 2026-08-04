@@ -1,0 +1,76 @@
+title: "[feedback] "
+labels:
+  - feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Please check the [Known Sharp Edges](https://github.com/logos-co/eth-lez-atomic-swaps#known-sharp-edges) section of the README first — your question may already be a known rough spot.
+
+        Everything below is answerable from Basecamp's **App Manager** screen and your own experience running the app — nothing here requires repo access or dev tooling.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Which platform were you running on?
+      options:
+        - Apple Silicon macOS
+        - Linux x86_64
+        - Linux aarch64
+        - Other (describe below)
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      description: How did you get the app running?
+      options:
+        - Basecamp catalog install
+        - Built from source
+        - Headless CLI
+    validations:
+      required: true
+  - type: input
+    id: swap-module-version
+    attributes:
+      label: "`swap` module version"
+      description: Open Basecamp's App Manager and copy the version shown for the `swap` module.
+      placeholder: e.g. 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: swap-ui-module-version
+    attributes:
+      label: "`swap_ui` module version"
+      description: Open Basecamp's App Manager and copy the version shown for the `swap_ui` module.
+      placeholder: e.g. 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: basecamp-version
+    attributes:
+      label: Basecamp version
+      description: Shown in Basecamp's own About/Settings screen.
+      placeholder: e.g. 1.2.3
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened vs what you expected
+      description: Describe the actual behavior and what you expected instead.
+      placeholder: |
+        Actual: ...
+        Expected: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (optional)
+      description: |
+        ⚠️ **Redact your keys.** Basecamp logs and `.env` files can contain private keys or mnemonics — strip any secret material before pasting anything here.
+      render: text
+    validations:
+      required: false
