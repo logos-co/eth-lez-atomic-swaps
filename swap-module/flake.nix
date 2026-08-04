@@ -32,11 +32,29 @@
       # carries this down to zerokit. Drop the whole thing once
       # logos-messaging/logos-delivery advances its nixpkgs past 2026-04-26.
       inputs.logos-delivery.inputs.nixpkgs.follows = "nixpkgs-crates-io";
+      # issue #70: swap zerokit itself for `zerokit-nocheck` below, which is
+      # the same zerokit at the same rev with the `rln` package's checkPhase
+      # disabled. logos-delivery-module's own flake ties its top-level
+      # `zerokit` input to `logos-delivery/zerokit` (`zerokit.follows =
+      # "logos-delivery/zerokit"`), so overriding it here at the
+      # logos-delivery level also covers the librln.dylib copy
+      # logos-delivery-module bundles directly — one override reaches both
+      # consumers. See nix/zerokit-nocheck/flake.nix for why.
+      inputs.logos-delivery.inputs.zerokit.follows = "zerokit-nocheck";
     };
     nixpkgs.follows = "logos-module-builder/nixpkgs";
     # Used ONLY as the `follows` target above. Nothing in this flake's own
     # outputs is built from it, so it does not move the module's toolchain.
     nixpkgs-crates-io.url = "github:NixOS/nixpkgs/21ea275a7c46aef9d4d6ddc962e6d562e9d94183";
+    # issue #70: zerokit's `rln` package with its checkPhase (`cargo test -p
+    # rln`) disabled — see nix/zerokit-nocheck/flake.nix. Kept on the same
+    # crates.io-403-fixed nixpkgs/rust-overlay chain as the rest of this
+    # input block so it doesn't regress issue #32.
+    zerokit-nocheck = {
+      url = "path:./nix/zerokit-nocheck";
+      inputs.zerokit.inputs.nixpkgs.follows = "nixpkgs-crates-io";
+      inputs.zerokit.inputs.rust-overlay.follows = "rust-overlay";
+    };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -301,13 +319,20 @@
             # `cargoDeps` rather than `cargoHash` so vendoring goes through
             # the User-Agent-carrying fetcher above.
             #
-            # The value is the one master's `cargoHash` already carries.
-            # `cargoHash` covers only the fixed-output vendor-staging tree —
-            # the checksum-verified crate tarballs, git checkouts and
-            # Cargo.lock — so it tracks the lockfile, not the nixpkgs
-            # building it: measured cold twice, against e9f00bd8 and
-            # nixos-unstable 0954f7ee (10 months and two different drvPaths
-            # apart), and the `got:` was identical.
+            # `cargoHash`/`cargoDeps.hash` covers only the fixed-output
+            # vendor-staging tree — the checksum-verified crate tarballs, git
+            # checkouts and Cargo.lock — so it tracks the LOCKFILE, not the
+            # nixpkgs building it (measured cold twice, against e9f00bd8 and
+            # nixos-unstable 0954f7ee, 10 months and two different drvPaths
+            # apart: identical `got:`). It DOES change whenever the workspace
+            # Cargo.toml/Cargo.lock gains/drops a dependency — e.g. bumped
+            # 2026-08-04 when the native-LEZ-faucet lift added `system_accounts`
+            # + `getrandom` to the root Cargo.toml. Bump it here (and re-check
+            # the whole repo for any other pinned `cargoHash`/`cargoDeps`/
+            # `outputHash` — this is currently the only Rust vendor hash) any
+            # time a workspace crate's dependency set changes; the build's own
+            # error message gives you the correct value directly (`hash
+            # mismatch ... use "sha256-..."`).
             #
             # Re-measure from a CLEAN checkout of the commit being pushed:
             # `swap-source` is a `path:".."` input, so it silently vendors
@@ -315,7 +340,7 @@
             cargoDeps = fetchCargoVendorUA {
               name = "swap-ffi-0.1.0";
               src = swapFfiSource;
-              hash = "sha256-DePrHOfh7Ucu27FfPoQvn1Mu0StCtF6RcJJTEKqp2oA=";
+              hash = "sha256-VrHw47Jxf4z3KuFcKAiysMuXMHLaIrsoC/O3AdrQljM=";
             };
             # --no-default-features: the `demo` feature only adds the risc0
             # guest build (needs the rzup toolchain + a nested cargo build the

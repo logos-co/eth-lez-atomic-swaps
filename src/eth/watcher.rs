@@ -15,6 +15,12 @@ pub enum EthHtlcEvent {
         amount: alloy::primitives::U256,
         hashlock: FixedBytes<32>,
         timelock: alloy::primitives::U256,
+        /// The taker's LEZ AccountId, published by the taker in its own ETH
+        /// lock. This is the ONLY account that can claim the counterpart LEZ
+        /// escrow (`execute_claim` asserts `taker.account_id ==
+        /// escrow.taker_id`), so the maker must lock to exactly this value —
+        /// never to a static configured account.
+        taker_lez_account: FixedBytes<32>,
         tx_hash: FixedBytes<32>,
     },
     Claimed {
@@ -87,6 +93,7 @@ pub async fn watch_events(
                             amount: event.amount,
                             hashlock: event.hashlock,
                             timelock: event.timelock,
+                            taker_lez_account: event.takerLezAccount,
                             tx_hash,
                         };
                         if tx.send(ev).await.is_err() {

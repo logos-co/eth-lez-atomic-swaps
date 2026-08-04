@@ -69,7 +69,7 @@ unsafe fn parse_optional_bytes32(
         return Ok(None);
     }
     match unsafe { c_str_to_str(ptr) } {
-        Some(s) if s.is_empty() => Ok(None),
+        Some("") => Ok(None),
         Some(s) => {
             let s = s.strip_prefix("0x").unwrap_or(s);
             match hex::decode(s) {
@@ -165,7 +165,12 @@ struct FfiConfig {
     lez_timelock_minutes: String,
     eth_timelock_minutes: String,
     eth_recipient_address: String,
-    lez_taker_account_id: String,
+    /// OPTIONAL designated counterparty (base58). A maker no longer requires it
+    /// — the taker publishes its own LEZ account in its ETH lock and the maker
+    /// binds the escrow to that — so an absent or empty value is valid and
+    /// means "serve any taker". When present it acts as an allowlist.
+    #[serde(default)]
+    lez_taker_account_id: Option<String>,
     #[serde(default = "default_poll")]
     poll_interval_ms: String,
 }
@@ -188,8 +193,18 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         .map_err(|e| format!("invalid eth_recipient_address: {e}"))?;
     let lez_htlc_program_id =
         parse_program_id(&c.lez_htlc_program_id).map_err(|e| e.to_string())?;
-    let lez_taker_account_id =
-        parse_base58_account_id(&c.lez_taker_account_id).map_err(|e| e.to_string())?;
+    // An empty string is treated as absent: the GUI always sends every config
+    // key, and a blank Config-tab field must mean "no designated counterparty",
+    // not "invalid base58".
+    let lez_taker_account_id = match c
+        .lez_taker_account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => Some(parse_base58_account_id(s).map_err(|e| e.to_string())?),
+        None => None,
+    };
 
     let lez_amount: u128 = c
         .lez_amount
@@ -295,10 +310,10 @@ fn forward_progress(
     let ud = user_data as usize;
     let handle = tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&progress) {
-                if let Ok(c_str) = CString::new(json) {
-                    unsafe { cb(c_str.as_ptr(), ud as *mut c_void) };
-                }
+            if let Ok(json) = serde_json::to_string(&progress)
+                && let Ok(c_str) = CString::new(json)
+            {
+                unsafe { cb(c_str.as_ptr(), ud as *mut c_void) };
             }
         }
     });

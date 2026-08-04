@@ -38,6 +38,9 @@ sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-
 # Builtin program registry (authenticated_transfer & co. moved here in v0.2.0)
 programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["artifacts"] }
 authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+# Pinata (faucet) system account id — same repo, same tag. Needed for the
+# native faucet claim (src/lez/faucet.rs); no `wallet` binary required.
+system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
 # LEZ HTLC types (HTLCInstruction, HTLCEscrow, HTLCState)
 lez_htlc_program = { path = "programs/lez-htlc/methods/guest" }
 
@@ -47,6 +50,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # Crypto
 sha2 = "0.10"
 rand = { version = "0.8", features = ["std", "std_rng"] }
+# CSPRNG for native LEZ account creation (src/lez/onboard.rs) — same crate/
+# version lez-mcp already uses for preview tokens.
+getrandom = "0.2"
 
 # Error handling
 thiserror = "2"

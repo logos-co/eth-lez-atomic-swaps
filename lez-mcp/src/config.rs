@@ -14,11 +14,16 @@ use swap_orchestrator::config::{LezAuth, parse_base58_account_id};
 pub const DEFAULT_SEQUENCER_URL: &str = "https://testnet.lez.logos.co";
 /// Default Sepolia WebSocket RPC (the app requires WebSocket).
 pub const DEFAULT_ETH_RPC_URL: &str = "wss://ethereum-sepolia-rpc.publicnode.com";
-/// Canonical shared EthHTLC deployment on Sepolia (2026-07-21).
-pub const DEFAULT_ETH_HTLC_ADDRESS: &str = "0x8636Fe66DFee166589a913140f14d5F57394834A";
+/// Canonical shared EthHTLC deployment on Sepolia (2026-08-04, INTERFACE_VERSION
+/// 2 — `lock()` takes the taker's LEZ AccountId). Supersedes the v1 deployment
+/// at 0x8636Fe66DFee166589a913140f14d5F57394834A, which is NOT interchangeable:
+/// `lock()`'s selector and `Locked`'s topic0 both changed.
+pub const DEFAULT_ETH_HTLC_ADDRESS: &str = "0x351B0EA07739FA9F6769213927D7836a790A5FAF";
 /// Block the canonical EthHTLC was deployed in — lower bound for Locked-event
-/// scans when resolving a hashlock to a swap id.
-pub const DEFAULT_ETH_HTLC_FROM_BLOCK: u64 = 11_316_985;
+/// scans when resolving a hashlock to a swap id. MUST track
+/// `DEFAULT_ETH_HTLC_ADDRESS`: a from-block older than the deployment makes the
+/// scan start before the contract existed.
+pub const DEFAULT_ETH_HTLC_FROM_BLOCK: u64 = 11_417_462;
 /// Canonical LEZ HTLC guest program id (hex, LE-per-word) for the v0.2.0 pin.
 pub const DEFAULT_LEZ_HTLC_PROGRAM_ID: &str =
     "27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070";

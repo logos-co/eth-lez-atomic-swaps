@@ -24,6 +24,7 @@ ScrollView {
     }
     property int expandedIndex: -1
     property bool clearArmed: false
+    property bool resetArmed: false
 
     function weiToEth(wei) {
         var n = Number(wei)
@@ -147,6 +148,12 @@ ScrollView {
                 onTriggered: historyRoot.clearArmed = false
             }
 
+            Timer {
+                id: resetDisarm
+                interval: 3000
+                onTriggered: historyRoot.resetArmed = false
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spacingNormal
@@ -189,6 +196,30 @@ ScrollView {
                         }
                     }
                 }
+                GhostButton {
+                    text: historyRoot.resetArmed ? "Confirm reset" : "Reset app data"
+                    accented: historyRoot.resetArmed
+                    Layout.preferredHeight: 32
+                    font.pixelSize: Theme.fontCaption
+                    onClicked: {
+                        if (historyRoot.resetArmed) {
+                            historyRoot.resetArmed = false
+                            swapBackend.resetConfig()
+                        } else {
+                            historyRoot.resetArmed = true
+                            resetDisarm.restart()
+                        }
+                    }
+                }
+            }
+
+            Text {
+                visible: historyRoot.resetArmed
+                text: "This deletes the saved Config (including any private keys) and restores the built-in defaults. Does not affect swap history."
+                color: Theme.warning
+                font.pixelSize: Theme.fontCaption
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
             }
 
             Text {

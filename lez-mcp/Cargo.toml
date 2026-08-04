@@ -21,8 +21,9 @@ sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execu
 sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
 programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["artifacts"] }
 authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
-# Pinata (faucet) system account id — same repo, same tag.
-system_accounts = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+# Pinata (faucet) system account id — pulled in transitively via
+# swap-orchestrator's src/lez/faucet.rs, which this crate re-exports from
+# (see src/faucet.rs); no direct use here.
 
 # MCP server SDK (official Rust SDK; builds cleanly on the pinned Rust 1.93.0).
 rmcp = { version = "3.0.1", features = ["server", "transport-io"] }

@@ -59,14 +59,36 @@ public:
     void refreshHistory() override;
     void clearHistory() override;
 
+    void resetConfig() override;
+
 private:
     QString configJson() const;
     QString messagingConfigJson() const;
     void applyConfigObject(const QJsonObject& obj);
     void applyOfferObject(const QJsonObject& offer);
+    void applyDefaultConfig();
     bool validateConfigForAction(const QString& action,
                                  const QString& hexValue = {},
                                  const QString& hexKey = {});
+
+    // Browsing the offer board only needs the network endpoints/constants
+    // used to reach Delivery and read offers (fetchOffersAsync itself takes
+    // no config at all — see fetchOffers()) — not the taker's own
+    // credentials, trade amounts, or timelocks. validateForTrade is the full
+    // validateConfig() check every other action (accept, publish,
+    // auto-accept, refund) still requires. See feat/browse-before-config.
+    bool validateForBrowse() const;
+    bool validateForTrade();
+
+    // Config persistence (config.json under module_data/swap_ui/, mirroring
+    // receiptsFilePath()). Holds two private keys (eth_private_key,
+    // lez_signing_key) — written 0600, atomic temp+rename. Saves are
+    // debounced from setConfigValue/applyConfigObject so a burst of keystrokes
+    // coalesces into one write.
+    static QString configFilePath();
+    void loadConfigFromDisk();
+    void scheduleConfigSave();
+    void saveConfigToDisk();
 
     void setBusyState();
     void updateRunning();
@@ -144,6 +166,7 @@ private:
     LogosObject* m_eventObject = nullptr;
     QTimer m_messagingPollTimer;
     QTimer m_coordinationPollTimer;
+    QTimer m_configSaveTimer;
     bool m_messagingInitInFlight = false;
     bool m_autoMessagingEnabled = false;
     std::vector<std::function<void()>> m_pendingMessagingContinuations;
