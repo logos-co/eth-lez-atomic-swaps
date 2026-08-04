@@ -32,11 +32,29 @@
       # carries this down to zerokit. Drop the whole thing once
       # logos-messaging/logos-delivery advances its nixpkgs past 2026-04-26.
       inputs.logos-delivery.inputs.nixpkgs.follows = "nixpkgs-crates-io";
+      # issue #70: swap zerokit itself for `zerokit-nocheck` below, which is
+      # the same zerokit at the same rev with the `rln` package's checkPhase
+      # disabled. logos-delivery-module's own flake ties its top-level
+      # `zerokit` input to `logos-delivery/zerokit` (`zerokit.follows =
+      # "logos-delivery/zerokit"`), so overriding it here at the
+      # logos-delivery level also covers the librln.dylib copy
+      # logos-delivery-module bundles directly — one override reaches both
+      # consumers. See nix/zerokit-nocheck/flake.nix for why.
+      inputs.logos-delivery.inputs.zerokit.follows = "zerokit-nocheck";
     };
     nixpkgs.follows = "logos-module-builder/nixpkgs";
     # Used ONLY as the `follows` target above. Nothing in this flake's own
     # outputs is built from it, so it does not move the module's toolchain.
     nixpkgs-crates-io.url = "github:NixOS/nixpkgs/21ea275a7c46aef9d4d6ddc962e6d562e9d94183";
+    # issue #70: zerokit's `rln` package with its checkPhase (`cargo test -p
+    # rln`) disabled — see nix/zerokit-nocheck/flake.nix. Kept on the same
+    # crates.io-403-fixed nixpkgs/rust-overlay chain as the rest of this
+    # input block so it doesn't regress issue #32.
+    zerokit-nocheck = {
+      url = "path:./nix/zerokit-nocheck";
+      inputs.zerokit.inputs.nixpkgs.follows = "nixpkgs-crates-io";
+      inputs.zerokit.inputs.rust-overlay.follows = "rust-overlay";
+    };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
