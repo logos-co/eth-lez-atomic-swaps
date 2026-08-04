@@ -7,6 +7,7 @@
 #include <QStringList>
 #include <QTimer>
 #include <QVariantList>
+#include <csignal>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -17,6 +18,7 @@
 
 class LogosAPI;
 class LogosObject;
+class QSocketNotifier;
 class Swap;
 
 class SwapUiPlugin : public SwapUiSimpleSource,
@@ -82,13 +84,32 @@ private:
 
     // Config persistence (config.json under module_data/swap_ui/, mirroring
     // receiptsFilePath()). Holds two private keys (eth_private_key,
-    // lez_signing_key) — written 0600, atomic temp+rename. Saves are
-    // debounced from setConfigValue/applyConfigObject so a burst of keystrokes
-    // coalesces into one write.
+    // lez_signing_key) — written 0600, atomic temp+rename.
+    //
+    // scheduleConfigSave() writes SYNCHRONOUSLY on every call (the payload is
+    // a few hundred bytes; there is no perf reason to defer it). This is
+    // deliberate: the out-of-process ui-host that hosts this plugin tears
+    // down via a raw OS termination signal on Quit, not a graceful Qt
+    // shutdown — ~SwapUiPlugin() never runs, and a debounce timer pending at
+    // the moment of that signal would have silently lost the edit. See
+    // installSignalHandlers()/handleUnixSignal() below for the belt-and-braces
+    // second line of defense.
     static QString configFilePath();
     void loadConfigFromDisk();
     void scheduleConfigSave();
     void saveConfigToDisk();
+
+    // Termination-signal handling (belt-and-braces flush; the primary fix is
+    // the synchronous save above). SIGTERM/SIGINT can arrive at any point in
+    // this out-of-process host's lifetime, so only async-signal-safe work
+    // (write() to a self-pipe) happens in the raw handler; the actual flush
+    // runs on the main thread's event loop via a QSocketNotifier, the
+    // standard Qt pattern for this. The previous disposition for each signal
+    // is captured and re-invoked after our flush so we don't swallow
+    // ui-host's own shutdown handling.
+    void installSignalHandlers();
+    void handleUnixSignal();
+    static void unixSignalHandler(int sig);
 
     void setBusyState();
     void updateRunning();
@@ -166,7 +187,7 @@ private:
     LogosObject* m_eventObject = nullptr;
     QTimer m_messagingPollTimer;
     QTimer m_coordinationPollTimer;
-    QTimer m_configSaveTimer;
+    QSocketNotifier* m_signalNotifier = nullptr;
     bool m_messagingInitInFlight = false;
     bool m_autoMessagingEnabled = false;
     std::vector<std::function<void()>> m_pendingMessagingContinuations;

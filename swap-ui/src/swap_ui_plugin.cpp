@@ -5,6 +5,7 @@
 #include "swap_api.h"
 #include "timelock_math.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -16,11 +17,16 @@
 #include <QMetaType>
 #include <QRandomGenerator>
 #include <QRegularExpression>
+#include <QSocketNotifier>
 #include <QStandardPaths>
 #include <QVariant>
 #include <QDebug>
 
 #include <cstdio>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace {
 
@@ -30,6 +36,19 @@ constexpr const char* kSwapModuleName = "swap";
 // receipts (newest first); the on-disk JSONL keeps everything. One line per
 // swap keeps growth modest — rotation is deliberately future work.
 constexpr int kMaxSurfacedReceipts = 200;
+
+// Self-pipe (socketpair) for async-signal-safe SIGTERM/SIGINT handling. The
+// raw handler (unixSignalHandler, below) may only call async-signal-safe
+// functions, so it does nothing but write() one byte here; the actual
+// (Qt-based) flush happens on the main thread via the QSocketNotifier set up
+// in SwapUiPlugin::installSignalHandlers(). File-scope because a signal
+// handler must be a plain function, and at most one SwapUiPlugin instance
+// lives per ui-host process. The previous disposition for each signal is
+// captured so it can be restored/re-delivered after our flush, so we don't
+// swallow ui-host's own shutdown handling.
+int g_signalSelfPipe[2] = { -1, -1 };
+struct sigaction g_prevSigTerm {};
+struct sigaction g_prevSigInt {};
 
 // Out-of-band trace logger. Basecamp installs a Qt message handler that
 // swallows qInfo/qWarning/qCritical, so plugin-side diagnostics never reach
@@ -276,13 +295,20 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     connect(&m_coordinationPollTimer, &QTimer::timeout,
             this, &SwapUiPlugin::coordinationPollSwapEvents);
 
-    // Debounced config-file save: setConfigValue fires on every keystroke, so
-    // a single (re)start-the-timer call per edit coalesces a burst of typing
-    // into one disk write instead of one per character.
-    m_configSaveTimer.setInterval(800);
-    m_configSaveTimer.setSingleShot(true);
-    connect(&m_configSaveTimer, &QTimer::timeout,
-            this, &SwapUiPlugin::saveConfigToDisk);
+    // Config-file save is now synchronous (see scheduleConfigSave()) — no
+    // debounce timer to wire up here any more. installSignalHandlers() below
+    // covers the out-of-process teardown case where even a synchronous write
+    // moments ago might be followed by more edits before a graceful quit.
+    installSignalHandlers();
+    if (auto* app = QCoreApplication::instance()) {
+        // Belt-and-braces: if the host ever DOES route Quit through a
+        // graceful QCoreApplication shutdown (rather than the raw
+        // termination signal this was written to withstand), flush there
+        // too. saveConfigToDisk() is idempotent/cheap so this costs nothing
+        // when the synchronous save already covers it.
+        connect(app, &QCoreApplication::aboutToQuit,
+                this, &SwapUiPlugin::saveConfigToDisk);
+    }
 
     validateConfig();
 }
@@ -291,13 +317,10 @@ SwapUiPlugin::~SwapUiPlugin()
 {
     m_messagingPollTimer.stop();
     m_coordinationPollTimer.stop();
-    // Flush a pending debounced save synchronously rather than dropping it:
-    // without this, quitting within the 800ms debounce window of the last
-    // edit would silently discard that edit.
-    if (m_configSaveTimer.isActive()) {
-        m_configSaveTimer.stop();
-        saveConfigToDisk();
-    }
+    // Config saves are synchronous now (see scheduleConfigSave()), so there
+    // is no pending debounced write to flush here — this is purely a
+    // best-effort net in case that ever regresses.
+    saveConfigToDisk();
     if (m_swap) {
         if (!makerJobId().isEmpty()) {
             m_swap->stopJob(makerJobId());
@@ -538,16 +561,21 @@ QString SwapUiPlugin::configFilePath()
 void SwapUiPlugin::loadConfigFromDisk()
 {
     // Note for anyone chasing a "my saved config didn't survive a restart"
-    // report in a dev/scaffold environment: `lgs basecamp launch <profile>`
-    // reinstalls the swap_ui plugin package on every invocation, and that
-    // reinstall clears this profile's module_data/swap_ui/ directory as a
-    // side effect (confirmed by polling the file across a real launch — it
-    // disappears seconds into the `lgpm install` step, well before this
-    // plugin's code ever runs). That is an lgpm/package-install behavior
-    // upstream of this function, not a load-order bug here; an
-    // already-installed profile that's simply relaunched (no reinstall)
-    // preserves module_data normally. The open-failed trace below exists so
-    // that distinction is diagnosable instead of silent.
+    // report: for a real installed app, the most likely explanation is that
+    // config.json was simply never written in the first place, not that it
+    // was written and then lost. Before the synchronous-save fix below
+    // (scheduleConfigSave()), the save was debounced behind a timer and only
+    // ever flushed from ~SwapUiPlugin() — but the out-of-process ui-host
+    // that hosts this plugin is torn down on Quit by a raw OS termination
+    // signal, not a graceful Qt shutdown, so that destructor never ran and
+    // the file was never created. (A secondary, since-superseded theory once
+    // recorded here was that `lgs basecamp launch <profile>`'s reinstall step
+    // was wiping an already-written module_data/swap_ui/ — real for that dev
+    // flow, but second-order: it explains a file disappearing, not a file
+    // that was never there for a real installed app in the first place.)
+    // The open-failed trace below stays valuable for telling these apart:
+    // "no config at path" after this fix means either a genuinely fresh
+    // profile or something new, not the old silent-never-wrote failure mode.
     const QString path = configFilePath();
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -564,16 +592,26 @@ void SwapUiPlugin::loadConfigFromDisk()
         return;
     }
     // applyConfigObject's own scheduleConfigSave() call at the end will
-    // debounce-rewrite this file with the same content a moment later —
+    // synchronously rewrite this file with the same content a moment later —
     // harmless (idempotent), simpler than threading a "don't save" flag
     // through applyConfigObject for the one caller that doesn't want it.
     applyConfigObject(obj);
     swapUiTrace(QStringLiteral("loadConfigFromDisk: loaded config from %1").arg(path));
 }
 
+// Writes SYNCHRONOUSLY — no debounce. The out-of-process ui-host that hosts
+// this plugin is torn down on Quit by a raw OS termination signal, not a
+// graceful Qt shutdown (~SwapUiPlugin() never runs in that path), so any
+// timer-based debounce window is a real data-loss window: whatever changed
+// in that window is silently discarded. The payload is a few hundred bytes
+// of JSON, so there is no performance reason to defer the write — every call
+// here (i.e. every keystroke in a Config field) hits disk immediately.
+// installSignalHandlers()/handleUnixSignal() below are an additional
+// belt-and-braces flush for the (already-covered) case of a signal landing
+// mid-edit.
 void SwapUiPlugin::scheduleConfigSave()
 {
-    m_configSaveTimer.start();
+    saveConfigToDisk();
 }
 
 void SwapUiPlugin::saveConfigToDisk()
@@ -614,9 +652,76 @@ void SwapUiPlugin::saveConfigToDisk()
     swapUiTrace(QStringLiteral("saveConfigToDisk: wrote %1").arg(path));
 }
 
+// Raw signal handler: async-signal-safe ONLY. write() on a pipe/socket fd is
+// one of the few functions POSIX guarantees is safe to call here; nothing
+// Qt-related (no QFile, no QString, no logging) may run in this context. All
+// it does is wake the QSocketNotifier set up in installSignalHandlers() by
+// writing the signal number to the self-pipe.
+void SwapUiPlugin::unixSignalHandler(int sig)
+{
+    const char byte = static_cast<char>(sig);
+    // Return value deliberately ignored: nothing safe to do with a failed
+    // write() from inside a signal handler, and the pipe is tiny/non-blocking
+    // so a full buffer is the only realistic failure.
+    ssize_t written = ::write(g_signalSelfPipe[1], &byte, sizeof(byte));
+    (void)written;
+}
+
+// Standard Qt self-pipe pattern: the raw signal handler above only writes a
+// byte; this sets up the socketpair + QSocketNotifier that lets the actual
+// (Qt-safe) flush run on the main thread's event loop instead of in signal
+// context. Captures the previous SIGTERM/SIGINT disposition so
+// handleUnixSignal() can restore and re-deliver it after flushing, rather
+// than silently swallowing whatever ui-host's own handler was doing (its own
+// shutdown logging/sequencing — see the "received termination signal"
+// message this was written to withstand).
+void SwapUiPlugin::installSignalHandlers()
+{
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, g_signalSelfPipe) != 0) {
+        swapUiTrace(QStringLiteral("installSignalHandlers: socketpair failed"));
+        return;
+    }
+    ::fcntl(g_signalSelfPipe[1], F_SETFL, O_NONBLOCK);
+
+    m_signalNotifier = new QSocketNotifier(g_signalSelfPipe[0], QSocketNotifier::Read, this);
+    connect(m_signalNotifier, &QSocketNotifier::activated,
+            this, &SwapUiPlugin::handleUnixSignal);
+
+    struct sigaction action {};
+    action.sa_handler = &SwapUiPlugin::unixSignalHandler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    sigaction(SIGTERM, &action, &g_prevSigTerm);
+    sigaction(SIGINT, &action, &g_prevSigInt);
+    swapUiTrace(QStringLiteral("installSignalHandlers: SIGTERM/SIGINT handlers installed"));
+}
+
+void SwapUiPlugin::handleUnixSignal()
+{
+    m_signalNotifier->setEnabled(false);
+    char byte = 0;
+    const auto n = ::read(g_signalSelfPipe[0], &byte, sizeof(byte));
+    const int sig = (n == sizeof(byte)) ? static_cast<int>(byte) : SIGTERM;
+
+    swapUiTrace(QStringLiteral("handleUnixSignal: signal %1 received, flushing config").arg(sig));
+    // Config saves are already synchronous (scheduleConfigSave()); this call
+    // is the belt-and-braces net for anything that slipped through — cheap
+    // and idempotent, so unconditional.
+    saveConfigToDisk();
+
+    // Chain to whatever disposition was previously installed (ui-host's own
+    // handler, or the OS default) so its shutdown sequencing still happens —
+    // we only ever want to run BEFORE it, never instead of it.
+    if (sig == SIGTERM) {
+        sigaction(SIGTERM, &g_prevSigTerm, nullptr);
+    } else if (sig == SIGINT) {
+        sigaction(SIGINT, &g_prevSigInt, nullptr);
+    }
+    ::raise(sig);
+}
+
 void SwapUiPlugin::resetConfig()
 {
-    m_configSaveTimer.stop();
     if (!QFile::remove(configFilePath())) {
         swapUiTrace(QStringLiteral("resetConfig: no config file to remove at %1")
                         .arg(configFilePath()));
