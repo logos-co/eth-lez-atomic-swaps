@@ -41,9 +41,7 @@ contract EthHTLCTest is Test {
         uint256 contractBalBefore = address(htlc).balance;
 
         vm.expectEmit(true, true, true, true);
-        bytes32 expectedId = keccak256(
-            abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ)
-        );
+        bytes32 expectedId = keccak256(abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ));
         emit EthHTLC.Locked(expectedId, taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ);
 
         bytes32 swapId = _lockDefault();
@@ -54,10 +52,21 @@ contract EthHTLCTest is Test {
 
     function test_lock_computesCorrectSwapId() public {
         bytes32 swapId = _lockDefault();
-        bytes32 expected = keccak256(
-            abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ)
-        );
+        bytes32 expected = keccak256(abi.encodePacked(taker, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ));
         assertEq(swapId, expected);
+    }
+
+    // -------------------------------------------------------------------------
+    // Version handshake
+    // -------------------------------------------------------------------------
+
+    /// @dev Pins the constant clients read at startup to detect a stale
+    ///      deployment. If you change the ABI and this test still passes, you
+    ///      forgot to bump INTERFACE_VERSION — which is the whole failure this
+    ///      constant exists to prevent, since a stale topic filter returns an
+    ///      empty result set rather than an error.
+    function test_interfaceVersion_isPinned() public view {
+        assertEq(htlc.INTERFACE_VERSION(), 2);
     }
 
     // -------------------------------------------------------------------------
@@ -68,6 +77,17 @@ contract EthHTLCTest is Test {
     ///      are identical in EVERY parameter except takerLezAccount must still
     ///      produce distinct swap ids, so both can coexist and each maps back
     ///      to exactly one designated LEZ claimant.
+    ///
+    ///      DELIBERATE ASYMMETRY — do not read "they coexist" as a feature.
+    ///      This contract admits unbounded concurrent locks per hashlock; the
+    ///      LEZ side does NOT. `LezClient::lock` derives the escrow PDA from
+    ///      the hashlock ALONE (src/lez/client.rs:313) and refuses to fund a
+    ///      hashlock whose PDA already exists, so there is exactly one
+    ///      legitimate LEZ escrow per hashlock. Two ETH locks sharing a
+    ///      hashlock therefore contend for a single LEZ escrow, and only one
+    ///      can ever be honoured. That is a hazard the off-chain maker must
+    ///      defend against (one hashlock per swap, never reused), not
+    ///      something the ETH side can or should enforce.
     function test_lock_distinctSwapIdsForDifferentTakerLezAccount() public {
         vm.prank(taker);
         bytes32 swapId1 = htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
@@ -103,6 +123,13 @@ contract EthHTLCTest is Test {
         htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, bytes32(0));
     }
 
+    /// @dev Samples the "different LEZ account => different swapId" direction
+    ///      only. This does NOT prove the packed encoding is injective, and no
+    ///      test here does: injectivity follows from every preimage component
+    ///      being fixed-width (20+20+32+32+32+32 = 168 bytes, no length-varying
+    ///      field, so no boundary ambiguity), which is an argument about the
+    ///      encoding, not something fuzzing can establish. What this catches is
+    ///      a regression that drops takerLezAccount back out of the preimage.
     function testFuzz_lock_swapIdBindsTakerLezAccount(bytes32 lezA, bytes32 lezB) public {
         vm.assume(lezA != bytes32(0) && lezB != bytes32(0));
         vm.assume(lezA != lezB);
@@ -366,9 +393,7 @@ contract EthHTLCTest is Test {
         vm.prank(badSender);
         htlc.lock{value: AMOUNT}(HASHLOCK, TIMELOCK, maker, TAKER_LEZ);
 
-        bytes32 swapId = keccak256(
-            abi.encodePacked(badSender, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ)
-        );
+        bytes32 swapId = keccak256(abi.encodePacked(badSender, maker, AMOUNT, HASHLOCK, TIMELOCK, TAKER_LEZ));
 
         vm.warp(TIMELOCK);
         vm.prank(badSender);
@@ -377,11 +402,15 @@ contract EthHTLCTest is Test {
     }
 
     // -------------------------------------------------------------------------
-    // Cross-chain compatibility: shared test vectors with LEZ HTLC
+    // Shared test vectors with the LEZ HTLC
     // -------------------------------------------------------------------------
     // These constants must match the Rust test suite in
     // programs/lez-htlc/methods/guest/src/main.rs (mod tests).
-    // If either side changes SHA-256 behavior, one of these tests will break.
+    // If either side changes SHA-256 behavior, the vector test below breaks.
+    //
+    // Only test_crossChain_sha256Compatibility is genuinely cross-chain (it
+    // asserts a constant the Rust suite asserts too). The other two run the
+    // Ethereum leg alone and are named accordingly.
 
     bytes32 constant XCHAIN_PREIMAGE = "secret_preimage_for_testing_1234";
     bytes32 constant XCHAIN_HASHLOCK = 0x0ef69611a91e0805079387fee0b89fb7d6fcd505220d407bacaa40ce031745df;
@@ -393,11 +422,18 @@ contract EthHTLCTest is Test {
         assertEq(computed, XCHAIN_HASHLOCK);
     }
 
-    function test_crossChain_lockAndClaimWithSharedPreimage() public {
-        // Simulate the Ethereum side of a cross-chain atomic swap.
-        // Taker locks ETH using the Maker's hashlock.
-        // Maker claims ETH by revealing the preimage.
-        // The same preimage is used on the LEZ side to claim lambda.
+    /// @dev NAME SCOPE: this is the ETHEREUM leg only, exercised with the
+    ///      shared hashlock vector. It is deliberately NOT called a cross-chain
+    ///      test, because nothing here crosses a chain. It does not prove that
+    ///      the emitted takerLezAccount reaches `HTLCInstruction::Lock`, that
+    ///      real `AccountId` byte ordering survives the round trip, or that
+    ///      maker-equals-taker is rejected before funding. Those need a real
+    ///      two-chain test in the Rust e2e suite; a name promising cross-chain
+    ///      coverage here would only stop someone from writing it.
+    function test_lockAndClaim_withSharedHashlockVector() public {
+        // Ethereum leg: taker locks ETH under the maker's hashlock, maker
+        // claims by revealing the preimage. On a real swap the same preimage
+        // then unlocks the LEZ side — untested here.
         uint256 timelock = block.timestamp + 600;
 
         vm.prank(taker);
@@ -411,7 +447,9 @@ contract EthHTLCTest is Test {
         assertEq(uint8(h.state), uint8(EthHTLC.SwapState.CLAIMED));
     }
 
-    function test_crossChain_refundAfterTimeout() public {
+    /// @dev ETHEREUM leg only — same naming caveat as the test above. The
+    ///      corresponding LEZ-side refund is not exercised anywhere here.
+    function test_refundAfterTimeout_withSharedHashlockVector() public {
         // Taker locks ETH, but Maker never claims (disappeared).
         // After timelock, Taker refunds. On LEZ side, Maker also refunds.
         uint256 timelock = block.timestamp + 600;

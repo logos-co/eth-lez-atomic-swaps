@@ -22,8 +22,9 @@ contract DeployEthHTLC is Script {
         vm.stopBroadcast();
 
         console.log("EthHTLC deployed at:", address(htlc));
-        console.log("  minTimelockDelta:", minTimelockDelta);
-        console.log("  lock signature:  ", LOCK_SIGNATURE);
+        console.log("  INTERFACE_VERSION:", htlc.INTERFACE_VERSION());
+        console.log("  minTimelockDelta: ", minTimelockDelta);
+        console.log("  lock signature:   ", LOCK_SIGNATURE);
         console.log("Set eth_htlc_address to the address above in every offer/config.");
     }
 }

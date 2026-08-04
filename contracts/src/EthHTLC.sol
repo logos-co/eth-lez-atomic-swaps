@@ -22,6 +22,28 @@ contract EthHTLC {
         SwapState state;
     }
 
+    /// @notice ABI generation of this contract. Clients MUST read this once at
+    ///         startup and refuse to operate on a mismatch.
+    ///
+    /// @dev Why this exists. The `Locked` topic0 changed in generation 2, and a
+    ///      topic mismatch is invisible in ordinary execution: filtering happens
+    ///      at the RPC node, and a query that matches nothing legitimately
+    ///      returns an empty array rather than an error. A maker pointed at a
+    ///      generation-1 deployment would therefore not fail — it would poll
+    ///      forever and simply never see a lock. Nothing the contract does
+    ///      during `lock`/`claim`/`refund` can make that loud, so the signal has
+    ///      to be a value the client reads explicitly and up front.
+    ///
+    ///      Generation 1 is the pre-`takerLezAccount` deployment (the shared
+    ///      Sepolia EthHTLC). It has no `INTERFACE_VERSION`, so the startup call
+    ///      reverts there instead of returning 1 — which is equally loud, and is
+    ///      why generation 1 is never returned by any deployed contract.
+    ///
+    ///      Bump this on any change to the `lock`/`claim`/`refund` signatures,
+    ///      the `HTLC` struct layout, or the `Locked`/`Claimed`/`Refunded` event
+    ///      signatures.
+    uint256 public constant INTERFACE_VERSION = 2;
+
     uint256 public immutable minTimelockDelta;
 
     mapping(bytes32 => HTLC) public htlcs;
@@ -65,12 +87,11 @@ contract EthHTLC {
     ///        on-chain so the maker can name it as the designated claimant of
     ///        the counterpart LEZ lock. Must be non-zero.
     /// @return swapId Deterministic identifier for this HTLC.
-    function lock(
-        bytes32 hashlock,
-        uint256 timelock,
-        address payable recipient,
-        bytes32 takerLezAccount
-    ) external payable returns (bytes32 swapId) {
+    function lock(bytes32 hashlock, uint256 timelock, address payable recipient, bytes32 takerLezAccount)
+        external
+        payable
+        returns (bytes32 swapId)
+    {
         if (msg.value == 0) revert InvalidAmount();
         if (timelock <= block.timestamp + minTimelockDelta) revert InvalidTimelock();
         if (recipient == address(0)) revert InvalidRecipient();
@@ -78,9 +99,7 @@ contract EthHTLC {
         if (takerLezAccount == bytes32(0)) revert InvalidTakerLezAccount();
 
         // All components are fixed-width, so encodePacked is unambiguous.
-        swapId = keccak256(
-            abi.encodePacked(msg.sender, recipient, msg.value, hashlock, timelock, takerLezAccount)
-        );
+        swapId = keccak256(abi.encodePacked(msg.sender, recipient, msg.value, hashlock, timelock, takerLezAccount));
 
         if (htlcs[swapId].state != SwapState.EMPTY) revert SwapAlreadyExists();
 
