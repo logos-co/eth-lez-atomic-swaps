@@ -10,16 +10,14 @@ Basecamp — no official-catalog listing required.
 > and rapidsnark hashes). Intel macOS is not supported — upstream ships
 > no `macos-x86_64` circuits bundle.
 
-> **Status: release imminent.** The LEZ v0.2.0 client repin has landed on
-> `master`, so modules built from `master` talk to the public LEZ testnet
-> listed below. No module release has been *dispatched* yet — until the
-> first release workflow run is cut, the catalog URL resolves but offers
-> no packages; this guide is a preview of the flow.
->
-> The Linux legs have never been executed on a Linux runner, so treat
-> linux-amd64 / linux-arm64 as unproven until the first release run is
-> green. The matrix is `fail-fast: false`: if a Linux leg breaks, the
-> release still publishes the variants that did build.
+> **Current release (as of 2026-08-04): `swap v0.3.1` / `swap_ui v0.3.0`**,
+> published 2026-08-03. Both sidecars report
+> `builtVariants: [darwin-arm64, linux-amd64, linux-arm64]` and
+> `missingVariants: []` — all three platforms are built and published, and
+> `.github/workflows/build-modules.yml` now compiles both modules on
+> `ubuntu-latest` and `ubuntu-24.04-arm` (in addition to macOS) on every
+> push, so the Linux legs are exercised continuously, not just at release
+> time.
 
 ## Prerequisites
 
@@ -40,17 +38,30 @@ Basecamp — no official-catalog listing required.
    https://raw.githubusercontent.com/logos-co/eth-lez-atomic-swaps/master/logos-repo.json
    ```
 
-3. The "ETH ↔ LEZ Atomic Swaps" repository appears and is merged with
-   the built-in catalog.
+   This is the canonical catalog URL — it's what `canary/leg-catalog.sh`
+   verifies on every nightly run, and it doesn't depend on any one
+   person's domain. A broader personal mirror also exists at
+   `https://logos.substratestudios.xyz/logos-repo.json` (same `swap` /
+   `swap_ui` releases, plus other unrelated apps); use the URL above
+   unless you specifically need something only the mirror carries.
 
-## 2. Install swap_ui
+3. The "ETH ↔ LEZ Atomic Swaps" repository appears and is merged with
+   the built-in catalog. **Keep the built-in/default repository
+   enabled** — `swap`'s `delivery_module` dependency resolves from the
+   official Logos catalog, not from this one, so disabling it breaks
+   installation.
+
+## 2. Install swap (core) before swap_ui
+
+**Install order matters: `swap` (the core module) before `swap_ui` (the
+UI module).** A UI module installed first will not load.
 
 1. Go to the package/module browser.
-2. Install **swap_ui**. Basecamp resolves its declared dependencies —
-   **swap** (from this same catalog) and **delivery_module** (from the
-   official catalog) — automatically. If dependency resolution is not
-   offered, install **swap** first, then **swap_ui**.
-3. Restart Basecamp if the module doesn't appear immediately.
+2. Install **swap** first. Then install **swap_ui**, which declares
+   `swap` and **delivery_module** (from the official catalog) as
+   dependencies — Basecamp may resolve these automatically, but do not
+   rely on that if it installs `swap_ui` before `swap` is present.
+3. Restart Basecamp if a module doesn't appear immediately.
 
 ## 3. Configure the module
 

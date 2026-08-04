@@ -6,12 +6,15 @@
 #   PASS  = both modules build; the out-links resolve to a .lgx.
 #   FAIL  = a module's nix build failed (a real regression in the module or its
 #           pinned toolchain — the thing this leg exists to catch).
-#   BROKEN= nix missing, or invoked on a non-darwin-arm64 host (only that
-#           platform has real pinned hashes today — see swap-module/flake.nix
-#           and issue #32; other systems fall back to fakeSha256 and cannot build).
+#   BROKEN= nix missing, or invoked on a host/arch combo with no pinned hash
+#           in swap-module/flake.nix (see below).
 #
-# darwin-arm64 only. Nix caches aggressively, so a warm run is fast; a cold run
-# compiles the C++/Rust module + rapidsnark and can take many minutes.
+# Issue #32 (PR #53) pinned real circuits/rapidsnark hashes for darwin-arm64,
+# linux-amd64 (x86_64-linux), and linux-arm64 (aarch64-linux) — those are the
+# three variants swap-module/flake.nix can actually build today (no
+# x86_64-darwin: upstream ships no macos-x86_64 circuits bundle). Nix caches
+# aggressively, so a warm run is fast; a cold run compiles the C++/Rust
+# module + rapidsnark and can take many minutes.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=canary/lib/common.sh
@@ -25,11 +28,14 @@ fi
 
 ARCH="$(uname -m)"
 OS="$(uname -s)"
-if [ "$OS" != "Darwin" ] || [ "$ARCH" != "arm64" ]; then
-  emit_result "$LEG" broken \
-    "module .lgx-portable builds are darwin-arm64-only today (host is $OS/$ARCH; only aarch64-darwin has real pinned hashes — swap-module/flake.nix, issue #32)"
-  exit $?
-fi
+case "$OS/$ARCH" in
+  Darwin/arm64|Linux/x86_64|Linux/aarch64) ;;
+  *)
+    emit_result "$LEG" broken \
+      "module .lgx-portable builds have no pinned hash for $OS/$ARCH — swap-module/flake.nix only pins darwin-arm64, linux-amd64 (x86_64-linux), and linux-arm64 (aarch64-linux) (issue #32 / PR #53)"
+    exit $?
+    ;;
+esac
 
 declare -a MODULES=("swap-module" "swap-ui")
 built=()

@@ -8,6 +8,15 @@ This repo includes:
 - a headless local demo
 - a CLI for maker, taker, status, and refund flows
 
+## Just want to try it?
+
+Install the prebuilt `swap` / `swap_ui` modules into Basecamp from this
+repo's own release catalog — no toolchain, no ~50-minute Nix source
+build. See [`docs/community-install.md`](docs/community-install.md).
+
+Everything below this point is the developer path: building from
+source with `lgs`/scaffold.
+
 ## Default: Local Checks
 
 Run setup once from the repo root:
@@ -404,6 +413,7 @@ The former `make demo-makefile` / `make test-makefile` fallbacks (direct cargo +
 
 ## Documentation
 
+- [Community install](docs/community-install.md) — install the prebuilt `swap` / `swap_ui` modules into Basecamp from this repo's catalog, no build required
 - [FURPS+](FURPS.md) — Functional and non-functional requirements (v0.1, v0.2)
 - [ADR](ADR.md) — Architecture Decision Records (v0.1, v0.2)
 

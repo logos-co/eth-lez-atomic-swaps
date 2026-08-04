@@ -4,8 +4,8 @@ A continuously-run pipeline that replays the **real builder journey** on the LEZ
 ↔ ETH atomic-swaps stack and turns each stage into an assertion. It is the
 smoke alarm for the whole golden path: boot a localnet → prove a valid tx
 reaches finality → prove a deliberately-invalid tx is loudly rejected → build
-the shippable modules → verify the live release catalog → (on macOS) confirm the
-module install artifact.
+the shippable modules (darwin-arm64, linux-amd64, linux-arm64) → verify the
+live release catalog and confirm the module install artifact.
 
 > **Stage 1** lives inside `logos-co/eth-lez-atomic-swaps` on purpose: zero new
 > repos, zero new permissions. It graduates to its own repo later (see
@@ -24,7 +24,7 @@ CANARY_RESULT {"leg":"chain","status":"red","evidence":"…","duration_s":42}
 |-----|--------|----------------|-----------------|
 | **chain** | `leg-chain.sh` | On a LEZ localnet: a **valid** typed transfer is accepted, included, and (funded) actually moves balance; and a **deliberately-invalid** `bare-u128` transfer is **loudly rejected**. | localnet + v0.2.0 toolchain |
 | **swap** | `leg-swap.sh` | The full **two-peer atomic swap** completes: both peers report `Completed` with the **same preimage** (the atomicity invariant). Wraps `make demo`. | heaviest: localnet + risc0 + Anvil |
-| **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64 only** (see below) |
+| **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64, linux-amd64, linux-arm64** (see below) |
 | **catalog** | `leg-catalog.sh` | The **live** release catalog chain is intact: `logos-repo.json → index.json →` each `.lgx` asset URL, with names/versions cross-checked against each module's `metadata.json`. | cheap, network-only, any OS |
 
 Run them all (or a subset) with the orchestrator, which prints a summary table
@@ -98,10 +98,12 @@ on a free port. If no prebuilt binary exists it falls back to
 `.github/workflows/canary.yml` — nightly cron + `workflow_dispatch`:
 
 - **`catalog`** on `ubuntu-latest`: cheap, portable, always on.
-- **`modules`** on `macos-latest` (Apple-silicon): `nix build .#lgx-portable`.
-  This is **genuinely darwin-arm64-bound** — `swap-module`/`swap-ui` only carry
-  real pinned hashes for `aarch64-darwin` (other systems fall back to
-  `fakeSha256`; see `swap-module/flake.nix` and issue #32).
+- **`modules`** — a `fail-fast: false` matrix across `macos-latest`
+  (darwin-arm64), `ubuntu-latest` (linux-amd64), and `ubuntu-24.04-arm`
+  (linux-arm64): `nix build .#lgx-portable` on each. `swap-module`/`swap-ui`
+  carry real pinned hashes for all three (issue #32 / PR #53); a system
+  outside those three (e.g. x86_64-darwin) still reports `broken` — see
+  `swap-module/flake.nix`.
 - **`localnet-legs`** (chain + swap): **opt-in** via `workflow_dispatch`, and
   `continue-on-error`. Honest reason: booting a localnet needs the
   `sequencer_service` binary built from the LEZ v0.2.0 repo (a 20–30 min cold
