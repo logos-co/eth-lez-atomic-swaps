@@ -56,11 +56,36 @@ fn now_unix_ms() -> u64 {
 /// defaults than the single-shot flow (5/10): on the public testnet, LEZ lock
 /// *confirmation alone* can take up to 300s, so a 5-minute LEZ timelock leaves
 /// almost no margin for the maker to observe the preimage and claim before the
-/// taker's ETH refund window opens. 20/40 (with the 5-minute safety margin)
-/// gives the standing bot a safe window; single-shot / demo runs keep 5/10 for
-/// fast local iteration. An explicit env/flag value always wins over both.
-pub const LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES: u64 = 20;
-pub const LOOP_DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 40;
+/// taker's ETH refund window opens. Single-shot / demo runs keep 5/10 for fast
+/// local iteration. An explicit env/flag value always wins over both.
+///
+/// Raised from 20/40 to 30/50 on 2026-08-05 after a live near-miss on the
+/// public trial (swap `0x3569c083…`): the taker's LEZ claim landed only 17s
+/// before the (fresh, match-time-anchored) LEZ expiry. Mining the maker's own
+/// logs for that swap (`docker logs eth-lez-maker`) showed why — the public
+/// sequencer was degraded for the swap's entire life, logging
+/// `get_account failed: Request timeout` roughly every 60-90s from LEZ-lock
+/// (20:01:06) through to the claim (~20:19:11). The taker used essentially
+/// the FULL 20-minute LEZ window just to observe the lock and land a claim
+/// tx against a sequencer that kept timing out; 17s was luck, not headroom.
+/// The LEZ timelock — not the ETH/LEZ margin, and not the transit slack — was
+/// the binding constraint: `eth(40) - lez(20) = 20min` already vastly
+/// exceeded the code-enforced minimum gap of `margin(5) + slack(2) = 7min`,
+/// so the maker's own claim-after-LEZ-expiry safety window was never at risk.
+/// What was at risk is the taker's ability to finish a claim inside the LEZ
+/// window at all. 30 minutes gives ~50% more headroom for a repeat of this
+/// degradation pattern to resolve with margin to spare rather than a
+/// double-digit-second nail-biter. ETH moves to 50 to hold the existing
+/// 20-minute ETH/LEZ gap constant — the maker-safety invariant
+/// (`eth >= lez + margin + slack`, enforced below) does not require this
+/// wider gap, but preserving it keeps the maker's own reaction cushion
+/// exactly as generous as it is today rather than eroding it while fixing the
+/// taker-side problem. The tradeoff: a swap that never gets claimed now ties
+/// up maker LEZ capital for 30 minutes (was 20) and taker ETH for 50 (was 40)
+/// before either side can refund — accepted for a public trial, where a
+/// correct-but-slower refund is a far better outcome than another near-miss.
+pub const LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES: u64 = 30;
+pub const LOOP_DEFAULT_ETH_TIMELOCK_MINUTES: u64 = 50;
 
 /// Transit slack (minutes) the startup timelock guard demands ON TOP of the
 /// safety margin. The runtime gate compares the taker's *absolute* on-chain ETH
@@ -1812,6 +1837,37 @@ mod tests {
         assert!(validate_timelocks(5, 15, 5).is_ok());
         // Exactly on the strict boundary (margin + transit slack) passes.
         assert!(validate_timelocks(5, 12, 5).is_ok());
+    }
+
+    /// Regression guard for the shipped `maker --loop` defaults themselves
+    /// (not just the validator function in the abstract). Ties the actual
+    /// constants to the invariant so a future edit that raises
+    /// `LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES` without a matching raise to
+    /// `LOOP_DEFAULT_ETH_TIMELOCK_MINUTES` (or that shrinks the gap below the
+    /// margin+slack floor) fails the test suite instead of silently landing
+    /// on a config that wedges the loop the way the pre-2026-08-03 5/10
+    /// defaults did. Also asserts the LEZ window did not regress below what
+    /// the 2026-08-04 near-miss (swap `0x3569c083…`, 17s from expiry) showed
+    /// was too thin: at least 25 minutes of taker claim headroom.
+    #[test]
+    fn loop_defaults_pass_validate_timelocks_with_headroom() {
+        assert!(
+            validate_timelocks(
+                LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES,
+                LOOP_DEFAULT_ETH_TIMELOCK_MINUTES,
+                5,
+            )
+            .is_ok()
+        );
+        assert!(
+            LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES >= 25,
+            "LEZ timelock window regressed below the post-near-miss floor \
+             (25 min) established 2026-08-05"
+        );
+        // Preserve the maker's existing ETH/LEZ reaction cushion — don't let
+        // a future edit narrow it back toward the code-enforced minimum
+        // (margin + slack = 7min) while only fixing the taker-side window.
+        assert!(LOOP_DEFAULT_ETH_TIMELOCK_MINUTES - LOOP_DEFAULT_LEZ_TIMELOCK_MINUTES >= 15);
     }
 
     #[test]
