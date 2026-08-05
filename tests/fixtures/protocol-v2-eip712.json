@@ -1,0 +1,92 @@
+{
+  "fixture_version": 2,
+  "protocol_version": 2,
+  "warning": "Synthetic public test keys. Never use these keys for funds.",
+  "actors": {
+    "maker": {
+      "private_key": "0x59c6995e998f97a5a0044976f7d13e8e7f6fbba83ce7f0b1037f6142155b28f0",
+      "address": "0x4deef74c0c46e1267a126b16af3a7c151b3c6c85",
+      "lez_account_bytes": "0x5555555555555555555555555555555555555555555555555555555555555555",
+      "lez_account_json": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6"
+    },
+    "taker": {
+      "private_key": "0x8b3a350cf5c34c9194ca3a545d65b8a31b5079b7214c06e24b7e0821a30bd55d",
+      "address": "0x4e4cdb4676d22a569ff136ff79dcdff5d1766734",
+      "lez_account_bytes": "0x9999999999999999999999999999999999999999999999999999999999999999",
+      "lez_account_json": "BLbDu5FZUdSfLrGejhuaWw5iMJBo3j3TVRyPv9rfJyMA"
+    }
+  },
+  "domain": {
+    "type_string": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)",
+    "name": "Logos Atomic Swaps",
+    "version": "2",
+    "chain_id": "11155111",
+    "verifying_contract": "0x351b0ea07739fa9f6769213927d7836a790a5faf",
+    "lez_chain_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+    "lez_htlc_program_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+    "ethereum_htlc_code_hash": "0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2",
+    "type_hash": "0xd87cd6ef79d4e2b95e15ce8abf732db51ec771f1ca2edccf22a46c729ac56472",
+    "salt": "0xa068a79e8729e9a3722281426753c1ad84cd1c749aa83c9e08be6f541c0df9a7",
+    "separator": "0xc520ac51bfbdde77a788eb01b046af1028d343084a932896f5fbab9538a5f906"
+  },
+  "offer": {
+    "primary_type": "SwapOfferV2(bytes32 offerId,uint256 ethereumChainId,address ethereumHtlc,bytes32 ethereumHtlcCodeHash,bytes32 lezChainId,bytes32 lezHtlcProgramId,address makerEthAddress,bytes32 makerLezAccount,uint256 ethAmountWei,uint128 lezAmount,uint64 lezTimelockDurationSec,uint64 ethTimelockDurationSec,uint64 minTimelockMarginSec,uint32 maxFills,uint64 issuedAt,uint64 expiresAt)",
+    "typed_values": {
+      "offer_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ethereum_chain_id": "11155111",
+      "ethereum_htlc": "0x351b0ea07739fa9f6769213927d7836a790a5faf",
+      "ethereum_htlc_code_hash": "0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2",
+      "lez_chain_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "lez_htlc_program_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+      "maker_eth_address": "0x4deef74c0c46e1267a126b16af3a7c151b3c6c85",
+      "maker_lez_account": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+      "eth_amount_wei": "100000000000000",
+      "lez_amount": "150",
+      "lez_timelock_duration_sec": "1200",
+      "eth_timelock_duration_sec": "2400",
+      "min_timelock_margin_sec": "300",
+      "max_fills": "1",
+      "issued_at": "2000000000",
+      "expires_at": "2000000120"
+    },
+    "expected": {
+      "type_hash": "0x8336c1e25297cee0ed720120007651c362617dc754421b905c6d24ad473f0e6f",
+      "struct_hash": "0x3c90b0b5f24883e0b933405a1bab7248d58bff8d117b54d874c53e3a532a54a9",
+      "digest": "0x81773d63672ebc0d0338213cda7b81e880f6b6b92950462adbcf277b9c501f3a",
+      "signature": "0x657314eb0442a7b4b4050756e8ab806be801b44043c7b0af99148778c63bb4022f73783c4abfc60135c95a5ca195e7ca67138629d4775bd1cf604a6003297c6b1b",
+      "recovered_signer": "0x4deef74c0c46e1267a126b16af3a7c151b3c6c85"
+    }
+  },
+  "accept": {
+    "primary_type": "SwapAcceptV2(bytes32 offerId,bytes32 offerDigest,uint256 ethereumChainId,address ethereumHtlc,bytes32 ethereumHtlcCodeHash,bytes32 lezChainId,bytes32 lezHtlcProgramId,address makerEthAddress,bytes32 makerLezAccount,uint256 ethAmountWei,uint128 lezAmount,bytes32 ethSwapId,bytes32 ethLockTxHash,bytes32 hashlock,address takerEthAddress,bytes32 takerLezAccount,uint64 ethRefundAfter,uint64 lezRefundAfter,uint64 issuedAt,uint64 expiresAt)",
+    "typed_values": {
+      "offer_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "offer_digest": "0x81773d63672ebc0d0338213cda7b81e880f6b6b92950462adbcf277b9c501f3a",
+      "ethereum_chain_id": "11155111",
+      "ethereum_htlc": "0x351b0ea07739fa9f6769213927d7836a790a5faf",
+      "ethereum_htlc_code_hash": "0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2",
+      "lez_chain_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "lez_htlc_program_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+      "maker_eth_address": "0x4deef74c0c46e1267a126b16af3a7c151b3c6c85",
+      "maker_lez_account": "6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6",
+      "eth_amount_wei": "100000000000000",
+      "lez_amount": "150",
+      "eth_swap_id": "0x31d9f1691a1533b8bb69de5f466fc65e5e28733260cd721dfbdb266d0e6ff039",
+      "eth_lock_tx_hash": "0x7777777777777777777777777777777777777777777777777777777777777777",
+      "hashlock": "0x8888888888888888888888888888888888888888888888888888888888888888",
+      "taker_eth_address": "0x4e4cdb4676d22a569ff136ff79dcdff5d1766734",
+      "taker_lez_account": "BLbDu5FZUdSfLrGejhuaWw5iMJBo3j3TVRyPv9rfJyMA",
+      "eth_refund_after": "2000002400",
+      "lez_refund_after": "2000001200000",
+      "issued_at": "2000000000",
+      "expires_at": "2000000180"
+    },
+    "expected": {
+      "type_hash": "0x8ceda785542cc8cff7ebbb8d2dadc525c1b45249f0833a8dc2d839dc7d28dcad",
+      "struct_hash": "0xc4547967954a25efbba4fee4a6a8b5ed7c4f68474f622053c7562c897d358f19",
+      "digest": "0x2c49d007e29f513b1b8c86f4d10d064a6fcfeaedb0a31dab77665091c0d7e721",
+      "signature": "0x5a4989399efa4ff493f80399970b0218a5e796edd64414b8c2f5b156e863d9183538b7f04232461691ed38431c84930d2c1ea3afb992ebfaf82b52304b80feb31c",
+      "recovered_signer": "0x4e4cdb4676d22a569ff136ff79dcdff5d1766734"
+    }
+  }
+}

@@ -4,6 +4,9 @@ This app targets **fully public infrastructure**: the public LEZ testnet plus
 Ethereum Sepolia. The first end-to-end atomic swap on this stack completed on
 2026-07-21 (evidence at the bottom).
 
+Public-mode implementation remains **NO-GO** until the release blockers in the
+normative [signed protocol v2 contract](protocol-v2.md) are satisfied.
+
 ## Version pin — why v0.2.0 (final)
 
 The public testnet at `https://testnet.lez.logos.co` runs
@@ -109,6 +112,14 @@ $ cast call 0x8636Fe66DFee166589a913140f14d5F57394834A "INTERFACE_VERSION()(uint
     --rpc-url https://ethereum-sepolia-rpc.publicnode.com
 Error: server returned an error response: error code 3: execution reverted, data: "0x"
 ```
+
+## Legacy headless v1 developer record
+
+The remainder of this file records the earlier CLI-driven v1 integration and
+its historical evidence. It is **not** the public trial flow and must not be
+used as Basecamp setup guidance. Public testers use the Atomic Swaps modules
+inside Basecamp, with the fixed 150 LEZ trial amount and the signed v2 protocol
+only after every v2 release blocker is cleared.
 
 ## Setting up a swap peer
 
