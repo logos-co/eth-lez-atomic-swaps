@@ -350,6 +350,16 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     setBackend(this);
     setStatus(QStringLiteral("Please choose a configuration."));
 
+    // Ask the swap core module for this profile's persistence root (issue #99).
+    // The connection may not be up yet, so this is async: loadConfigFromDisk()
+    // / loadReceiptsFromDisk() below run against the best location known right
+    // now (LOGOS_USER_DIR, else the legacy shared path as a migration-read),
+    // and onPersistenceRootResolved() re-resolves + flushes once the per-profile
+    // root arrives. Kicked off before the initial load so that, on the common
+    // path where the core is already connected, the root is often known by the
+    // time the queued reload runs.
+    requestPersistenceRoot();
+
     // Load any saved config BEFORE the async default fill below, so a saved
     // (possibly user-entered) lez_htlc_program_id wins over the compiled-in
     // default — the async lambda's own isEmpty() guard already does the
@@ -551,19 +561,171 @@ void SwapUiPlugin::applyConfigObject(const QJsonObject& obj)
 // Config persistence
 // ---------------------------------------------------------------------------
 //
-// Durable per-profile config file, mirroring receiptsFilePath()'s location
-// convention (<LOGOS_USER_DIR>/module_data/swap_ui/, falling back to Qt's
-// AppDataLocation). Holds every field configJson() serializes — including
-// eth_private_key and lez_signing_key, i.e. two private keys — so it is
-// written 0600 and replaced atomically (temp file + rename) rather than
-// edited in place.
-QString SwapUiPlugin::configFilePath()
+// Per-profile writable directory for swap_ui's durable state (config.json +
+// receipts.jsonl). See the header for the full issue-#99 rationale. Priority:
+//   (a) <LOGOS_USER_DIR>/module_data/swap_ui           — explicit-profile
+//       (`--user-dir`) launches export LOGOS_USER_DIR into this process, and
+//       that path is already profile-correct AND matches the established
+//       module_data/swap_ui convention every doc/tool expects. It is preferred
+//       when explicitly set so an explicit launch is never disturbed (the task
+//       calls these "already correct") — critically, it does NOT relocate the
+//       data mid-session once the async core root below arrives.
+//   (b) <swap-core instancePersistencePath()>/swap_ui  — the fix for a DEFAULT
+//       (no --user-dir) launch, where LOGOS_USER_DIR is UNSET in this
+//       out-of-process ui-host. The swap CORE module IS given a correct
+//       per-profile path by the host; we anchor under a swap_ui/ subdir of it.
+// Returns empty when neither is known yet (default launch, core connection
+// still coming up); callers then defer/buffer their writes rather than fall
+// through to the shared ui-host tree. This function NEVER returns that tree.
+QString SwapUiPlugin::writableModuleDir() const
 {
-    QString base = qEnvironmentVariable("LOGOS_USER_DIR");
-    if (base.isEmpty()) {
-        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString userDir = qEnvironmentVariable("LOGOS_USER_DIR");
+    if (!userDir.isEmpty()) {
+        return QDir(userDir).filePath(QStringLiteral("module_data/swap_ui"));
     }
-    return QDir(base).filePath(QStringLiteral("module_data/swap_ui/config.json"));
+    if (!m_persistenceRoot.isEmpty()) {
+        return QDir(m_persistenceRoot).filePath(QStringLiteral("swap_ui"));
+    }
+    return {};
+}
+
+// The pre-fix location: Qt's AppDataLocation, which for the out-of-process
+// ui-host resolves under `Logos/ui-host/` — SHARED across every Basecamp
+// profile. READ-ONLY: consulted once as a migration fallback by the *ReadPath()
+// helpers when the per-profile location has nothing yet, and never written to,
+// deleted, or migrated in place (the old shared file is cleaned up manually by
+// its owner — matches the upstream Basecamp #315/#316 gate).
+QString SwapUiPlugin::legacyModuleDir() const
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+        .filePath(QStringLiteral("module_data/swap_ui"));
+}
+
+// config.json holds every field configJson() serializes — including
+// eth_private_key and lez_signing_key, i.e. two private keys — so it is written
+// 0600 and replaced atomically (temp file + rename); reads prefer the
+// per-profile copy and fall back to the legacy shared file exactly once (only
+// when the per-profile location has no config yet).
+QString SwapUiPlugin::configReadPath() const
+{
+    const QString writable = writableModuleDir();
+    if (!writable.isEmpty()) {
+        const QString p = QDir(writable).filePath(QStringLiteral("config.json"));
+        if (QFileInfo::exists(p)) {
+            return p;
+        }
+    }
+    return QDir(legacyModuleDir()).filePath(QStringLiteral("config.json"));
+}
+
+QString SwapUiPlugin::receiptsReadPath() const
+{
+    const QString writable = writableModuleDir();
+    if (!writable.isEmpty()) {
+        const QString p = QDir(writable).filePath(QStringLiteral("receipts.jsonl"));
+        if (QFileInfo::exists(p)) {
+            return p;
+        }
+    }
+    return QDir(legacyModuleDir()).filePath(QStringLiteral("receipts.jsonl"));
+}
+
+// Ask the swap CORE module for its per-profile persistence root. swap_ui, as a
+// ui_qml plugin, gets no host identity of its own (no LOGOS_USER_DIR under a
+// default launch, no instancePersistencePath — see logos_ui_plugin_context.h),
+// so it cannot reconstruct its own profile root. The swap core module runs
+// in-process under logos_host and DOES receive a correct per-profile context;
+// we query it over the same codegen/QtRO interface swap_ui already uses. The
+// connection may not be up yet at initLogos time, so this is async and applied
+// in onPersistenceRootResolved() whenever it lands.
+void SwapUiPlugin::requestPersistenceRoot()
+{
+    if (!m_swap) {
+        return;
+    }
+    m_swap->persistenceRootAsync([this](QString root) {
+        onPersistenceRootResolved(root.trimmed());
+    });
+}
+
+void SwapUiPlugin::onPersistenceRootResolved(const QString& root)
+{
+    if (root.isEmpty()) {
+        // The core is running without a host-provisioned persistence dir (e.g.
+        // a dev/test host, or lgpd). Keep the LOGOS_USER_DIR/legacy behaviour;
+        // if LOGOS_USER_DIR is set, deferred writes can still flush below.
+        swapUiTrace(QStringLiteral(
+            "onPersistenceRootResolved: core returned empty root; keeping LOGOS_USER_DIR/legacy fallback"));
+    } else if (root != m_persistenceRoot) {
+        m_persistenceRoot = root;
+        // Distinctive release-verification marker: a unique literal that must
+        // survive into the built swap_ui .lgx (asserted by the release
+        // pipeline). Kept as a plain UTF-8 char[] (not QStringLiteral, which
+        // would land in the binary as UTF-16 and defeat an ASCII grep) so a
+        // release `grep`/`strings` over the artifact finds it. Do not reword
+        // without updating the release grep.
+        static const char kPersistenceMarker[] =
+            "swap_ui persistence root (per-profile)";
+        swapUiTrace(QString::fromUtf8(kPersistenceMarker)
+                    + QStringLiteral(": %1").arg(writableModuleDir()));
+    }
+
+    const QString baseDir = writableModuleDir();
+    if (baseDir.isEmpty()) {
+        // Still nothing writable (empty core root AND no LOGOS_USER_DIR); leave
+        // deferred/buffered writes pending rather than touch the shared tree.
+        return;
+    }
+
+    // Re-resolve config now that a per-profile location exists. A profile-local
+    // config is authoritative: load it and drop any init-time migration-read /
+    // deferred save so we never clobber the profile copy. Otherwise (fresh
+    // profile) keep the in-memory config and flush it into the profile.
+    if (QFileInfo::exists(QDir(baseDir).filePath(QStringLiteral("config.json")))) {
+        m_pendingConfigSave = false;
+        loadConfigFromDisk();
+    } else if (m_pendingConfigSave) {
+        saveConfigToDisk();
+    }
+
+    // Receipts: flush anything buffered while the root was unknown into the
+    // per-profile journal, then rebuild the surfaced list from disk.
+    flushPendingReceipts();
+    loadReceiptsFromDisk();
+}
+
+// Append receipt lines buffered while the per-profile root was still unknown to
+// the per-profile journal. Realistically never non-empty (a swap cannot finish
+// in the sub-second before the async root arrives), but kept for correctness so
+// no receipt is silently dropped.
+void SwapUiPlugin::flushPendingReceipts()
+{
+    if (m_pendingReceiptLines.isEmpty()) {
+        return;
+    }
+    const QString baseDir = writableModuleDir();
+    if (baseDir.isEmpty()) {
+        return;
+    }
+    const QDir dir(baseDir);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        swapUiTrace(QStringLiteral("flushPendingReceipts: mkpath failed for %1")
+                        .arg(dir.absolutePath()));
+        return;
+    }
+    QFile f(dir.filePath(QStringLiteral("receipts.jsonl")));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        swapUiTrace(QStringLiteral("flushPendingReceipts: open failed: %1")
+                        .arg(f.errorString()));
+        return;
+    }
+    for (const QString& line : m_pendingReceiptLines) {
+        f.write(line.toUtf8() + '\n');
+    }
+    f.flush();
+    swapUiTrace(QStringLiteral("flushPendingReceipts: flushed %1 buffered receipt(s)")
+                    .arg(m_pendingReceiptLines.size()));
+    m_pendingReceiptLines.clear();
 }
 
 void SwapUiPlugin::loadConfigFromDisk()
@@ -584,7 +746,7 @@ void SwapUiPlugin::loadConfigFromDisk()
     // The open-failed trace below stays valuable for telling these apart:
     // "no config at path" after this fix means either a genuinely fresh
     // profile or something new, not the old silent-never-wrote failure mode.
-    const QString path = configFilePath();
+    const QString path = configReadPath();
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
         swapUiTrace(QStringLiteral("loadConfigFromDisk: no config at %1 (%2)")
@@ -624,7 +786,19 @@ void SwapUiPlugin::scheduleConfigSave()
 
 void SwapUiPlugin::saveConfigToDisk()
 {
-    const QString path = configFilePath();
+    const QString baseDir = writableModuleDir();
+    if (baseDir.isEmpty()) {
+        // Per-profile root not resolved yet (core connection still coming up
+        // and no explicit LOGOS_USER_DIR). Defer rather than write two private
+        // keys into the shared ui-host tree; onPersistenceRootResolved()
+        // flushes this once the root arrives.
+        m_pendingConfigSave = true;
+        swapUiTrace(QStringLiteral(
+            "saveConfigToDisk: deferring — per-profile persistence root not resolved yet"));
+        return;
+    }
+    m_pendingConfigSave = false;
+    const QString path = QDir(baseDir).filePath(QStringLiteral("config.json"));
     const QDir dir = QFileInfo(path).dir();
     if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
         swapUiTrace(QStringLiteral("saveConfigToDisk: mkpath failed for %1")
@@ -730,9 +904,20 @@ void SwapUiPlugin::handleUnixSignal()
 
 void SwapUiPlugin::resetConfig()
 {
-    if (!QFile::remove(configFilePath())) {
-        swapUiTrace(QStringLiteral("resetConfig: no config file to remove at %1")
-                        .arg(configFilePath()));
+    // Only ever remove the per-profile config; never delete the legacy shared
+    // file (issue #99 / Basecamp #315 gate — the old shared file is cleaned up
+    // manually by its owner). applyDefaultConfig()'s save below writes defaults
+    // into the per-profile location, which then shadows any legacy file for
+    // subsequent reads.
+    const QString baseDir = writableModuleDir();
+    if (baseDir.isEmpty()) {
+        swapUiTrace(QStringLiteral(
+            "resetConfig: per-profile root unknown; resetting in-memory config only"));
+    } else {
+        const QString path = QDir(baseDir).filePath(QStringLiteral("config.json"));
+        if (QFile::exists(path) && !QFile::remove(path)) {
+            swapUiTrace(QStringLiteral("resetConfig: failed to remove %1").arg(path));
+        }
     }
     applyDefaultConfig();
     validateConfig();
@@ -2025,24 +2210,6 @@ void SwapUiPlugin::handleFinishedEvent(const QString& eventName, const QJsonObje
 // Receipt capture + durable JSONL journal (receipt cards, PR2)
 // ---------------------------------------------------------------------------
 
-// Durable per-profile journal location. Basecamp 0.2.x resolves its whole
-// data tree from LOGOS_USER_DIR (app/utils/LogosBasecampPaths.h
-// baseDirectory()), with module state under <base>/module_data/<name>/ —
-// mirror that so the journal sits beside the host's own per-profile state.
-// When the override is absent (bare launch), fall back to Qt's
-// AppDataLocation, which is also Basecamp's own fallback. Per-profile
-// isolation falls out of the launch harness: each profile gets its own
-// absolute LOGOS_USER_DIR and runs at most one Basecamp instance, so no
-// cross-process append interleaving is expected (single-writer assumption).
-QString SwapUiPlugin::receiptsFilePath()
-{
-    QString base = qEnvironmentVariable("LOGOS_USER_DIR");
-    if (base.isEmpty()) {
-        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    }
-    return QDir(base).filePath(QStringLiteral("module_data/swap_ui/receipts.jsonl"));
-}
-
 qint64 SwapUiPlugin::eventTimestampMs(const QJsonObject& payload)
 {
     const auto ts = static_cast<qint64>(
@@ -2272,7 +2439,19 @@ void SwapUiPlugin::journalReceipt(const QJsonObject& receipt)
     }
     publishReceiptsProp();
 
-    const QString path = receiptsFilePath();
+    const QString baseDir = writableModuleDir();
+    if (baseDir.isEmpty()) {
+        // Per-profile root not resolved yet: buffer rather than append to the
+        // shared ui-host tree. flushPendingReceipts() writes these once the
+        // root arrives. The line is already reflected in m_receipts above, so
+        // the History view is correct in the meantime.
+        m_pendingReceiptLines.append(
+            QString::fromUtf8(QJsonDocument(receipt).toJson(QJsonDocument::Compact)));
+        swapUiTrace(QStringLiteral(
+            "journalReceipt: buffering — per-profile persistence root not resolved yet"));
+        return;
+    }
+    const QString path = QDir(baseDir).filePath(QStringLiteral("receipts.jsonl"));
     const QDir dir = QFileInfo(path).dir();
     if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
         swapUiTrace(QStringLiteral("journalReceipt: mkpath failed for %1")
@@ -2298,7 +2477,7 @@ void SwapUiPlugin::journalReceipt(const QJsonObject& receipt)
 void SwapUiPlugin::loadReceiptsFromDisk()
 {
     m_receipts = QJsonArray{};
-    QFile f(receiptsFilePath());
+    QFile f(receiptsReadPath());
     if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
         while (!f.atEnd()) {
             const QByteArray line = f.readLine().trimmed();
@@ -2327,13 +2506,33 @@ void SwapUiPlugin::refreshHistory()
 
 void SwapUiPlugin::clearHistory()
 {
-    QFile f(receiptsFilePath());
-    if (f.exists() && !f.remove()) {
-        swapUiTrace(QStringLiteral("clearHistory: remove failed for %1: %2")
-                        .arg(f.fileName(), f.errorString()));
-        setErrorMessage(QStringLiteral("Could not clear the swap history file"));
-        setStatus(errorMessage());
-        return;
+    // Clear ONLY the per-profile journal; never remove the legacy shared file
+    // (issue #99). Truncating a per-profile file (rather than deleting) also
+    // shadows any legacy receipts, so the cleared state sticks across a reload
+    // even before this profile has recorded a swap of its own.
+    m_pendingReceiptLines.clear();
+    const QString baseDir = writableModuleDir();
+    if (!baseDir.isEmpty()) {
+        const QDir dir(baseDir);
+        if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+            swapUiTrace(QStringLiteral("clearHistory: mkpath failed for %1")
+                            .arg(dir.absolutePath()));
+            setErrorMessage(QStringLiteral("Could not clear the swap history file"));
+            setStatus(errorMessage());
+            return;
+        }
+        QFile f(dir.filePath(QStringLiteral("receipts.jsonl")));
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            swapUiTrace(QStringLiteral("clearHistory: truncate failed for %1: %2")
+                            .arg(f.fileName(), f.errorString()));
+            setErrorMessage(QStringLiteral("Could not clear the swap history file"));
+            setStatus(errorMessage());
+            return;
+        }
+        f.close();
+    } else {
+        swapUiTrace(QStringLiteral(
+            "clearHistory: per-profile root unknown; clearing in-memory history only"));
     }
     m_receipts = QJsonArray{};
     publishReceiptsProp();

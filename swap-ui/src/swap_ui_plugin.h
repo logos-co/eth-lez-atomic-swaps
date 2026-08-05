@@ -86,8 +86,8 @@ private:
     bool validateForBrowse() const;
     bool validateForTrade();
 
-    // Config persistence (config.json under module_data/swap_ui/, mirroring
-    // receiptsFilePath()). Holds two private keys (eth_private_key,
+    // Config persistence (config.json under the per-profile swap_ui dir; see
+    // writableModuleDir()). Holds two private keys (eth_private_key,
     // lez_signing_key) — written 0600, atomic temp+rename.
     //
     // scheduleConfigSave() writes SYNCHRONOUSLY on every call (the payload is
@@ -98,10 +98,41 @@ private:
     // the moment of that signal would have silently lost the edit. See
     // installSignalHandlers()/handleUnixSignal() below for the belt-and-braces
     // second line of defense.
-    static QString configFilePath();
+    // Path resolution (issue #99). swap_ui runs in an out-of-process ui-host
+    // that receives no LOGOS_USER_DIR under a default Basecamp launch, so its
+    // Qt AppDataLocation fallback lands in a `Logos/ui-host/` tree SHARED
+    // across every profile on the machine — leaking config.json's two private
+    // keys (eth_private_key, lez_signing_key). writableModuleDir() resolves the
+    // correct per-profile directory instead: (a) LOGOS_USER_DIR when explicitly
+    // set (explicit --user-dir launches export it and that path is already
+    // profile-correct and convention-matching — preferred so it is never
+    // disturbed), else (b) the swap CORE module's instancePersistencePath()
+    // (per-profile; requested over the swap interface — see
+    // requestPersistenceRoot()), which is the fix for a default launch where
+    // LOGOS_USER_DIR is unset. It NEVER returns the legacy shared tree.
+    // legacyModuleDir() is a READ-ONLY migration fallback consulted by
+    // configReadPath()/receiptsReadPath() only when the writable location has
+    // nothing yet. writableModuleDir() is empty while the per-profile root is
+    // still unknown (default launch, core connection not up), in which case
+    // writes are deferred/buffered rather than sent to the shared tree.
+    QString writableModuleDir() const;
+    QString legacyModuleDir() const;
+    QString configReadPath() const;
+    QString receiptsReadPath() const;
     void loadConfigFromDisk();
     void scheduleConfigSave();
     void saveConfigToDisk();
+
+    // The per-profile persistence root comes from the swap CORE module, which
+    // — unlike this UI plugin — receives a per-profile context from the host.
+    // That core connection may come up AFTER the plugin starts, so the root is
+    // requested asynchronously from initLogos and applied here when it arrives:
+    // config is re-resolved (a profile-local copy wins; otherwise the init-time
+    // migration-read stays in memory and is flushed into the profile) and any
+    // writes deferred/buffered while the root was unknown are flushed.
+    void requestPersistenceRoot();
+    void onPersistenceRootResolved(const QString& root);
+    void flushPendingReceipts();
 
     // Termination-signal handling (belt-and-braces flush; the primary fix is
     // the synchronous save above). SIGTERM/SIGINT can arrive at any point in
@@ -162,7 +193,6 @@ private:
     void journalReceipt(const QJsonObject& receipt);
     void loadReceiptsFromDisk();
     void publishReceiptsProp();
-    static QString receiptsFilePath();
     static qint64 eventTimestampMs(const QJsonObject& payload);
 
     // Per-swap Delivery coordination helpers (M2). See delivery-dogfooding.md.
@@ -201,6 +231,16 @@ private:
     QString m_coordinationRole;
     bool m_coordinationTakerPublished = false;
     bool m_swapEventsSubscribed = false;
+
+    // Persistence-root state (issue #99). m_persistenceRoot is the per-profile
+    // root the swap CORE module reports (empty until it arrives over the async
+    // connection). Writes attempted before it is known are deferred
+    // (m_pendingConfigSave) or buffered (m_pendingReceiptLines) and flushed by
+    // onPersistenceRootResolved(), so nothing ever reaches the shared ui-host
+    // tree.
+    QString m_persistenceRoot;
+    bool m_pendingConfigSave = false;
+    QStringList m_pendingReceiptLines;
 
     // Receipt journal state. m_receipts is the surfaced in-memory list
     // (newest first, capped); the evidence objects hold the in-flight swap's

@@ -4,6 +4,14 @@
 
 void swapDeliverySetRuntimeLogosAPI(void* api);
 
+// The per-profile persistence root the Logos runtime stamped onto this module's
+// LogosAPI (the `instancePersistencePath` property, shape
+// `<basecamp>/module_data/swap/<id>/`), read from the LogosAPI captured by the
+// generated provider's onInit. Empty when the runtime provided no persistence
+// dir (unit tests / lgpd / mock build). See SwapImpl::persistenceRoot() and
+// issue #99 for why swap_ui needs this.
+std::string swapDeliveryRuntimePersistencePath();
+
 std::string swapDeliveryMessagingInit(const std::string& configJson);
 std::string swapDeliveryMessagingShutdown();
 std::string swapDeliveryMessagingStatus();
