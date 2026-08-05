@@ -35,10 +35,14 @@
       "0.4.0": {
         "binary_strings": [
           "trial-ops/1",
-          "maker-ops.jsonl"
+          "maker-ops.jsonl",
+          "swap persistence root (per-profile)"
         ],
         "required_ancestors": [
-          "ba261a7d6e3b9ae3e460537df940da8c51ae26ff"
+          "ba261a7d6e3b9ae3e460537df940da8c51ae26ff",
+          "7c7c145a53dd6f1b84da8348ff56e2923ae393e9",
+          "ce93c34b0d0dac08ed3761d5c392c52891170377",
+          "cd3eed582727bc32f828b007b01d9f9a825f27c4"
         ]
       }
     },
@@ -48,10 +52,18 @@
           "trial-evidence/1",
           "Copy safe evidence",
           "feedbackUrl",
-          "safeEvidenceJson"
+          "safeEvidenceJson",
+          "Three steps, no hand-typed keys: generate an ETH key, create a LEZ account, then fund it."
+        ],
+        "binary_strings": [
+          "swap_ui persistence root (per-profile)"
         ],
         "required_ancestors": [
-          "811c940f926ea4ff24a4a2763436e32d755145df"
+          "811c940f926ea4ff24a4a2763436e32d755145df",
+          "97a2ea77acf43d7be662f7ef9fce61572f4656f3",
+          "63911dba64b76b46179ce484c5f6d67d886dfb09",
+          "f69b5a07392ebc8a36bd10b2049be01b4a77b101",
+          "cd3eed582727bc32f828b007b01d9f9a825f27c4"
         ]
       }
     }
