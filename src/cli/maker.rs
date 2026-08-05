@@ -292,6 +292,7 @@ fn cmd_maker_status(args: &MakerArgs) -> Result<()> {
         "loop_state": status.loop_state,
         "completed": status.completed,
         "failed": status.failed,
+        "transient_errors": status.transient_errors,
         "in_flight": status.in_flight,
         "quarantined": status.quarantined,
         "lez_balance": status.lez_balance,
@@ -466,7 +467,9 @@ async fn cmd_maker_loop(
     // "reachable and genuinely under-funded" — only the latter is a hard
     // startup failure below. Without this retry a single sequencer blip
     // crash-looped the whole process under `restart: unless-stopped`.
-    let balance = bot::read_startup_balance_with_retry(&lez_client, &maker_account).await?;
+    let balance = lez_client
+        .get_balance_with_retry(&maker_account, |_| {})
+        .await?;
     if balance < config.lez_amount {
         return Err(SwapError::InvalidConfig(format!(
             "insufficient LEZ inventory: balance {balance} < offer amount {}; \
@@ -563,6 +566,7 @@ async fn cmd_maker_loop(
         args.fund_check_secs,
         fund_low_water,
         cancel.clone(),
+        status.clone(),
     );
 
     if !json {
@@ -646,13 +650,15 @@ async fn cmd_maker_loop(
             serde_json::json!({
                 "total_completed": result.total_completed,
                 "total_failed": result.total_failed,
+                "total_transient_errors": result.total_transient_errors,
                 "ops_ledger": ops_report,
             })
         );
     } else {
         println!(
-            "Maker loop stopped: {} completed, {} failed (this process's uptime)",
-            result.total_completed, result.total_failed
+            "Maker loop stopped: {} completed, {} failed, {} transient (sequencer) errors \
+             (this process's uptime)",
+            result.total_completed, result.total_failed, result.total_transient_errors
         );
         println!(
             "Durable ops ledger (all-time, {}): accepted={} completed={} refunded={} failed={} in_flight={}",
@@ -720,6 +726,13 @@ fn note_status_from_progress(status: &bot::StatusState, event: &SwapProgress) {
             status.incr_failed();
             status.set_loop_state("waiting_for_taker");
         }
+        SwapProgress::AutoAcceptTransientError { .. } => {
+            // Deliberately NOT incr_failed(): a retried/retried-out sequencer
+            // timeout is infrastructure flakiness, not a swap failure — see
+            // MakerStatus::transient_errors.
+            status.incr_transient();
+            status.set_loop_state("waiting_for_taker");
+        }
         SwapProgress::AutoAcceptInsufficientFunds { .. } => {
             status.set_loop_state("insufficient_funds_waiting")
         }
@@ -782,6 +795,12 @@ fn describe(event: &SwapProgress) -> String {
         SwapProgress::AutoAcceptSwapFailed { iteration, error } => {
             format!("iteration {iteration}: failed — {error}")
         }
+        SwapProgress::AutoAcceptTransientError { iteration, error } => {
+            format!(
+                "iteration {iteration}: transient sequencer error (retried, not counted as a \
+                 swap failure) — {error}"
+            )
+        }
         SwapProgress::AutoAcceptInsufficientFunds {
             lez_balance,
             lez_required,
@@ -792,7 +811,11 @@ fn describe(event: &SwapProgress) -> String {
         SwapProgress::AutoAcceptStopped {
             total_completed,
             total_failed,
-        } => format!("loop stopped ({total_completed} completed, {total_failed} failed)"),
+            total_transient_errors,
+        } => format!(
+            "loop stopped ({total_completed} completed, {total_failed} failed, \
+             {total_transient_errors} transient)"
+        ),
         SwapProgress::AutoAcceptCancelled => "loop cancelled".into(),
         other => format!("{other:?}"),
     }

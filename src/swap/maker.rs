@@ -774,6 +774,9 @@ pub struct AutoAcceptConfig {
 pub struct AutoAcceptResult {
     pub total_completed: u32,
     pub total_failed: u32,
+    /// Transient sequencer/RPC errors on hot-path reads, tracked separately
+    /// from `total_failed` (see [`SwapProgress::AutoAcceptTransientError`]).
+    pub total_transient_errors: u32,
 }
 
 /// Run the maker in a loop, auto-accepting swaps until cancelled or out of funds.
@@ -791,6 +794,7 @@ pub async fn run_maker_loop(
 ) -> AutoAcceptResult {
     let mut completed: u32 = 0;
     let mut failed: u32 = 0;
+    let mut transient: u32 = 0;
     let mut iteration: u32 = 0;
 
     let guards = LoopGuards {
@@ -834,7 +838,26 @@ pub async fn run_maker_loop(
             }
         };
 
-        match lez_client.get_balance(&lez_client.account_id()).await {
+        // Bounded-retried (issue #93 follow-up — the deployed maker's
+        // per-iteration balance check had no retry of its own, so a transient
+        // sequencer timeout burned an entire loop iteration and inflated
+        // `failed` even though nothing about the swap itself went wrong). A
+        // blip that recovers within the retry budget never reaches the `Err`
+        // arm below at all; one that doesn't is reported as
+        // `AutoAcceptTransientError`, NOT `AutoAcceptSwapFailed`.
+        let balance_read = lez_client
+            .get_balance_with_retry(&lez_client.account_id(), |e| {
+                transient += 1;
+                progress::report(
+                    &progress,
+                    SwapProgress::AutoAcceptTransientError {
+                        iteration,
+                        error: format!("balance check: {e}"),
+                    },
+                );
+            })
+            .await;
+        match balance_read {
             Ok(balance) if balance < fresh_config.lez_amount => {
                 progress::report(
                     &progress,
@@ -862,13 +885,14 @@ pub async fn run_maker_loop(
                 continue;
             }
             Err(e) => {
-                failed += 1;
-                progress::report(
-                    &progress,
-                    SwapProgress::AutoAcceptSwapFailed {
-                        iteration,
-                        error: format!("balance check failed: {e}"),
-                    },
+                // Already counted + reported as a transient error by the
+                // `on_transient` closure above (every attempt inside
+                // `get_balance_with_retry` failed) — this is the sequencer
+                // being unreachable, not a swap failure, so `failed` is
+                // deliberately NOT incremented here.
+                warn!(
+                    "maker-loop: balance check exhausted retries — waiting before next \
+                     iteration: {e}"
                 );
                 tokio::time::sleep(base_config.poll_interval).await;
                 continue;
@@ -976,12 +1000,14 @@ pub async fn run_maker_loop(
         SwapProgress::AutoAcceptStopped {
             total_completed: completed,
             total_failed: failed,
+            total_transient_errors: transient,
         },
     );
 
     AutoAcceptResult {
         total_completed: completed,
         total_failed: failed,
+        total_transient_errors: transient,
     }
 }
 

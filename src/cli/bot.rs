@@ -112,48 +112,6 @@ pub const TIMELOCK_TRANSIT_SLACK_MINUTES: u64 = 2;
 /// runtime gate re-anchors the LEZ expiry at match time, so a boundary-exact
 /// config would start cleanly and then reject every single ETH lock (see the
 /// slack constant's doc for the arithmetic).
-/// Bounded retries for the STARTUP free-inventory balance read in `maker
-/// --loop` (issue #93 point 2). A transient sequencer error (a timeout, a
-/// dropped connection) is NOT the same thing as "reachable and genuinely
-/// under-funded" — the latter is a successful read that just reports a low
-/// number, and is intentionally NOT retried by this function (the caller
-/// still hard-fails on it, immediately). This only retries the `Err` case,
-/// mirroring the retry `claim_to_target` got in #77.
-///
-/// Live-observed on the VPS: two consecutive `get_account_balance` timeouts
-/// followed by a successful third attempt. Without this retry, a single-shot
-/// startup read turned a sub-second sequencer blip into a crash loop (the
-/// whole process exits, `restart: unless-stopped` restarts it, and it can hit
-/// the same blip again) with no offers on the board in between.
-const STARTUP_BALANCE_READ_ATTEMPTS: u32 = 5;
-const STARTUP_BALANCE_READ_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
-
-pub async fn read_startup_balance_with_retry(
-    lez_client: &LezClient,
-    account: &lee::AccountId,
-) -> Result<u128> {
-    let mut delay = STARTUP_BALANCE_READ_INITIAL_DELAY;
-    let mut last_err = None;
-    for attempt in 1..=STARTUP_BALANCE_READ_ATTEMPTS {
-        match lez_client.get_balance(account).await {
-            Ok(balance) => return Ok(balance),
-            Err(e) => {
-                warn!(
-                    "startup balance read failed (attempt {attempt}/{STARTUP_BALANCE_READ_ATTEMPTS}): \
-                     {e} — retrying (this means the sequencer could not be reached, NOT that the \
-                     account is under-funded)"
-                );
-                last_err = Some(e);
-                if attempt < STARTUP_BALANCE_READ_ATTEMPTS {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(std::time::Duration::from_secs(30));
-                }
-            }
-        }
-    }
-    Err(last_err.expect("loop runs at least once, so an all-Err path always sets this"))
-}
-
 pub fn validate_timelocks(lez_minutes: u64, eth_minutes: u64, margin_minutes: u64) -> Result<()> {
     if margin_minutes < 5 {
         return Err(SwapError::InvalidConfig(format!(
@@ -1519,11 +1477,21 @@ pub async fn fund_to_target(config: &SwapConfig, target: u128, json: bool) -> Re
 /// never refilled. The loop side of that fix (break → warn-and-wait) lives in
 /// `crate::swap::maker::run_maker_loop`; this is the half that actually
 /// refills the balance.
+///
+/// The balance read is bounded-retried ([`LezClient::get_balance_with_retry`],
+/// shared with the maker-loop startup guard and per-iteration check): live on
+/// the VPS this read hit the exact same sequencer timeouts as the loop's own
+/// balance check, and without a retry a transient blip skipped a whole
+/// fund-check cycle — silently leaving a genuinely low-inventory maker
+/// un-topped-up for `fund_check_secs` longer than necessary. A blip that
+/// happens here is infrastructure, not a swap failure, so it bumps
+/// `status.transient_errors` rather than anything failure-shaped.
 pub fn spawn_fund_topper(
     config: SwapConfig,
     fund_check_secs: u64,
     fund_low_water: u128,
     cancel: Arc<AtomicBool>,
+    status: Arc<StatusState>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -1532,7 +1500,12 @@ pub fn spawn_fund_topper(
             }
             match LezClient::new(&config) {
                 Ok(lez_client) => {
-                    match lez_client.get_balance(&lez_client.account_id()).await {
+                    let balance_read = lez_client
+                        .get_balance_with_retry(&lez_client.account_id(), |_| {
+                            status.incr_transient();
+                        })
+                        .await;
+                    match balance_read {
                         Ok(balance) if balance < fund_low_water => {
                             warn!(
                                 balance,
@@ -1550,7 +1523,10 @@ pub fn spawn_fund_topper(
                             }
                         }
                         Ok(_) => {} // above low-water, nothing to do
-                        Err(e) => warn!("fund-topper: balance read failed: {e}"),
+                        Err(e) => warn!(
+                            "fund-topper: balance read failed after retries: {e} (counted as a \
+                             transient error, not a fund-topper failure)"
+                        ),
                     }
                 }
                 Err(e) => warn!("fund-topper: LEZ client init failed: {e}"),
@@ -1602,8 +1578,20 @@ pub struct MakerStatus {
     pub quarantined: usize,
     /// Total swaps completed since this process started.
     pub completed: u32,
-    /// Total swaps failed/refunded since this process started.
+    /// Total swaps failed/refunded since this process started. Does NOT
+    /// include transient sequencer/RPC errors that were retried (see
+    /// `transient_errors`) — this field is reserved for genuine swap-outcome
+    /// failures so an operator glancing at it sees signal, not sequencer
+    /// flakiness (follow-up to issue #93: a bare "failed: 5" used to be mostly
+    /// retried sequencer timeouts, indistinguishable from real failures).
     pub failed: u32,
+    /// Count of transient infrastructure errors (sequencer timeouts / dropped
+    /// connections on a balance read) encountered since this process started,
+    /// whether or not the read eventually recovered via retry. Surfaced
+    /// separately from `failed` so an operator can see "the public testnet
+    /// sequencer is flaky right now" without it looking like the bot itself is
+    /// failing swaps.
+    pub transient_errors: u32,
     /// Coarse state label for operator/human consumption.
     pub loop_state: String,
     /// Whether the offer-publisher Node sidecar is currently alive (a
@@ -1625,6 +1613,7 @@ pub struct StatusState {
     publisher_alive: AtomicBool,
     completed: AtomicU32,
     failed: AtomicU32,
+    transient_errors: AtomicU32,
     loop_state: Mutex<String>,
     lez_balance: Mutex<u128>,
     eth_balance_wei: Mutex<u128>,
@@ -1638,6 +1627,7 @@ impl StatusState {
             publisher_alive: AtomicBool::new(false),
             completed: AtomicU32::new(0),
             failed: AtomicU32::new(0),
+            transient_errors: AtomicU32::new(0),
             loop_state: Mutex::new("starting".to_string()),
             lez_balance: Mutex::new(0),
             eth_balance_wei: Mutex::new(0),
@@ -1664,6 +1654,13 @@ impl StatusState {
         self.failed.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a transient infrastructure error (a retried-or-exhausted
+    /// sequencer/RPC balance read) WITHOUT touching `failed` — see
+    /// [`MakerStatus::transient_errors`] for why the two are kept separate.
+    pub fn incr_transient(&self) {
+        self.transient_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn set_lez_balance(&self, balance: u128) {
         *self.lez_balance.lock().expect("status lock") = balance;
     }
@@ -1687,6 +1684,7 @@ impl StatusState {
             quarantined,
             completed: self.completed.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
+            transient_errors: self.transient_errors.load(Ordering::Relaxed),
             loop_state: self.loop_state.lock().expect("status lock").clone(),
             publisher_alive: self.publisher_alive.load(Ordering::Relaxed),
             updated_at: now_unix(),
@@ -2675,6 +2673,46 @@ mod tests {
         assert_eq!(snap.eth_balance_wei, "42");
         assert_eq!(snap.in_flight, 2);
         assert_eq!(snap.quarantined, 1);
+    }
+
+    // Robustness-gap regression: an operator staring at `maker-status.json`
+    // must be able to tell "the bot failed real swaps" apart from "the public
+    // testnet sequencer is flaky right now" (live-observed: 4 of 5 reported
+    // `failed` iterations were retried sequencer timeouts, not swap
+    // failures). `incr_transient` and `incr_failed` must be fully
+    // independent counters — bumping one must never move the other.
+    #[test]
+    fn transient_errors_and_failed_are_independent_counters() {
+        let status = StatusState::new(1_000);
+
+        // A transient sequencer blip (retried balance read, recovered or not)
+        // must NOT be counted as a swap failure.
+        status.incr_transient();
+        status.incr_transient();
+        let snap = status.snapshot(0, 0);
+        assert_eq!(
+            snap.transient_errors, 2,
+            "transient infra errors must be counted"
+        );
+        assert_eq!(
+            snap.failed, 0,
+            "a transient sequencer error must NEVER increment the swap-failure counter — \
+             that is precisely the noise this counter split exists to remove"
+        );
+
+        // A genuine swap failure (refund, claim error, etc.) must still be
+        // counted as `failed`, and must not silently get folded into
+        // `transient_errors` either.
+        status.incr_failed();
+        let snap = status.snapshot(0, 0);
+        assert_eq!(
+            snap.failed, 1,
+            "a real swap failure must still increment the failure counter"
+        );
+        assert_eq!(
+            snap.transient_errors, 2,
+            "a real swap failure must not inflate the transient-error counter"
+        );
     }
 
     // The status file is a plain JSON artifact (unlike the fsync'd

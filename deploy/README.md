@@ -186,6 +186,17 @@ A permanently-red healthcheck is worse than none — it trains everyone to
 ignore the signal — so if this ever starts failing, treat it as real signal,
 not noise to relax away.
 
+`failed` vs. `transient_errors`: the public testnet sequencer is known to
+timeout intermittently (its reliability is not ours to fix). Every hot-path
+balance read (the maker-loop's per-iteration check, the fund-topper, and the
+startup inventory guard) is bounded-retried with backoff before it is
+reported anywhere, so a sequencer blip that recovers within the retry budget
+never shows up at all. If it doesn't recover, it increments
+`transient_errors`, NOT `failed` — `failed` is reserved for genuine
+swap-outcome failures (a refund, a claim error) so it stays a meaningful
+signal even while the sequencer is flaky. If `transient_errors` is climbing
+fast, that's the public sequencer having a bad day, not the bot.
+
 ## Operations
 
 - Logs: `docker compose logs -f maker`

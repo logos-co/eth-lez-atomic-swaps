@@ -100,6 +100,18 @@ pub enum SwapProgress {
         iteration: u32,
         error: String,
     },
+    /// A transient sequencer/RPC error on a hot-path read (currently: the
+    /// per-iteration LEZ balance check) — bounded-retried by
+    /// [`crate::lez::client::LezClient::get_balance_with_retry`], reported
+    /// here whether or not the read eventually recovered. Deliberately kept
+    /// OUT of [`SwapProgress::AutoAcceptSwapFailed`]/`total_failed`: a
+    /// sequencer timeout is not a swap failure, and conflating the two makes
+    /// the failure counter mostly noise during a sequencer outage (see issue
+    /// tracking the deployed-maker robustness gap).
+    AutoAcceptTransientError {
+        iteration: u32,
+        error: String,
+    },
     AutoAcceptInsufficientFunds {
         lez_balance: String,
         lez_required: String,
@@ -107,6 +119,7 @@ pub enum SwapProgress {
     AutoAcceptStopped {
         total_completed: u32,
         total_failed: u32,
+        total_transient_errors: u32,
     },
     AutoAcceptCancelled,
 }
