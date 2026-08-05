@@ -43,6 +43,36 @@ jobs:
           name: canary-status-catalog
           path: canary-status-catalog.json
 
+  # --- Release content: the latest published .lgx carries the expected code --
+  # Complements the catalog leg, which never downloads a byte and therefore
+  # cannot see a release cut from a stale ref (it happened twice — see
+  # canary/leg-release-content.sh). Downloads the latest published .lgx per
+  # module, extracts it, and asserts the committed content markers + tag
+  # ancestry from canary/release-content-expectations.json. The same leg also
+  # runs synchronously on every `release: published` event via
+  # verify-release.yml; this nightly run keeps guarding the LATEST artifacts
+  # (e.g. against an asset being replaced after publication).
+  release-content:
+    name: release-content (latest published .lgx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so required_ancestors resolve via git merge-base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run release-content leg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # API rate-limit headroom
+          CANARY_STATUS_JSON: ${{ github.workspace }}/canary-status-release-content.json
+        run: bash canary/run-all.sh release-content
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-status-release-content
+          path: canary-status-release-content.json
+
   # --- Module builds: all three published variants ---------------------------
   # Issue #32 (PR #53) pinned real circuits/rapidsnark hashes for darwin-arm64,
   # linux-amd64, and linux-arm64, and build-modules.yml now proves all three
@@ -152,7 +182,7 @@ jobs:
     # Include localnet-legs so its results are summarized when the opt-in
     # dispatch runs it. `if: always()` keeps the summary running even when that
     # job is skipped (default schedule) or a leg turns the job red.
-    needs: [catalog, modules, localnet-legs]
+    needs: [catalog, release-content, modules, localnet-legs]
     if: always()
     steps:
       - uses: actions/checkout@v4

@@ -34,13 +34,14 @@ CANARY_RESULT {"leg":"chain","status":"red","evidence":"…","duration_s":42}
 | **swap** | `leg-swap.sh` | A headless **two-peer protocol swap** completes: both CLI peers report `Completed` with the **same preimage** (the atomicity invariant). Wraps `make demo`; does not test Basecamp. | heaviest: localnet + risc0 + Anvil |
 | **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64, linux-amd64, linux-arm64** (see below) |
 | **catalog** | `leg-catalog.sh` | The **live** release catalog chain is intact: `logos-repo.json → index.json →` each `.lgx` asset URL, with names/versions cross-checked against each module's `metadata.json`. | cheap, network-only, any OS |
+| **release-content** | `leg-release-content.sh` | A **published release artifact actually contains the code its version claims**: downloads the released `.lgx`, extracts it, and asserts committed content markers (`release-content-expectations.json`) in **every shipped variant**, plus the release tag's **ancestry**. Catches a release dispatched on a **stale ref** — it happened twice (swap_ui 0.3.0 without the History tab, 0.3.3 without PR #94's trial-feedback flow) and the catalog leg structurally cannot see it (it never downloads a byte). Also runs synchronously on each `release: published` via `verify-release.yml`. | cheap, network-only, any OS |
 
 Run them all (or a subset) with the orchestrator, which prints a summary table
 and writes a status JSON:
 
 ```sh
-canary/run-all.sh                 # all legs
-canary/run-all.sh catalog modules # the cheap+fast subset
+canary/run-all.sh                          # all legs
+canary/run-all.sh catalog release-content  # the cheap+fast subset
 ```
 
 ## Red-light policy — a failing leg is a *signal*, not a canary bug

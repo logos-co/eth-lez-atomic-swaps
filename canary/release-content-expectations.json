@@ -1,0 +1,59 @@
+{
+  "_doc": [
+    "release-content-expectations.json — content markers a PUBLISHED release",
+    "artifact must actually contain, keyed module -> version -> markers.",
+    "Consumed by canary/leg-release-content.sh (see its header for the two",
+    "stale-release incidents this exists to prevent).",
+    "",
+    "Marker types:",
+    "  qml_grep           strings that must appear in the files extracted from",
+    "                     EVERY shipped variant of the .lgx (swap_ui ships its",
+    "                     QML sources inside the artifact).",
+    "  binary_strings     strings that must appear in the native plugin",
+    "                     libraries (.so/.dylib) of EVERY shipped variant —",
+    "                     asserted via a `strings`-equivalent byte scan.",
+    "  required_ancestors git commit SHAs that must be ancestors of the release",
+    "                     tag's target commit (catches a release dispatched on",
+    "                     a stale ref even before looking inside the artifact).",
+    "",
+    "FALLBACK SEMANTIC (important): when a released version has no exact entry",
+    "here, the leg uses the entry for the HIGHEST mapped version <= the released",
+    "version. So a 0.4.1 cut without a map update still asserts 0.4.0's markers",
+    "instead of passing vacuously — markers only ever ACCUMULATE, so anything",
+    "0.4.0 shipped must still be present in 0.4.1. A release OLDER than every",
+    "mapped version predates this map entirely: the leg then runs structural",
+    "checks only (archive extracts, all variants present, manifest matches) and",
+    "says so loudly in its evidence.",
+    "",
+    "When you add a feature worth guarding, add (or extend) the entry for the",
+    "NEXT version to be released, using literals verified to exist in the",
+    "source (and, for binary_strings, reachable from swap-ffi so they survive",
+    "into the compiled plugin)."
+  ],
+  "modules": {
+    "swap": {
+      "0.4.0": {
+        "binary_strings": [
+          "trial-ops/1",
+          "maker-ops.jsonl"
+        ],
+        "required_ancestors": [
+          "ba261a7d6e3b9ae3e460537df940da8c51ae26ff"
+        ]
+      }
+    },
+    "swap_ui": {
+      "0.4.0": {
+        "qml_grep": [
+          "trial-evidence/1",
+          "Copy safe evidence",
+          "feedbackUrl",
+          "safeEvidenceJson"
+        ],
+        "required_ancestors": [
+          "811c940f926ea4ff24a4a2763436e32d755145df"
+        ]
+      }
+    }
+  }
+}

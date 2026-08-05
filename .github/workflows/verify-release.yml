@@ -1,0 +1,92 @@
+name: verify-release-content
+
+# Runs the release-content canary leg the moment a release is PUBLISHED (and
+# on demand): download the released .lgx, extract it, and assert the committed
+# content markers + tag ancestry from canary/release-content-expectations.json.
+#
+# Why: the release workflows (release-swap.yml / release-swap-ui.yml) are
+# workflow_dispatch-only and build whatever ref they are dispatched on. Twice
+# (swap_ui 0.3.0 without the History tab, swap_ui 0.3.3 without PR #94's
+# trial-feedback flow) a dispatch on a stale ref produced a release whose
+# version string was right but whose artifact silently lacked recently merged
+# code — and the catalog canary leg cannot catch that, because it verifies
+# versions/reachability/sizes without downloading a byte. This workflow turns
+# that failure mode into a loud red X minutes after publishing, while
+# re-releasing is still cheap.
+#
+# The nightly canary (canary.yml, `release-content` job) runs the same leg
+# against the LATEST published releases as a continuous backstop.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Module to verify"
+        type: choice
+        options: [all, swap, swap_ui]
+        default: all
+      version:
+        description: "Version to verify (e.g. 0.4.0). Empty = latest published release. Only honored with a single module."
+        type: string
+        default: ""
+
+# Least privilege: read the repo + releases (public assets; the GITHUB_TOKEN
+# only buys API rate-limit headroom). No writes anywhere.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify release content
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so required_ancestors resolve via git merge-base
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Map the trigger onto the leg's module/version env. A release event
+      # carries the tag (swap-v<ver> / swap_ui-v<ver>); any other tag on this
+      # repo (e.g. the rolling `index` catalog release) is not a module
+      # release, so there is nothing to verify — skip with a notice.
+      - name: Resolve what to verify
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event.release.tag_name }}
+          IN_MODULE: ${{ inputs.module }}
+          IN_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT" = "release" ]; then
+            case "$TAG" in
+              swap-v*)    module=swap;    version="${TAG#swap-v}" ;;
+              swap_ui-v*) module=swap_ui; version="${TAG#swap_ui-v}" ;;
+              *)
+                echo "::notice title=verify-release-content::Tag '$TAG' is not a module release (swap-v*/swap_ui-v*); nothing to verify."
+                module="" ; version=""
+                ;;
+            esac
+          else
+            module="${IN_MODULE:-all}"
+            version="$IN_VERSION"
+          fi
+          {
+            echo "module=$module"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+      - name: Run release-content leg
+        if: steps.target.outputs.module != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANARY_RELEASE_MODULE: ${{ steps.target.outputs.module }}
+          CANARY_RELEASE_VERSION: ${{ steps.target.outputs.version }}
+          CANARY_STATUS_JSON: ${{ github.workspace }}/canary-status-release-content.json
+        run: bash canary/run-all.sh release-content
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.target.outputs.module != ''
+        with:
+          name: verify-release-content-status
+          path: canary-status-release-content.json
