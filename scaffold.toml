@@ -13,7 +13,7 @@ pin = "3d639076ec0946a6a6db799dd5a4648007f362ee"
 
 [repos.basecamp]
 source = "https://github.com/logos-co/logos-basecamp.git"
-pin = "d41a72bc7d77cfe25dfe2b888a70f16832ec8c53"
+pin = "aa237766baf61404e12da86b7303cb41065464c9"
 build = "nix-flake"
 attr = { aarch64-darwin = "bin-macos-app", aarch64-linux = "bin-appimage", x86_64-darwin = "bin-macos-app", x86_64-linux = "bin-appimage" }
 
