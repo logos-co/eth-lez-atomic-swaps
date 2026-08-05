@@ -94,8 +94,20 @@ ScrollView {
                 onValueEdited: (val) => swapBackend.setConfigValue("eth_private_key", val)
                 echoMode: TextInput.Password
                 placeholderText: "0x..."
+                hint: "Paste an existing key, or generate a fresh one below."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("eth_private_key")
+            }
+            GhostButton {
+                text: "Generate new key"
+                accented: false
+                enabled: !configRoot.anyRunning && swapBackend.ready
+                Layout.preferredHeight: 34
+                font.pixelSize: Theme.fontSmall
+                // Auto-fills eth_recipient_address with the derived address
+                // too — a taker's recipient is its own address (it locks ETH
+                // and later claims/refunds back to itself).
+                onClicked: swapBackend.setupGenerateEthKey()
             }
             ConfigField {
                 label: "HTLC Contract Address"
@@ -134,6 +146,7 @@ ScrollView {
                 onValueEdited: (val) => swapBackend.setConfigValue("lez_signing_key", val)
                 echoMode: TextInput.Password
                 placeholderText: "32-byte hex"
+                hint: "Paste an existing key, or use the Setup tab to create-and-fund a new account."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("lez_signing_key")
             }

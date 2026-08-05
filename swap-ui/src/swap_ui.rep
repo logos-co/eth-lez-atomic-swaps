@@ -89,6 +89,20 @@ class SwapUi
     // block never breaks a deployed peer.
     PROP(QString receiptsJson READWRITE)
 
+    // Guided first-run Setup state (see SetupView.qml). Replaces hand-typing
+    // two private keys + two long account IDs with buttons: generate-or-
+    // import an ETH key, create a LEZ account, then fund it (initialize +
+    // pinata-claim) via setupStartFunding(). setupStep/setupError/
+    // setupBalance/setupClaims surface startLezFundingJob's progress so the
+    // (real, PoW-bound) wait doesn't look frozen.
+    PROP(bool setupRunning READWRITE)
+    PROP(QString setupJobId READWRITE)
+    PROP(QString setupStep READWRITE)
+    PROP(QString setupError READWRITE)
+    PROP(QString setupBalance READWRITE)
+    PROP(QString setupTarget READWRITE)
+    PROP(int setupClaims READWRITE)
+
     SLOT(void setRole(const QString& role))
     SLOT(void setConfigValue(const QString& key, const QString& value))
     SLOT(void loadConfig(const QString& configJson))
@@ -117,4 +131,15 @@ class SwapUi
     // defaults — the escape hatch for a profile whose config.json holds
     // stale/bad credentials (it holds two private keys).
     SLOT(void resetConfig())
+
+    // Guided first-run Setup (see SetupView.qml). Generation is instant/
+    // local (no network) and writes straight into the existing
+    // eth*/lez* config PROPs above (through the same persisted-config save
+    // path as manual entry), so the rest of the app can't tell a generated
+    // key from a pasted one. setupStartFunding runs initialize+fund as a
+    // background job — see startLezFundingJob's ordering guarantee in
+    // swap-module/src/swap_impl.h.
+    SLOT(void setupGenerateEthKey())
+    SLOT(void setupGenerateLezAccount())
+    SLOT(void setupStartFunding())
 }

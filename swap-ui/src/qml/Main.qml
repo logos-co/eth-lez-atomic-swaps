@@ -101,6 +101,19 @@ Item {
 
         readonly property string receiptsJson: root.backend ? root.backend.receiptsJson : "[]"
 
+        // Guided first-run Setup (see SetupView.qml). setupStep/setupBalance/
+        // setupClaims/setupError surface startLezFundingJob's progress via
+        // ordinary property-change notifications on the replica (no
+        // dedicated signals in swap_ui.rep) so binding these through is
+        // sufficient for SetupView.qml's progress UI to update live.
+        readonly property bool setupRunning: root.backend ? root.backend.setupRunning : false
+        readonly property string setupJobId: root.backend ? root.backend.setupJobId : ""
+        readonly property string setupStep: root.backend ? root.backend.setupStep : ""
+        readonly property string setupError: root.backend ? root.backend.setupError : ""
+        readonly property string setupBalance: root.backend ? root.backend.setupBalance : ""
+        readonly property string setupTarget: root.backend ? root.backend.setupTarget : ""
+        readonly property int setupClaims: root.backend ? root.backend.setupClaims : 0
+
         signal offersFetched(string offersJson)
         signal offerPublished(string resultJson)
 
@@ -183,6 +196,21 @@ Item {
         function clearHistory() {
             if (!root.ready) return
             root.watch(root.backend.clearHistory())
+        }
+
+        function setupGenerateEthKey() {
+            if (!root.ready) return
+            root.watch(root.backend.setupGenerateEthKey())
+        }
+
+        function setupGenerateLezAccount() {
+            if (!root.ready) return
+            root.watch(root.backend.setupGenerateLezAccount())
+        }
+
+        function setupStartFunding() {
+            if (!root.ready) return
+            root.watch(root.backend.setupStartFunding())
         }
     }
 

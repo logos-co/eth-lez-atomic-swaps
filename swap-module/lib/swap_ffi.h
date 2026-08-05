@@ -43,6 +43,21 @@ void swap_ffi_stop_maker_loop(void);
 
 char *swap_ffi_default_lez_htlc_program_id(void);
 
+/* Onboarding: key generation + LEZ account init/funding (see swap-ffi/src/lib.rs). */
+
+char *swap_ffi_generate_eth_key(void);
+
+char *swap_ffi_generate_lez_account(void);
+
+char *swap_ffi_lez_ensure_initialized(const char *sequencer_url,
+                                      const char *signing_key_hex);
+
+char *swap_ffi_lez_claim_to_target(const char *sequencer_url,
+                                   const char *signing_key_hex,
+                                   const char *target_lez,
+                                   ProgressCallback cb,
+                                   void *user_data);
+
 void swap_ffi_free_string(char *ptr);
 
 #ifdef __cplusplus

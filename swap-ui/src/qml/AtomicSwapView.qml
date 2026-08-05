@@ -6,6 +6,67 @@ import SwapTheme
 Item {
     id: root
 
+    // Tab indices — keep in lockstep with the Repeater model and StackLayout
+    // children below. Setup is APPENDED at the end (never inserted):
+    // OfferBoard.qml navigates by hardcoded index (tabConfig=1/tabMaker=2/
+    // tabTaker=3), so inserting anywhere earlier would silently break it.
+    readonly property int tabMarket: 0
+    readonly property int tabSetup: 6
+
+    // First-run guided setup: once config validation has settled (see the
+    // Timer pair below — same pattern as OfferBoard.qml's own readiness
+    // check), jump to the Setup tab if the config actually turns out
+    // incomplete. Gated to fire at most once and only while the user is
+    // still sitting on the default Market tab, so it can never yank
+    // navigation away from someone who has already started using the app.
+    property bool validationRequested: false
+    property bool validationSettled: false
+    property bool autoNavigatedToSetup: false
+
+    readonly property var validationErrors: {
+        try { return JSON.parse(swapBackend.validationErrorsJson || "{}") }
+        catch (e) { return {} }
+    }
+    readonly property int configIssueCount: Object.keys(validationErrors).length
+    readonly property bool configReady: validationSettled && configIssueCount === 0
+
+    onValidationSettledChanged: {
+        if (validationSettled && !configReady && !autoNavigatedToSetup
+                && tabBar.currentIndex === tabMarket) {
+            autoNavigatedToSetup = true
+            tabBar.currentIndex = tabSetup
+        }
+    }
+
+    Timer {
+        interval: 400
+        running: swapBackend.ready && !root.validationRequested
+        repeat: false
+        onTriggered: {
+            root.validationRequested = true
+            swapBackend.validateConfig()
+            validationSettleFallback.start()
+        }
+    }
+
+    // Settles validation when the answer is "no errors": equal-value writes
+    // to validationErrorsJson emit no change signal, so a valid (complete)
+    // config would otherwise never flip validationSettled and the guided
+    // Setup tab would never get a chance to NOT show up for it.
+    Timer {
+        id: validationSettleFallback
+        interval: 1500
+        repeat: false
+        onTriggered: root.validationSettled = true
+    }
+
+    Connections {
+        target: swapBackend
+        function onValidationErrorsJsonChanged() {
+            root.validationSettled = true
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -20,8 +81,9 @@ Item {
                 // Order is load-bearing: OfferBoard navigates by index
                 // (tabConfig=1 / tabMaker=2 / tabTaker=3), so new tabs are
                 // appended, never inserted. Must stay in lockstep with the
-                // StackLayout below.
-                model: ["Market", "Config", "Maker", "Taker", "Refund", "History"]
+                // StackLayout below. "Setup" appended at index 6 — see
+                // root.tabSetup above.
+                model: ["Market", "Config", "Maker", "Taker", "Refund", "History", "Setup"]
                 TabButton {
                     text: modelData
                     width: implicitWidth
@@ -216,6 +278,10 @@ Item {
             TakerView { id: takerView }
             RefundView {}
             HistoryView {}
+            SetupView {
+                id: setupView
+                onFinished: tabBar.currentIndex = root.tabMarket
+            }
         }
 
         // Status bar

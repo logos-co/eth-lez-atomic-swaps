@@ -373,6 +373,19 @@ std::string SwapImpl::refundEth(const std::string& configJson, const std::string
     return takeAndFree(swap_ffi_refund_eth(configJson.c_str(), swapIdHex.c_str()));
 }
 
+std::string SwapImpl::generateEthKey() {
+    return takeAndFree(swap_ffi_generate_eth_key());
+}
+
+std::string SwapImpl::generateLezAccount() {
+    return takeAndFree(swap_ffi_generate_lez_account());
+}
+
+std::string SwapImpl::lezEnsureInitialized(const std::string& sequencerUrl,
+                                           const std::string& signingKeyHex) {
+    return takeAndFree(swap_ffi_lez_ensure_initialized(sequencerUrl.c_str(), signingKeyHex.c_str()));
+}
+
 std::string SwapImpl::runMaker(const std::string& configJson, const std::string& hashlockHex) {
     return runBlockingJob("maker", configJson, hashlockHex);
 }
@@ -416,6 +429,81 @@ std::string SwapImpl::startTakerJob(const std::string& configJson, const std::st
 std::string SwapImpl::startMakerLoopJob(const std::string& configJson)
 {
     return startJob("maker_loop", configJson, {});
+}
+
+// 150 LEZ: exactly one native pinata claim (see src/lez/onboard.rs — 150
+// LEZ/claim). A taker mostly RECEIVES LEZ over the lifetime of an account
+// (it locks ETH and claims LEZ that a maker already funded into escrow), so
+// onboarding needs the account to exist and be initialized far more than it
+// needs a large standing balance — one claim is enough for it to be a
+// legitimate on-chain counterparty and to cover any small transfer of its
+// own. Each claim also costs real CPU time (PoW at difficulty 3) and a real
+// chain round trip, so onboarding requests exactly one rather than looping
+// to a bigger number "for headroom". Matches the Config tab's own default
+// lez_amount ("150" — see SwapUiPlugin::applyDefaultConfig).
+const char* const kDefaultSetupFundingTargetLez = "150";
+
+std::string SwapImpl::startLezFundingJob(const std::string& sequencerUrl,
+                                         const std::string& signingKeyHex,
+                                         const std::string& targetLezArg)
+{
+    const std::string role = "lez_setup";
+    const std::string targetLez = targetLezArg.empty() ? kDefaultSetupFundingTargetLez : targetLezArg;
+
+    const bool emitterBoundBeforeAssign = static_cast<bool>(emitEvent);
+    {
+        std::lock_guard<std::mutex> lock(m_emitter->mutex);
+        m_emitter->active = true;
+        m_emitter->emit = emitEvent;
+        if (!m_emitter->dispatcher) {
+            m_emitter->dispatcher = new QObject();
+        }
+    }
+    swapImplTrace(std::string("startLezFundingJob emitEvent_bound=")
+                  + (emitterBoundBeforeAssign ? "true" : "false") + " target=" + targetLez);
+
+    auto job = std::make_shared<JobState>();
+    job->id = newJobId(role, m_nextJobId.fetch_add(1));
+    job->role = role;
+
+    {
+        std::lock_guard<std::mutex> lock(m_jobsMutex);
+        auto active = activeJobForRoleLocked(role);
+        if (active) {
+            std::lock_guard<std::mutex> jobLock(active->mutex);
+            if (!isTerminalStatus(active->status)) {
+                std::ostringstream out;
+                out << "{\"ok\":false,\"error\":" << jsonString(role + " job already running")
+                    << ",\"role\":" << jsonString(role)
+                    << ",\"active_job_id\":" << jsonString(active->id)
+                    << "}";
+                return out.str();
+            }
+        }
+        m_jobs[job->id] = job;
+        setActiveJobForRoleLocked(role, job);
+    }
+
+    auto emitter = m_emitter;
+    std::thread worker([job, emitter, role, sequencerUrl, signingKeyHex, targetLez]() {
+        ProgressCtx ctx{job, emitter, progressEventName(role)};
+        std::string result = takeAndFree(swap_ffi_lez_claim_to_target(
+            sequencerUrl.c_str(),
+            signingKeyHex.c_str(),
+            targetLez.c_str(),
+            &SwapImpl::progressTrampoline,
+            &ctx));
+
+        setJobFinished(job, result);
+        safeEmit(emitter, finishedEventName(role), finishedPayload(job));
+    });
+
+    {
+        std::lock_guard<std::mutex> lock(m_workersMutex);
+        m_workers.emplace_back(std::move(worker));
+    }
+
+    return jobJson(job);
 }
 
 std::string SwapImpl::stopJob(const std::string& jobId)
@@ -545,6 +633,9 @@ std::shared_ptr<SwapImpl::JobState> SwapImpl::activeJobForRoleLocked(const std::
     if (role == "maker_loop") {
         return m_makerLoopJob;
     }
+    if (role == "lez_setup") {
+        return m_lezSetupJob;
+    }
     return {};
 }
 
@@ -556,6 +647,8 @@ void SwapImpl::setActiveJobForRoleLocked(const std::string& role, const std::sha
         m_takerJob = job;
     } else if (role == "maker_loop") {
         m_makerLoopJob = job;
+    } else if (role == "lez_setup") {
+        m_lezSetupJob = job;
     }
 }
 

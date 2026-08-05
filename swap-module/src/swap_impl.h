@@ -88,6 +88,54 @@ public:
     std::string refundLez(const std::string& configJson, const std::string& hashlockHex);
     std::string refundEth(const std::string& configJson, const std::string& swapIdHex);
 
+    // ---- Onboarding (generate/init/fund) ----
+    //
+    // Replaces the worst part of first-run setup — hand-typing two private
+    // keys and two long account IDs into the Config tab (#87/#91) — with
+    // buttons. Thin wrappers over the new swap-ffi onboarding surface, itself
+    // a thin wrapper over `src/lez/onboard.rs` (lifted from `lez-mcp` in #77
+    // and live-verified against the public testnet). No new crypto here.
+
+    // Generate a fresh random ETH signing key. No network call. Returns JSON
+    // {"private_key":"0x...","address":"0x..."}. The address is what a taker
+    // should publish as its own eth_recipient_address.
+    std::string generateEthKey();
+
+    // Generate a fresh LEZ signing key + its derived account ID. No network
+    // call — the account does not exist on-chain until lezEnsureInitialized
+    // (or startLezFundingJob, which calls that first) runs. Returns JSON
+    // {"signing_key":"<64-char hex>","account_id":"<base58>"}.
+    std::string generateLezAccount();
+
+    // Idempotently ensure a LEZ account is initialized (owned by the
+    // authenticated_transfer program) on-chain. Safe to call at any time.
+    // startLezFundingJob below also calls this first internally, so a caller
+    // that skips straight to funding still gets init-before-claim — the
+    // sequencer silently drops pinata claims against a never-initialized
+    // account, and that ordering guarantee lives in the Rust layer, not in
+    // whichever order a UI happens to call these two. Returns JSON
+    // {"outcome":"AlreadyInitialized"} or
+    // {"outcome":"Initialized","data":{"tx_hash":"..."}}.
+    std::string lezEnsureInitialized(const std::string& sequencerUrl, const std::string& signingKeyHex);
+
+    // Start a background job that ensures the account is initialized, then
+    // claims from the native pinata faucet until its balance reaches
+    // targetLez (a decimal LEZ string, e.g. "150" — one claim; see the
+    // funding-target rationale in swap_impl.cpp). Emits progress via
+    // lez_setup.progress / lez_setup.finished, same enriched job-payload
+    // shape as the maker/taker/maker_loop jobs; `data` carries the raw
+    // FundingProgress event from src/lez/onboard.rs (Initializing,
+    // CheckingBalance, Claimed, ClaimFailed, TargetReached, ...). Returns a
+    // JSON job descriptor immediately, same shape as startMakerJob etc.
+    //
+    // NOTE: unlike the maker/taker jobs, this cannot be interrupted mid-flight
+    // — stopJob() marks it "cancelling" in the job status but the underlying
+    // claim_to_target loop (a plain blocking Rust future with no cancellation
+    // token) runs to completion regardless. Acceptable for a single ~150 LEZ
+    // claim; a follow-up would thread a cancel flag through if a target ever
+    // needs many claims.
+    std::string startLezFundingJob(const std::string& sequencerUrl, const std::string& signingKeyHex, const std::string& targetLez);
+
     // ---- Long-running flows ----
     //
     // These call into the Rust orchestrator which performs multi-step on-chain
@@ -171,6 +219,7 @@ private:
     std::shared_ptr<JobState> m_makerJob;
     std::shared_ptr<JobState> m_takerJob;
     std::shared_ptr<JobState> m_makerLoopJob;
+    std::shared_ptr<JobState> m_lezSetupJob;
     std::mutex m_workersMutex;
     std::vector<std::thread> m_workers;
 };
