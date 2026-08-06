@@ -270,7 +270,9 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
 
     setMessagingConnected(false);
     setMessagingPeerCount(0);
+    setMessagingPeerCountKnown(false);
     setMessagingConnectionStatus(QString{});
+    setMessagingHint(QString{});
     setMessagingRetrying(false);
     setOffersJson(QString{});
     setOfferResultJson(QString{});
@@ -987,10 +989,30 @@ void SwapUiPlugin::setupGenerateLezAccount()
         const auto obj = parseObject(result);
         // Only the signing key is a config field (raw-key auth derives its
         // account ID from it) — lezAccountId is the WALLET-mode field
-        // (paired with lezWalletHome) and stays untouched here; fetchBalances
-        // below is what surfaces the derived account ID (as lezAccount) for
-        // display, exactly like every other raw-key profile.
+        // (paired with lezWalletHome) and stays untouched here.
         setLezSigningKey(valueString(obj, QStringLiteral("signing_key")));
+        // The FFI result already carries the derived base58 account ID, so
+        // surface it immediately instead of waiting on fetchBalances: on a
+        // fresh install fetchBalances refuses to run until the config
+        // validates, and validation requires lez_taker_account_id — which is
+        // exactly the field a first-time user cannot know yet. Relying on the
+        // fetch left SetupView stuck on "Account: (refreshing…)" forever.
+        const auto accountId = valueString(obj, QStringLiteral("account_id"));
+        const auto previousAccount = lezAccount().trimmed();
+        setLezAccount(accountId);
+        // A taker's LEZ payout destination is its own account, so default the
+        // Config tab's "Taker account ID" to the account Setup just derived —
+        // the user should never hand-paste their own ID (#95 feedback).
+        // Non-destructive: only fill an empty field, or update a value that
+        // still points at the account this regeneration just replaced (i.e.
+        // one this same auto-fill wrote earlier). An explicitly configured
+        // foreign value is never touched.
+        const auto takerId = lezTakerAccountId().trimmed();
+        if (!accountId.isEmpty()
+            && (takerId.isEmpty()
+                || (!previousAccount.isEmpty() && takerId == previousAccount))) {
+            setLezTakerAccountId(accountId);
+        }
         setSetupError(QString{});
         validateConfig();
         scheduleConfigSave();
@@ -1928,7 +1950,10 @@ void SwapUiPlugin::pollMessagingStatus()
         const bool connected = obj.value(QStringLiteral("connected")).toBool(false);
         setMessagingConnected(connected);
         setMessagingPeerCount(obj.value(QStringLiteral("peer_count")).toInt(0));
+        setMessagingPeerCountKnown(
+            obj.value(QStringLiteral("peer_count_known")).toBool(false));
         setMessagingConnectionStatus(obj.value(QStringLiteral("connection_status")).toString());
+        setMessagingHint(obj.value(QStringLiteral("delivery_hint")).toString());
         if (connected) {
             setMessagingRetrying(false);
         } else if (m_autoMessagingEnabled && !m_messagingInitInFlight) {
@@ -2060,10 +2085,13 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
             return;
         }
         // Steps mirror src/lez/onboard.rs::FundingProgress: Initializing,
-        // AlreadyInitialized, Initialized, CheckingBalance, Claimed,
-        // ClaimFailed, TargetReached. Surfacing the raw step name (rather
-        // than translating it) keeps SetupView.qml's progress text in sync
-        // with the Rust doc comments describing each phase.
+        // AlreadyInitialized, Initialized, CheckingBalance, ClaimSubmitted,
+        // Claimed, ClaimFailed, TargetReached. Surfacing the raw step name
+        // (rather than translating it) keeps SetupView.qml's progress text in
+        // sync with the Rust doc comments describing each phase. Claimed now
+        // fires only once a claim COMMITS on-chain and carries the balance
+        // from the same commit read, so the claims counter and the balance
+        // readout can never contradict each other.
         setSetupStep(step);
         if (data.contains(QStringLiteral("balance"))) {
             setSetupBalance(valueString(data, QStringLiteral("balance")));

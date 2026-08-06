@@ -344,10 +344,23 @@ Item {
                 Item { Layout.fillWidth: true }
                 Text {
                     visible: true
+                    // A KNOWN zero-peer reading while connected is fleet
+                    // isolation: the local node is up and subscribed but
+                    // nothing can reach it, which a bare "Delivery
+                    // connected" used to mask (live 0.4.1 incident: stale
+                    // delivery_module, empty board, no error anywhere).
+                    readonly property bool fleetIsolated:
+                        swapBackend.messagingConnected
+                        && swapBackend.messagingPeerCountKnown
+                        && swapBackend.messagingPeerCount === 0
                     text: {
                         if (swapBackend.messagingConnected) {
                             if (swapBackend.messagingPeerCount > 0)
-                                return swapBackend.messagingPeerCount + " peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                                return "Delivery connected \u00B7 " + swapBackend.messagingPeerCount + " fleet peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                            if (fleetIsolated)
+                                return "Delivery connected \u00B7 0 fleet peers"
+                            if (swapBackend.messagingHint !== "")
+                                return "Delivery degraded"
                             if (swapBackend.messagingConnectionStatus !== "")
                                 return "Delivery " + swapBackend.messagingConnectionStatus.toLowerCase()
                             return "Delivery connected"
@@ -360,15 +373,22 @@ Item {
                             return "Swap in progress"
                         return "Delivery not ready"
                     }
-                    color: (swapBackend.messagingConnected || swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
-                           ? Theme.success
-                           : Theme.warning
+                    color: {
+                        if (fleetIsolated || swapBackend.messagingHint !== "")
+                            return Theme.warning
+                        return (swapBackend.messagingConnected || swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
+                               ? Theme.success
+                               : Theme.warning
+                    }
                     font.pixelSize: Theme.fontSmall
                 }
                 Text {
                     visible: true
                     text: swapBackend.messagingConnected ? " \u25CF " : " \u25CB "
-                    color: swapBackend.messagingConnected ? Theme.success : Theme.warning
+                    color: (swapBackend.messagingConnected
+                            && !(swapBackend.messagingPeerCountKnown && swapBackend.messagingPeerCount === 0)
+                            && swapBackend.messagingHint === "")
+                           ? Theme.success : Theme.warning
                     font.pixelSize: Theme.fontSmall
                 }
                 Text {

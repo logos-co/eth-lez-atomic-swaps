@@ -33,6 +33,86 @@ std::string jsonError(const std::string& message)
 
 } // namespace
 
+// Deliberately Qt-free (like swapDeliveryEthAmountToWei's fallback twin) so it
+// compiles identically in the header-less test build and stays a pure,
+// unit-testable function.
+int swapDeliveryParsePeerCount(const std::string& raw)
+{
+    const auto first = raw.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) {
+        return -1;
+    }
+    const auto last = raw.find_last_not_of(" \t\n\r");
+    std::string s = raw.substr(first, last - first + 1);
+
+    // getNodeInfo returns "a UTF-16 string containing UTF-8 serializable JSON
+    // data" — a bare count may arrive wrapped as a JSON string ("\"3\"").
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+        s = s.substr(1, s.size() - 2);
+    }
+    if (s.empty()) {
+        return -1;
+    }
+
+    // JSON array of peer descriptors: count its top-level elements.
+    if (s.front() == '[') {
+        if (s.back() != ']') {
+            return -1;
+        }
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        bool content = false;
+        int commas = 0;
+        for (char c : s) {
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+                content = true;
+            } else if (c == '[' || c == '{') {
+                if (++depth > 1) {
+                    content = true;
+                }
+            } else if (c == ']' || c == '}') {
+                if (--depth < 0) {
+                    return -1;
+                }
+            } else if (depth == 1) {
+                if (c == ',') {
+                    ++commas;
+                } else if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+                    content = true;
+                }
+            }
+        }
+        if (depth != 0 || inString) {
+            return -1;
+        }
+        return content ? commas + 1 : 0;
+    }
+
+    // Bare (or string-wrapped) non-negative integer.
+    std::size_t consumed = 0;
+    try {
+        const long value = std::stol(s, &consumed, 10);
+        if (consumed != s.size() || value < 0) {
+            return -1;
+        }
+        return static_cast<int>(value);
+    } catch (...) {
+        return -1;
+    }
+}
+
 #if __has_include("logos_api.h") && __has_include("logos_sdk.h") && __has_include("logos_types.h")
 
 #include "logos_api.h"
@@ -64,6 +144,22 @@ constexpr qsizetype kMaxCachedOffers = 256;
 constexpr qsizetype kMaxCachedSwapEventsPerSwap = 32;
 constexpr qsizetype kMaxTrackedSwaps = 64;
 
+// Fleet peer probing. messagingStatus() is polled every 2s by swap_ui; the
+// remote getNodeInfo round trip is throttled to this interval so status stays
+// cheap while the peer count stays fresh enough to notice isolation.
+constexpr qint64 kPeerProbeIntervalMs = 5000;
+// After the probe is flagged unsupported (an out-of-date delivery_module
+// without the node-info API), retry only occasionally — every poll would just
+// burn a CALLBACK_TIMEOUT wait each time.
+constexpr qint64 kPeerProbeUnsupportedRetryMs = 60 * 1000;
+// Consecutive probe failures before concluding the installed delivery_module
+// simply lacks the API (as opposed to a transient hiccup).
+constexpr int kPeerProbeFailureLimit = 3;
+// A confirmed zero-peer reading only raises the isolation hint after this
+// long since start(): dialing the fleet bootstrap takes a while, and "0
+// peers" in the first seconds of a healthy startup is normal, not isolation.
+constexpr qint64 kZeroPeerAlarmGraceMs = 45 * 1000;
+
 struct DeliveryState {
     std::mutex operationMutex;
     std::recursive_mutex mutex;
@@ -80,6 +176,21 @@ struct DeliveryState {
     // payloads delivered on /atomic-swaps/1/swap-<hashlock>/json.
     std::unordered_map<std::string, QJsonArray> swapEvents;
     std::unordered_map<std::string, bool> swapSubscriptions;
+    // Fleet visibility (live incident: a stale delivery_module left the node
+    // up + subscribed but attached to ZERO fleet peers, and the UI said
+    // "Delivery connected" forever with an empty board). -1 = not yet known.
+    int fleetPeerCount = -1;
+    int peerProbeFailures = 0;
+    // The installed delivery_module repeatedly failed getNodeInfo — treat it
+    // as predating the node-info API (i.e. months out of date).
+    bool peerInfoUnsupported = false;
+    qint64 lastPeerProbeMs = 0;
+    // When start() last succeeded; gates the zero-peer isolation hint (see
+    // kZeroPeerAlarmGraceMs).
+    qint64 startedAtMs = 0;
+    // liblogosdelivery's self-reported version (getNodeInfo("Version")),
+    // surfaced in messagingStatus as a diagnostic.
+    QString deliveryVersion;
 };
 
 DeliveryState& state()
@@ -404,6 +515,89 @@ std::string logosError(const QString& op, const LogosResult& result)
     return jsonError(QStringLiteral("%1 failed: %2").arg(op, result.getError()).toStdString());
 }
 
+// Refresh the cached fleet peer count (and, once, the liblogosdelivery
+// version) via the delivery module's node-info API. Called from
+// swapDeliveryMessagingStatus(); throttled by kPeerProbeIntervalMs.
+//
+// Why this API: the module dependency schema has no version constraints
+// (liblogos DependencyResolver resolves plain names only), so an out-of-date
+// delivery_module cannot be rejected at load time. At runtime the module
+// exposes getNodeInfo IDs including relayPeerCount / peerCount (verified
+// against liblogosdelivery and delivery-module v0.1.1's Q_INVOKABLE surface;
+// the plugin's own version() is NOT remotely invokable). So:
+//  - a healthy module answers with a live count → zero-peer fleet isolation
+//    becomes visible instead of hiding behind "Delivery connected";
+//  - a months-old module fails the call entirely → flagged as out of date.
+void probeFleetPeers()
+{
+    DeliveryState& s = state();
+    std::shared_ptr<LogosModules> modules;
+    bool needVersion = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(s.mutex);
+        if (!s.modules || !s.started) {
+            return;
+        }
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const qint64 interval =
+            s.peerInfoUnsupported ? kPeerProbeUnsupportedRetryMs : kPeerProbeIntervalMs;
+        if (now - s.lastPeerProbeMs < interval) {
+            return;
+        }
+        s.lastPeerProbeMs = now;
+        modules = s.modules;
+        needVersion = s.deliveryVersion.isEmpty();
+    }
+
+    // Status polling must stay cheap: never queue behind a long-running
+    // delivery operation (createNode can take seconds). If an operation is
+    // in flight, skip this probe and keep the cached value.
+    std::unique_lock<std::mutex> opLock(s.operationMutex, std::try_to_lock);
+    if (!opLock.owns_lock()) {
+        return;
+    }
+
+    // relayPeerCount = gossipsub mesh peers, i.e. what actually carries
+    // offers in Core mode; fall back to the total peerCount for
+    // liblogosdelivery builds that don't expose the relay item.
+    int count = -1;
+    const LogosResult relay =
+        modules->delivery_module.getNodeInfo(QStringLiteral("relayPeerCount"));
+    if (relay.success) {
+        count = swapDeliveryParsePeerCount(relay.getString().toStdString());
+    }
+    if (count < 0) {
+        const LogosResult total =
+            modules->delivery_module.getNodeInfo(QStringLiteral("peerCount"));
+        if (total.success) {
+            count = swapDeliveryParsePeerCount(total.getString().toStdString());
+        }
+    }
+
+    QString version;
+    if (count >= 0 && needVersion) {
+        const LogosResult v = modules->delivery_module.getNodeInfo(QStringLiteral("Version"));
+        if (v.success) {
+            version = v.getString().trimmed();
+        }
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(s.mutex);
+    if (count >= 0) {
+        s.fleetPeerCount = count;
+        s.peerProbeFailures = 0;
+        s.peerInfoUnsupported = false;
+        if (!version.isEmpty() && s.deliveryVersion.isEmpty()) {
+            s.deliveryVersion = version;
+        }
+    } else {
+        s.fleetPeerCount = -1;
+        if (++s.peerProbeFailures >= kPeerProbeFailureLimit) {
+            s.peerInfoUnsupported = true;
+        }
+    }
+}
+
 } // namespace
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount)
@@ -429,6 +623,12 @@ void swapDeliverySetRuntimeLogosAPI(void* api)
     s.offers = QJsonArray{};
     s.swapEvents.clear();
     s.swapSubscriptions.clear();
+    s.fleetPeerCount = -1;
+    s.peerProbeFailures = 0;
+    s.peerInfoUnsupported = false;
+    s.lastPeerProbeMs = 0;
+    s.startedAtMs = 0;
+    s.deliveryVersion.clear();
     if (s.modules) {
         wireEventsLocked(s);
     }
@@ -479,6 +679,7 @@ std::string swapDeliveryMessagingInit(const std::string& configJson)
         }
         std::lock_guard<std::recursive_mutex> lock(s.mutex);
         s.started = true;
+        s.startedAtMs = QDateTime::currentMSecsSinceEpoch();
     }
 
     if (needsSubscribe) {
@@ -529,9 +730,14 @@ std::string swapDeliveryMessagingShutdown()
         // delivery_module.stop() drops every active subscription, so the
         // per-swap subscription map and any cached events are no longer
         // meaningful. Clear them to avoid leaking stale state across
-        // restarts of the messaging stack.
+        // restarts of the messaging stack. The peer count belongs to the
+        // stopped node, so it goes back to unknown too.
         s.swapSubscriptions.clear();
         s.swapEvents.clear();
+        s.fleetPeerCount = -1;
+        s.peerProbeFailures = 0;
+        s.lastPeerProbeMs = 0;
+        s.startedAtMs = 0;
     }
 
     return R"({"ok":true,"method":"messagingShutdown","backend":"delivery_module"})";
@@ -539,6 +745,10 @@ std::string swapDeliveryMessagingShutdown()
 
 std::string swapDeliveryMessagingStatus()
 {
+    // Refresh the fleet peer count first (throttled + try-lock internally, so
+    // this stays cheap and never blocks behind a long delivery operation).
+    probeFleetPeers();
+
     DeliveryState& s = state();
     std::lock_guard<std::recursive_mutex> lock(s.mutex);
     QJsonObject status{
@@ -546,11 +756,39 @@ std::string swapDeliveryMessagingStatus()
         {QStringLiteral("method"), QStringLiteral("messagingStatus")},
         {QStringLiteral("backend"), QStringLiteral("delivery_module")},
         {QStringLiteral("connected"), s.started},
-        {QStringLiteral("peer_count"), 0},
+        {QStringLiteral("peer_count"), s.fleetPeerCount > 0 ? s.fleetPeerCount : 0},
+        // false = the count above is a placeholder (probe not yet run, or the
+        // installed delivery_module cannot answer it) — the UI must not read
+        // it as a confirmed "zero peers".
+        {QStringLiteral("peer_count_known"), s.fleetPeerCount >= 0},
         {QStringLiteral("connection_status"), s.connectionStatus},
         {QStringLiteral("swap_subscription_count"),
             static_cast<int>(s.swapSubscriptions.size())}
     };
+    if (!s.deliveryVersion.isEmpty()) {
+        status.insert(QStringLiteral("delivery_version"), s.deliveryVersion);
+    }
+    // Actionable, persistent hints for the two silent failure modes a merely
+    // boolean "connected" masks: fleet isolation and a stale delivery_module.
+    QString hint;
+    if (s.started && s.subscribed) {
+        if (s.peerInfoUnsupported) {
+            hint = QStringLiteral(
+                "delivery_module did not answer its peer-count API — it is "
+                "likely out of date; update it in the Basecamp module manager");
+        } else if (s.fleetPeerCount == 0
+                   && QDateTime::currentMSecsSinceEpoch() - s.startedAtMs
+                          > kZeroPeerAlarmGraceMs) {
+            // Grace-gated: 0 peers seconds after start is normal dialing,
+            // not isolation.
+            hint = QStringLiteral(
+                "connected to 0 fleet peers — offers cannot arrive; check "
+                "that delivery_module is up to date");
+        }
+    }
+    if (!hint.isEmpty()) {
+        status.insert(QStringLiteral("delivery_hint"), hint);
+    }
     if (!s.lastError.isEmpty()) {
         status.insert(QStringLiteral("last_error"), s.lastError);
     }
@@ -820,7 +1058,7 @@ std::string swapDeliveryMessagingShutdown()
 
 std::string swapDeliveryMessagingStatus()
 {
-    return R"({"ok":true,"method":"messagingStatus","backend":"delivery_module","connected":false,"peer_count":0,"unavailable":true})";
+    return R"({"ok":true,"method":"messagingStatus","backend":"delivery_module","connected":false,"peer_count":0,"peer_count_known":false,"unavailable":true})";
 }
 
 std::string swapDeliveryPublishOffer(const std::string&)

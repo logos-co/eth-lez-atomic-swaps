@@ -34,13 +34,36 @@ ScrollView {
             "Initializing":       "Checking account initialization…",
             "AlreadyInitialized": "Account already initialized",
             "Initialized":        "Account initialized on-chain",
-            "CheckingBalance":    "Checking balance…",
-            "Claimed":            "Claim landed — checking balance…",
+            "CheckingBalance":    "Solving faucet proof-of-work…",
+            "ClaimSubmitted":     "Claim submitted — waiting for on-chain commit…",
+            "Claimed":            "Claim committed on-chain",
             "ClaimFailed":        "Claim attempt failed, retrying…",
             "TargetReached":      "Target reached",
             "Done":               "Funded and ready",
         }
         return map[step] || step
+    }
+
+    // Elapsed-seconds ticker for the funding status line. Individual phases
+    // (an Initialize commit, a claim commit) can each take a minute or more
+    // of real chain time with no new event in between — without a moving
+    // number the app looks frozen (0.4.1 feedback: "Checking account
+    // initialization…" sat still for ~1 minute). Pure QML: ticks while the
+    // job runs and resets whenever the backend reports a new step, so it
+    // always reads "time spent in the CURRENT phase".
+    property int setupStepElapsedSeconds: 0
+
+    Timer {
+        running: swapBackend.setupRunning
+        interval: 1000
+        repeat: true
+        onTriggered: setupRoot.setupStepElapsedSeconds += 1
+    }
+
+    Connections {
+        target: swapBackend
+        function onSetupStepChanged() { setupRoot.setupStepElapsedSeconds = 0 }
+        function onSetupRunningChanged() { setupRoot.setupStepElapsedSeconds = 0 }
     }
 
     Flickable {
@@ -63,11 +86,17 @@ ScrollView {
                 font.pixelSize: Theme.fontTitle
                 font.bold: true
             }
+            // NOTE (here and on every wrapped label below): alignment is
+            // pinned to AlignLeft and wrapping to WordWrap explicitly. Left
+            // implicit, the host app's ambient text defaults leaked in and
+            // rendered these full-width labels justified — huge inter-word
+            // gaps (0.4.1 live feedback).
             Text {
                 text: "Three steps, no hand-typed keys: generate an ETH key, create a LEZ account, then fund it."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontNormal
-                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
 
@@ -98,6 +127,10 @@ ScrollView {
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
                         font.family: setupRoot.hasEthKey ? Theme.monoFont : ""
+                        horizontalAlignment: Text.AlignLeft
+                        // Wrap (not WordWrap): the done-state shows one long
+                        // unbreakable hex token that must break mid-token
+                        // rather than clip on narrow cards.
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
@@ -137,6 +170,9 @@ ScrollView {
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
                         font.family: setupRoot.hasLezAccount ? Theme.monoFont : ""
+                        horizontalAlignment: Text.AlignLeft
+                        // Wrap (not WordWrap): base58 account IDs are one
+                        // long token — see the ETH-address label above.
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
                     }
@@ -170,13 +206,15 @@ ScrollView {
                         hairline: false
                     }
                     Text {
-                        text: "Initializes the account on-chain, then claims from the native pinata faucet "
+                        text: "Initializes the account on-chain, then funds it in 150-LEZ faucet claims "
                               + "up to " + (swapBackend.setupTarget !== "" ? swapBackend.setupTarget : "150") + " LEZ. "
-                              + "Each claim is proof-of-work — this takes real time, so it won't look frozen: "
-                              + "the status line below updates as it progresses."
+                              + "Each claim needs a proof-of-work solve plus an on-chain commit, and testnet "
+                              + "blocks can be a minute or more apart — the timer below keeps counting while "
+                              + "it works."
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
-                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
 
@@ -202,13 +240,19 @@ ScrollView {
                         }
                         Text {
                             Layout.fillWidth: true
-                            wrapMode: Text.Wrap
+                            horizontalAlignment: Text.AlignLeft
+                            wrapMode: Text.WordWrap
                             text: {
                                 var parts = [setupRoot.humanSetupStep(swapBackend.setupStep)]
+                                // Live per-phase elapsed counter, so a slow
+                                // chain phase visibly ticks instead of
+                                // looking hung.
+                                if (swapBackend.setupRunning && setupRoot.setupStepElapsedSeconds > 0)
+                                    parts[0] += " " + setupRoot.setupStepElapsedSeconds + "s"
                                 if (swapBackend.setupBalance !== "")
                                     parts.push(swapBackend.setupBalance + " / " + swapBackend.setupTarget + " LEZ")
                                 if (swapBackend.setupClaims > 0)
-                                    parts.push(swapBackend.setupClaims + " claim" + (swapBackend.setupClaims === 1 ? "" : "s") + " landed")
+                                    parts.push(swapBackend.setupClaims + " claim" + (swapBackend.setupClaims === 1 ? "" : "s") + " committed")
                                 return parts.join(" — ")
                             }
                             color: Theme.textSecondary
@@ -221,7 +265,8 @@ ScrollView {
                         text: swapBackend.setupError
                         color: Theme.error
                         font.pixelSize: Theme.fontCaption
-                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
                 }
@@ -250,7 +295,8 @@ ScrollView {
                         text: "You're set up. Head to the market to browse offers, or fine-tune anything in Config."
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
-                        wrapMode: Text.Wrap
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                     }
                     PrimaryButton {

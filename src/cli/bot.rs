@@ -1440,10 +1440,16 @@ pub async fn fund_to_target(config: &SwapConfig, target: u128, json: bool) -> Re
                     FundingProgress::CheckingBalance { balance, target } => println!(
                         "Balance {balance} < target {target}; claiming 150 LEZ from pinata..."
                     ),
+                    FundingProgress::ClaimSubmitted { tx_hash } => {
+                        println!("Claim submitted (tx {tx_hash}); waiting for on-chain commit...")
+                    }
                     FundingProgress::Claimed {
                         tx_hash,
                         total_claims,
-                    } => println!("Claim #{total_claims} committed (tx {tx_hash})"),
+                        balance,
+                    } => println!(
+                        "Claim #{total_claims} committed (tx {tx_hash}, balance {balance})"
+                    ),
                     FundingProgress::ClaimFailed {
                         error,
                         consecutive_failures,

@@ -10,6 +10,7 @@
 #include <vector>
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
+int swapDeliveryParsePeerCount(const std::string& raw);
 
 extern "C" {
 void mock_swap_ffi_reset();
@@ -123,6 +124,41 @@ LOGOS_TEST(messaging_status_uses_delivery_backend_shape) {
     LOGOS_ASSERT_CONTAINS(status, R"("method":"messagingStatus")");
     LOGOS_ASSERT_CONTAINS(status, R"("backend":"delivery_module")");
     LOGOS_ASSERT_CONTAINS(status, R"("connected":false)");
+    // Before any successful peer probe the count is a placeholder, and the
+    // status must say so — the UI treats a KNOWN zero as fleet isolation, so
+    // an unknown one must never masquerade as a confirmed reading.
+    LOGOS_ASSERT_CONTAINS(status, R"("peer_count_known":false)");
+}
+
+// getNodeInfo returns node-info items as strings of JSON-serializable data;
+// the peer-count parser must accept every plausible encoding and refuse to
+// invent a count from garbage (returning -1 = unknown, never a fake 0).
+LOGOS_TEST(delivery_peer_count_parses_bare_and_wrapped_numbers) {
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("3"), 3);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(" 12 \n"), 12);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("\"7\""), 7);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("0"), 0);
+}
+
+LOGOS_TEST(delivery_peer_count_counts_json_array_elements) {
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[]"), 0);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[ ]"), 0);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"(["16Uiu2HAm","16Uiu2HAn"])"), 2);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"([{"peerId":"a"},{"peerId":"b"},{"peerId":"c"}])"), 3);
+    // Nested structures and escaped/comma-bearing strings must not skew the
+    // top-level element count.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"([["a","b"],["c"]])"), 2);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"(["with,comma","with\"quote"])"), 2);
+}
+
+LOGOS_TEST(delivery_peer_count_rejects_garbage_as_unknown) {
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(""), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("   "), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("waku"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("-1"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("3 peers"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1,2"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"({"peerCount":3})"), -1);
 }
 
 LOGOS_TEST(delivery_messaging_requires_runtime_before_init_or_publish) {

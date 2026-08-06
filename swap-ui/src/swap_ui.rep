@@ -62,7 +62,15 @@ class SwapUi
     // Messaging/offers
     PROP(bool messagingConnected READWRITE)
     PROP(int messagingPeerCount READWRITE)
+    // Whether messagingPeerCount is a live fleet reading (as opposed to the
+    // 0 placeholder before the first probe / when the installed
+    // delivery_module can't answer its node-info API). A KNOWN zero while
+    // connected means fleet isolation — offers cannot arrive.
+    PROP(bool messagingPeerCountKnown READWRITE)
     PROP(QString messagingConnectionStatus READWRITE)
+    // Actionable delivery-health hint from the swap module (fleet isolation /
+    // out-of-date delivery_module); empty when healthy.
+    PROP(QString messagingHint READWRITE)
     PROP(bool messagingRetrying READWRITE)
     PROP(QString offersJson READWRITE)
     PROP(QString offerResultJson READWRITE)

@@ -98,11 +98,15 @@ char* swap_ffi_lez_ensure_initialized(const char*, const char*)
 
 char* swap_ffi_lez_claim_to_target(const char*, const char*, const char*, ProgressCallback cb, void* user_data)
 {
+    // Mirrors src/lez/onboard.rs::FundingProgress serialization exactly:
+    // #[serde(tag = "step", content = "data")], and Claimed only fires once
+    // the claim COMMITTED (so it carries the post-commit balance).
     if (cb) {
-        cb(R"({"event":"Initializing"})", user_data);
-        cb(R"({"event":"CheckingBalance","data":{"balance":0,"target":150}})", user_data);
-        cb(R"({"event":"Claimed","data":{"tx_hash":"0xmockclaim","total_claims":1}})", user_data);
-        cb(R"({"event":"TargetReached","data":{"balance":150}})", user_data);
+        cb(R"({"step":"Initializing"})", user_data);
+        cb(R"({"step":"CheckingBalance","data":{"balance":0,"target":150}})", user_data);
+        cb(R"({"step":"ClaimSubmitted","data":{"tx_hash":"0xmockclaim"}})", user_data);
+        cb(R"({"step":"Claimed","data":{"tx_hash":"0xmockclaim","total_claims":1,"balance":150}})", user_data);
+        cb(R"({"step":"TargetReached","data":{"balance":150}})", user_data);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     return copyJson(R"({"balance":"150"})");
