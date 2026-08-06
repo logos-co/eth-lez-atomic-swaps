@@ -28,13 +28,19 @@
     "When you add a feature worth guarding, add (or extend) the entry for the",
     "NEXT version to be released, using literals verified to exist in the",
     "source (and, for binary_strings, reachable from swap-ffi so they survive",
-    "into the compiled plugin)."
+    "into the compiled plugin).",
+    "",
+    "MARKER SELECTION RULE (learned from the 0.4.0 cut): binary_strings must be",
+    "plain, non-format!() literals of >= ~15 chars. Shorter literals get compiled",
+    "into split immediate stores on x86-64 (trial-ops/1 was mov-immediate'd and",
+    "absent as contiguous bytes from linux-amd64 while present on arm64/darwin),",
+    "and format! strings fragment at every {} placeholder. Verify a candidate",
+    "marker against a REAL built artifact for all variants before committing it."
   ],
   "modules": {
     "swap": {
       "0.4.0": {
         "binary_strings": [
-          "trial-ops/1",
           "maker-ops.jsonl",
           "swap persistence root (per-profile)"
         ],
