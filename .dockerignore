@@ -8,12 +8,14 @@ node_modules/
 **/node_modules/
 
 # Desktop app + Nix module packaging — irrelevant to the maker container.
+# (tests/ stays IN the context: Cargo.toml declares [[test]] targets with
+# required-features, and cargo validates the declared paths exist at
+# manifest parse time — see the COPY tests line in the Dockerfile.)
 swap-ui/
 swap-module/
 canary/
 contracts/
 docs/
-tests/
 scripts/
 .scaffold/
 .cursor/
