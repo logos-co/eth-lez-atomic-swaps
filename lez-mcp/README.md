@@ -6,7 +6,7 @@ testnet** and the deployed **Sepolia EthHTLC** as five typed tools for agents
 (Claude Code, Claude Desktop, any MCP client).
 
 It links this repo's `swap-orchestrator` library directly, so it shares the
-workspace's single **LEZ v0.2.0 pin** — the exact version the public testnet
+workspace's single **LEZ v0.2.2 pin** — the exact version the public testnet
 runs. When the testnet upgrades, the server and the swap app move together in
 one coordinated `Cargo.toml` bump.
 
@@ -15,7 +15,7 @@ one coordinated `Cargo.toml` bump.
 | Tool | Kind | Arguments | What it does |
 |---|---|---|---|
 | `lez_balance` | read | `account_id?` (base58; omit for the server's own account) | Balance in LEZ base units. |
-| `lez_fingerprint` | read | `sequencer_url?` | Compares the sequencer's `getProgramIds` builtin ImageIDs against the v0.2.0 ImageIDs embedded in this binary; per-program match/mismatch verdict. Without arguments it checks the configured sequencer **and refreshes the write gate**. |
+| `lez_fingerprint` | read | `sequencer_url?` | Compares the sequencer's `getProgramIds` builtin ImageIDs against the v0.2.2 ImageIDs embedded in this binary; per-program match/mismatch verdict. Without arguments it checks the configured sequencer **and refreshes the write gate**. |
 | `lez_faucet_claim` | write | `account_id`, `target_balance?`, `max_claims?` | Pinata faucet claim (150 LEZ each, proof-of-work solved locally, sent natively — no wallet CLI needed). With `target_balance`, claims repeatedly until the balance reaches it, reporting each credit. Auto-initializes the account first when the server holds its signing key. |
 | `lez_transfer` | write | `to`, `amount`, `confirm` (default `false`) | **Two-phase**: `confirm=false` returns a dry-run preview (balances, nonce, feeless note — nothing is sent); only `confirm=true` broadcasts, then waits for the recipient balance to move. Auto-sends `auth-transfer Initialize` for a fresh sender account. |
 | `sepolia_htlc_status` | read | `swap_id_or_hashlock` (32-byte hex) | Reads the deployed EthHTLC (read-only — no ETH key). Tries the input as a swap id, then falls back to resolving it as a hashlock via a `Locked`-event scan. |

@@ -24,9 +24,9 @@ pub const DEFAULT_ETH_HTLC_ADDRESS: &str = "0x351B0EA07739FA9F6769213927D7836a79
 /// `DEFAULT_ETH_HTLC_ADDRESS`: a from-block older than the deployment makes the
 /// scan start before the contract existed.
 pub const DEFAULT_ETH_HTLC_FROM_BLOCK: u64 = 11_417_462;
-/// Canonical LEZ HTLC guest program id (hex, LE-per-word) for the v0.2.0 pin.
+/// Canonical LEZ HTLC guest program id (hex, LE-per-word) for the v0.2.2 pin.
 pub const DEFAULT_LEZ_HTLC_PROGRAM_ID: &str =
-    "27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070";
+    "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702";
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {

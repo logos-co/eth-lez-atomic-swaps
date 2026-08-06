@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(feature = "scaffold-wallet")]
+use std::path::Path;
 
 use lee::AccountId;
 
@@ -20,6 +22,7 @@ pub fn wallet_home() -> PathBuf {
 
 /// Find the wallet config file. Scaffold creates `config.json`;
 /// the wallet crate expects `wallet_config.json`. Check both.
+#[cfg(feature = "scaffold-wallet")]
 fn wallet_config_path(wallet_home: &Path) -> Option<PathBuf> {
     let candidates = [
         wallet_home.join("config.json"),
@@ -30,6 +33,7 @@ fn wallet_config_path(wallet_home: &Path) -> Option<PathBuf> {
 
 /// Create a `WalletCore` from a scaffold wallet home directory.
 /// Handles config.json vs wallet_config.json resolution and storage initialization.
+#[cfg(feature = "scaffold-wallet")]
 pub fn wallet_core(home: &Path) -> Result<wallet::WalletCore> {
     let abs_home = std::fs::canonicalize(home).map_err(|_| {
         SwapError::Scaffold(format!(
@@ -46,22 +50,60 @@ pub fn wallet_core(home: &Path) -> Result<wallet::WalletCore> {
     })?;
 
     let storage_path = abs_home.join("storage.json");
+    // v0.2.2: the wallet constructors gained a third `statistics_path` arg
+    // (per-wallet sequencer-rotation metrics). Keep it under the wallet home
+    // alongside the config + storage so it is scoped to this scaffold wallet.
+    let statistics_path = abs_home.join("statistics.json");
 
-    if storage_path.exists() {
-        wallet::WalletCore::new_update_chain(config_path, storage_path, None)
-    } else {
-        // rc5: new_init_storage takes a password and also returns the mnemonic;
-        // we use an empty password and discard the mnemonic (throwaway wallets).
-        wallet::WalletCore::new_init_storage(config_path, storage_path, None, "")
-            .map(|(wc, _mnemonic)| wc)
-    }
-    .map_err(|e| SwapError::Scaffold(format!("failed to initialize wallet: {e}")))
+    let init_storage = !storage_path.exists();
+
+    // v0.2.2: `new_update_chain` / `new_init_storage` are now `async` (they
+    // build a `MultiSequencerClient`). This function is part of a large sync
+    // API surface (`LezClient::new`, the C FFI, …) whose ~25 call sites we do
+    // NOT want to turn async for a version bump. Drive the constructor to
+    // completion on a dedicated thread with its own current-thread runtime, so
+    // `wallet_core` stays synchronous whether or not the caller is already
+    // inside a tokio runtime (a plain `block_on` would panic in that case).
+    std::thread::spawn(move || -> Result<wallet::WalletCore> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| SwapError::Scaffold(format!("failed to build wallet runtime: {e}")))?;
+        rt.block_on(async move {
+            if init_storage {
+                // new_init_storage takes a password and also returns the
+                // mnemonic; we use an empty password and discard the mnemonic
+                // (throwaway wallets).
+                wallet::WalletCore::new_init_storage(
+                    config_path,
+                    storage_path,
+                    statistics_path,
+                    None,
+                    "",
+                )
+                .await
+                .map(|(wc, _mnemonic)| wc)
+            } else {
+                wallet::WalletCore::new_update_chain(
+                    config_path,
+                    storage_path,
+                    statistics_path,
+                    None,
+                )
+                .await
+            }
+            .map_err(|e| SwapError::Scaffold(format!("failed to initialize wallet: {e}")))
+        })
+    })
+    .join()
+    .map_err(|_| SwapError::Scaffold("wallet init thread panicked".to_string()))?
 }
 
 /// Extract public accounts from the wallet's key chain, creating new ones if
 /// fewer than 2 exist (rc5 wallets no longer carry `initial_accounts` in
 /// config — accounts live in the HD key chain inside storage).
 /// Returns at least 2 accounts (maker + taker).
+#[cfg(feature = "scaffold-wallet")]
 pub fn public_accounts(wc: &mut wallet::WalletCore) -> Result<Vec<WalletAccount>> {
     let mut ids: Vec<_> = wc
         .storage()
@@ -90,8 +132,18 @@ pub fn public_accounts(wc: &mut wallet::WalletCore) -> Result<Vec<WalletAccount>
 }
 
 /// Get the sequencer URL string from a WalletCore's config.
+///
+/// v0.2.2: the wallet config's single `sequencer_addr: Url` became a list
+/// `sequencers: Vec<SequencerConnectionData>` (multi-sequencer client). We
+/// target the first configured sequencer, matching the previous single-addr
+/// behaviour.
+#[cfg(feature = "scaffold-wallet")]
 pub fn sequencer_url_of(wc: &wallet::WalletCore) -> String {
-    wc.config().sequencer_addr.to_string()
+    wc.config()
+        .sequencers
+        .first()
+        .map(|s| s.sequencer_addr.to_string())
+        .unwrap_or_default()
 }
 
 /// Check whether the scaffold localnet is already running.

@@ -4,8 +4,8 @@ cache_root = ".scaffold/lez-cache"
 
 [repos.lez]
 source = "git@github.com:logos-blockchain/logos-execution-zone.git"
-pin = "a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
-path = ".scaffold/lez-cache/repos/lez/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a"
+pin = "d6e4ae694e7419f5906b340c232704466a1917b7"
+path = ".scaffold/lez-cache/repos/lez/d6e4ae694e7419f5906b340c232704466a1917b7"
 
 [repos.spel]
 source = "https://github.com/logos-co/spel.git"

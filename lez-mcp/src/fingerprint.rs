@@ -1,6 +1,6 @@
 //! Version-skew fingerprint: compare the sequencer's builtin program ImageIDs
 //! (`getProgramIds` RPC) against the ImageIDs embedded in this binary at build
-//! time by the v0.2.0-pinned LEZ crates.
+//! time by the v0.2.2-pinned LEZ crates.
 //!
 //! This is the check that catches silent version skew: a client pinned to the
 //! wrong LEZ version does not error — the sequencer silently drops
@@ -14,9 +14,9 @@ use sequencer_service_rpc::{RpcClient as _, SequencerClient};
 use serde::Serialize;
 
 /// The LEZ tag this binary embeds.
-pub const CLIENT_TAG: &str = "v0.2.0";
-/// Commit of the v0.2.0 tag.
-pub const CLIENT_COMMIT: &str = "a58fbce2";
+pub const CLIENT_TAG: &str = "v0.2.2";
+/// Commit of the v0.2.2 tag.
+pub const CLIENT_COMMIT: &str = "d6e4ae69";
 
 /// Redact a sequencer URL down to `scheme://host[:port]` for anything that is
 /// logged or serialized into a tool result. Strips userinfo (basic-auth
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn program_id_hex_round_trips_canonical_htlc_id() {
-        let canonical = "27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070";
+        let canonical = "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702";
         let id = parse_program_id(canonical).expect("parse");
         assert_eq!(program_id_hex(&id), canonical);
     }
@@ -257,7 +257,7 @@ mod tests {
         let report = build_report("http://x", &embedded, &embedded.clone());
         let v = serde_json::to_value(&report).expect("serialize");
         assert_eq!(v["matched"], serde_json::json!(true));
-        assert_eq!(v["client_tag"], serde_json::json!("v0.2.0"));
+        assert_eq!(v["client_tag"], serde_json::json!("v0.2.2"));
         assert!(v["programs"]["authenticated_transfer"]["embedded"].is_string());
         assert!(v["programs"]["amm"]["matches"].as_bool().unwrap());
     }

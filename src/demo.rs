@@ -109,6 +109,11 @@ impl DemoEnv {
         let accounts = scaffold::public_accounts(&mut wc)?;
         let wallet_home = scaffold::wallet_home();
         let sequencer_url = scaffold::sequencer_url_of(&wc);
+        // v0.2.2: the wallet no longer exposes a single `sequencer_client`
+        // field (it moved to an internal MultiSequencerClient), so build a
+        // standalone client for the wallet's configured sequencer.
+        let sequencer = crate::lez::onboard::sequencer_client(&sequencer_url)
+            .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
         report(
             4,
             "Reading wallet accounts",
@@ -129,8 +134,7 @@ impl DemoEnv {
         scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await?;
         let mut claims = 0;
         loop {
-            let balance = wc
-                .sequencer_client
+            let balance = sequencer
                 .get_account_balance(accounts[0].account_id)
                 .await
                 .map_err(|e| SwapError::LezSequencer(format!("get_account_balance failed: {e}")))?;
@@ -150,7 +154,7 @@ impl DemoEnv {
 
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
-        wc.sequencer_client
+        sequencer
             .send_transaction(LeeTransaction::ProgramDeployment(tx))
             .await
             .map_err(|e| SwapError::LezTransaction(format!("program deploy failed: {e}")))?;

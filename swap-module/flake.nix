@@ -238,7 +238,7 @@
               '';
           # logos-blockchain-circuits prebuilt artifact. Version must match the
           # logos-blockchain-circuits-* crates in the workspace lock (v0.5.3 at
-          # the LEZ v0.2.0 pin); their build scripts resolve it via
+          # the LEZ v0.2.2 pin); their build scripts resolve it via
           # LBC_ROOT_DIR (the pre-0.5 LOGOS_BLOCKCHAIN_CIRCUITS env is gone)
           # and would otherwise try to download it inside the sandbox.
           #
@@ -265,7 +265,7 @@
             inherit (circuitsAsset) sha256;
           };
           # Prebuilt rapidsnark static libs for rust-rapidsnark's build.rs
-          # (pulled in at the v0.2.0 pin via logos-blockchain-circuits-prover,
+          # (pulled in at the v0.2.2 pin via logos-blockchain-circuits-prover,
           # which forces the static-rapidsnark feature). Outside nix the build
           # script downloads these itself (see download_rapidsnark.sh in
           # logos-blockchain-rust-rapidsnark); the sandbox has no network, so
@@ -297,14 +297,14 @@
           rapidsnark = pkgs.fetchzip {
             inherit (rapidsnarkAsset) url sha256;
           };
-          # LEZ v0.2.0 source (same commit as the Cargo.toml `tag = "v0.2.0"`
+          # LEZ v0.2.2 source (same commit as the Cargo.toml `tag = "v0.2.2"`
           # pins): its checked-in `artifacts/` tree (builtin program ELFs) is
           # copied into the cargo vendor dir below, because build_utils
           # resolves `../artifacts/...` relative to its own (vendored)
           # manifest dir via a compile-time env! — i.e. `<vendor>/artifacts`.
           lezSource = pkgs.fetchzip {
-            url = "https://github.com/logos-blockchain/logos-execution-zone/archive/a58fbce2ff48c58b7bb5001b1a27e64b9596ee3a.tar.gz";
-            sha256 = "0f9vx32kx5y5cscnzb3xs6s9p2lsazs8fw1n1gpvxzn3g73w2x9s";
+            url = "https://github.com/logos-blockchain/logos-execution-zone/archive/d6e4ae694e7419f5906b340c232704466a1917b7.tar.gz";
+            sha256 = "07d04vbrj1vspnqjkr53iivywd53g5dvd4q5vrqhq9yqp6fjy3g1";
           };
           swapFfiSource = pkgs.runCommand "swap-ffi-source" {} ''
             cp -R ${swap-source}/. $out
@@ -340,7 +340,7 @@
             cargoDeps = fetchCargoVendorUA {
               name = "swap-ffi-0.1.0";
               src = swapFfiSource;
-              hash = "sha256-VrHw47Jxf4z3KuFcKAiysMuXMHLaIrsoC/O3AdrQljM=";
+              hash = "sha256-uZwBWt0kQZunoocu3ah84bpKp1cV/HWozNgf7JlnMBc=";
             };
             # --no-default-features: the `demo` feature only adds the risc0
             # guest build (needs the rzup toolchain + a nested cargo build the
@@ -350,9 +350,10 @@
             # surfaces it via swap_ffi_default_lez_htlc_program_id().
             cargoBuildFlags = [ "-p" "swap-ffi" "--no-default-features" ];
             doCheck = false;
-            # pyo3-ffi (transitive at the v0.2.0 pin) probes for a python3
-            # interpreter in its build script.
-            nativeBuildInputs = [ pkgs.python3 ];
+            # (pyo3-ffi, which needed a python3 nativeBuildInput at the v0.2.0
+            # pin, left the dependency graph with the v0.2.2 repin — no python
+            # interpreter is needed by any build script anymore; verified by a
+            # clean `nix build .#lib` without it.)
             LBC_ROOT_DIR = circuits;
             RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 

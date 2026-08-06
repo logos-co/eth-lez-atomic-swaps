@@ -51,6 +51,13 @@
           "cd3eed582727bc32f828b007b01d9f9a825f27c4",
           "918ae4e2eb741cda359a54d81447647cc41bc5e0"
         ]
+      },
+      "0.4.1": {
+        "binary_strings": [
+          "maker-ops.jsonl",
+          "swap persistence root (per-profile)",
+          "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702"
+        ]
       }
     },
     "swap_ui": {
@@ -72,6 +79,19 @@
           "f69b5a07392ebc8a36bd10b2049be01b4a77b101",
           "cd3eed582727bc32f828b007b01d9f9a825f27c4",
           "918ae4e2eb741cda359a54d81447647cc41bc5e0"
+        ]
+      },
+      "0.4.1": {
+        "qml_grep": [
+          "trial-evidence/1",
+          "Copy safe evidence",
+          "feedbackUrl",
+          "safeEvidenceJson",
+          "Three steps, no hand-typed keys: generate an ETH key, create a LEZ account, then fund it."
+        ],
+        "binary_strings": [
+          "swap_ui persistence root (per-profile)",
+          "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702"
         ]
       }
     }

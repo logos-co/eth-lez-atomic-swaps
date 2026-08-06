@@ -15,8 +15,9 @@ use url::Url;
 use crate::{
     config::{LezAuth, SwapConfig},
     error::{Result, SwapError},
-    scaffold,
 };
+#[cfg(feature = "scaffold-wallet")]
+use crate::scaffold;
 
 /// Terminal outcome of a confirmed LEZ refund attempt.
 ///
@@ -98,12 +99,23 @@ enum LezBackend {
         sequencer: SequencerClient,
         private_key: PrivateKey,
     },
+    #[cfg(feature = "scaffold-wallet")]
     Wallet {
-        wallet_core: Box<wallet::WalletCore>,
+        /// Owns the on-disk wallet handle for the lifetime of the client.
+        /// v0.2.2: no longer read directly (the sequencer moved out of it, see
+        /// `sequencer` below) — retained so the wallet's storage/keychain stay
+        /// alive alongside the client.
+        _wallet_core: Box<wallet::WalletCore>,
         private_key: PrivateKey,
-        /// When set (LEZ_SEQUENCER_URL was explicit), overrides the wallet
-        /// config's sequencer so a hosted/public sequencer can be targeted.
-        sequencer_override: Option<SequencerClient>,
+        /// The sequencer this client talks to. Built from an explicit
+        /// `LEZ_SEQUENCER_URL` when set, otherwise from the wallet config's
+        /// first configured sequencer.
+        ///
+        /// v0.2.2: the wallet no longer exposes a single borrowable
+        /// `sequencer_client` field (it moved to an internal
+        /// `MultiSequencerClient`), so we always build and own our own
+        /// `SequencerClient` here rather than borrowing one from the wallet.
+        sequencer: SequencerClient,
     },
 }
 
@@ -202,7 +214,16 @@ impl LezClient {
     pub fn new(config: &SwapConfig) -> Result<Self> {
         match &config.lez_auth {
             LezAuth::RawKey(hex_key) => Self::from_raw_key(hex_key, config),
+            #[cfg(feature = "scaffold-wallet")]
             LezAuth::Wallet { home, account_id } => Self::from_wallet(home, account_id, config),
+            #[cfg(not(feature = "scaffold-wallet"))]
+            LezAuth::Wallet { .. } => Err(SwapError::InvalidConfig(
+                "scaffold wallet auth (LEZ_WALLET_HOME) requires a build with the \
+                 `scaffold-wallet` cargo feature (the v0.2.2 wallet crate needs system \
+                 libpcsclite); use raw-key auth (LEZ_SIGNING_KEY) or rebuild with \
+                 --features scaffold-wallet"
+                    .to_string(),
+            )),
         }
     }
 
@@ -242,6 +263,7 @@ impl LezClient {
     /// given account from the wallet config on disk. Uses the WalletCore's
     /// sequencer client by default, unless `LEZ_SEQUENCER_URL` was explicitly
     /// set — in which case that URL overrides the wallet config's sequencer.
+    #[cfg(feature = "scaffold-wallet")]
     pub fn from_wallet(
         wallet_home: &std::path::Path,
         target_account_id: &AccountId,
@@ -260,24 +282,24 @@ impl LezClient {
             .clone();
 
         // An explicitly-set LEZ_SEQUENCER_URL takes precedence over the wallet
-        // config's sequencer_addr, so users can retarget a hosted/public
-        // sequencer via env. Falls back to the wallet's own client otherwise.
-        let sequencer_override = if config.lez_sequencer_url_explicit {
-            let url = Url::parse(&config.lez_sequencer_url)
-                .map_err(|e| SwapError::InvalidConfig(format!("invalid sequencer URL: {e}")))?;
-            let client = SequencerClientBuilder::default()
-                .build(url)
-                .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
-            Some(client)
+        // config's sequencer, so users can retarget a hosted/public sequencer
+        // via env. Otherwise fall back to the wallet config's first sequencer.
+        let sequencer_url = if config.lez_sequencer_url_explicit {
+            config.lez_sequencer_url.clone()
         } else {
-            None
+            scaffold::sequencer_url_of(&wc)
         };
+        let url = Url::parse(&sequencer_url)
+            .map_err(|e| SwapError::InvalidConfig(format!("invalid sequencer URL: {e}")))?;
+        let sequencer = SequencerClientBuilder::default()
+            .build(url)
+            .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
 
         Ok(Self {
             backend: LezBackend::Wallet {
-                wallet_core: Box::new(wc),
+                _wallet_core: Box::new(wc),
                 private_key,
-                sequencer_override,
+                sequencer,
             },
             account_id: *target_account_id,
             program_id: config.lez_htlc_program_id,
@@ -288,19 +310,15 @@ impl LezClient {
     fn sequencer(&self) -> &SequencerClient {
         match &self.backend {
             LezBackend::Standalone { sequencer, .. } => sequencer,
-            LezBackend::Wallet {
-                wallet_core,
-                sequencer_override,
-                ..
-            } => sequencer_override
-                .as_ref()
-                .unwrap_or(&wallet_core.sequencer_client),
+            #[cfg(feature = "scaffold-wallet")]
+            LezBackend::Wallet { sequencer, .. } => sequencer,
         }
     }
 
     fn private_key(&self) -> &PrivateKey {
         match &self.backend {
             LezBackend::Standalone { private_key, .. } => private_key,
+            #[cfg(feature = "scaffold-wallet")]
             LezBackend::Wallet { private_key, .. } => private_key,
         }
     }
