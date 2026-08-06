@@ -51,6 +51,12 @@ COPY src ./src
 COPY swap-ffi ./swap-ffi
 COPY lez-mcp ./lez-mcp
 COPY programs ./programs
+# tests/ must be present even though we never run them here: Cargo.toml
+# declares [[test]] targets with required-features (e2e_swap,
+# lez_integration), and cargo validates that every declared target's path
+# exists while parsing the manifest — a missing tests/ fails the build
+# before compilation starts.
+COPY tests ./tests
 # examples/ (onboard_maker_account: one-off account provisioning, see its
 # doc comment) is NOT part of the shipped image — only target/release/
 # swap-cli is copied into the runtime stage below — but building it here
