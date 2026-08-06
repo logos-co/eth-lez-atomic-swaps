@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "release-content-expectations.json — content markers a PUBLISHED release",
+    "release-content-expectations.json \u2014 content markers a PUBLISHED release",
     "artifact must actually contain, keyed module -> version -> markers.",
     "Consumed by canary/leg-release-content.sh (see its header for the two",
     "stale-release incidents this exists to prevent).",
@@ -10,7 +10,7 @@
     "                     EVERY shipped variant of the .lgx (swap_ui ships its",
     "                     QML sources inside the artifact).",
     "  binary_strings     strings that must appear in the native plugin",
-    "                     libraries (.so/.dylib) of EVERY shipped variant —",
+    "                     libraries (.so/.dylib) of EVERY shipped variant \u2014",
     "                     asserted via a `strings`-equivalent byte scan.",
     "  required_ancestors git commit SHAs that must be ancestors of the release",
     "                     tag's target commit (catches a release dispatched on",
@@ -19,7 +19,7 @@
     "FALLBACK SEMANTIC (important): when a released version has no exact entry",
     "here, the leg uses the entry for the HIGHEST mapped version <= the released",
     "version. So a 0.4.1 cut without a map update still asserts 0.4.0's markers",
-    "instead of passing vacuously — markers only ever ACCUMULATE, so anything",
+    "instead of passing vacuously \u2014 markers only ever ACCUMULATE, so anything",
     "0.4.0 shipped must still be present in 0.4.1. A release OLDER than every",
     "mapped version predates this map entirely: the leg then runs structural",
     "checks only (archive extracts, all variants present, manifest matches) and",
@@ -42,7 +42,8 @@
           "ba261a7d6e3b9ae3e460537df940da8c51ae26ff",
           "7c7c145a53dd6f1b84da8348ff56e2923ae393e9",
           "ce93c34b0d0dac08ed3761d5c392c52891170377",
-          "cd3eed582727bc32f828b007b01d9f9a825f27c4"
+          "cd3eed582727bc32f828b007b01d9f9a825f27c4",
+          "918ae4e2eb741cda359a54d81447647cc41bc5e0"
         ]
       }
     },
@@ -63,7 +64,8 @@
           "97a2ea77acf43d7be662f7ef9fce61572f4656f3",
           "63911dba64b76b46179ce484c5f6d67d886dfb09",
           "f69b5a07392ebc8a36bd10b2049be01b4a77b101",
-          "cd3eed582727bc32f828b007b01d9f9a825f27c4"
+          "cd3eed582727bc32f828b007b01d9f9a825f27c4",
+          "918ae4e2eb741cda359a54d81447647cc41bc5e0"
         ]
       }
     }
