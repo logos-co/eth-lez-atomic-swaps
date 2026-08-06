@@ -34,7 +34,14 @@ futures-util = "0.3"
 lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
 lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2", features = ["host"] }
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
+# Optional (behind `scaffold-wallet`): at v0.2.2 the upstream wallet crate
+# unconditionally pulls keycard_wallet → keycard-rs → pcsc-sys, which needs
+# system libpcsclite on Linux — a dependency CI runners and the sandboxed nix
+# module build don't have (and upstream exposes no feature flag to shed it).
+# Only the scaffold-localnet flows (demo/infra + the localnet e2e tests) read
+# the scaffold wallet, so the dep stays off by default and rides the `demo`
+# feature.
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2", optional = true }
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2", features = ["client"] }
 sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
 # Builtin program registry (authenticated_transfer & co. moved here in v0.2.0)
@@ -84,10 +91,29 @@ lez_htlc_methods = { path = "programs/lez-htlc/methods", optional = true }
 
 [features]
 default = []
+# Scaffold-managed wallet support (WalletCore readers in src/scaffold.rs and
+# the wallet-auth paths). Off by default: the v0.2.2 wallet crate hard-requires
+# system libpcsclite on Linux via keycard (see the `wallet` dep comment).
+# Builds without it still support raw-key auth everywhere; wallet-auth paths
+# return a clear runtime error pointing at this feature.
+scaffold-wallet = ["dep:wallet"]
 demo = [
     "dep:lez_htlc_methods",
     "alloy/provider-anvil-node",
+    # demo/infra drive the scaffold localnet through the scaffold wallet.
+    "scaffold-wallet",
 ]
+
+# The localnet e2e tests read the scaffold wallet; keep them out of
+# default-feature `--all-targets` builds (CI runs default features with no
+# libpcsclite installed).
+[[test]]
+name = "e2e_swap"
+required-features = ["scaffold-wallet"]
+
+[[test]]
+name = "lez_integration"
+required-features = ["scaffold-wallet"]
 
 [dev-dependencies]
 alloy = { version = "1", features = [

@@ -350,9 +350,10 @@
             # surfaces it via swap_ffi_default_lez_htlc_program_id().
             cargoBuildFlags = [ "-p" "swap-ffi" "--no-default-features" ];
             doCheck = false;
-            # pyo3-ffi (transitive at the v0.2.2 pin) probes for a python3
-            # interpreter in its build script.
-            nativeBuildInputs = [ pkgs.python3 ];
+            # (pyo3-ffi, which needed a python3 nativeBuildInput at the v0.2.0
+            # pin, left the dependency graph with the v0.2.2 repin — no python
+            # interpreter is needed by any build script anymore; verified by a
+            # clean `nix build .#lib` without it.)
             LBC_ROOT_DIR = circuits;
             RAPIDSNARK_LIB_DIR = "${rapidsnark}/lib";
 

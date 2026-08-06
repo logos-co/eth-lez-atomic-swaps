@@ -150,6 +150,7 @@ impl Signer {
     pub fn from_auth(auth: &LezAuth) -> Result<Self, String> {
         match auth {
             LezAuth::RawKey(hex_key) => Self::from_raw_key(hex_key),
+            #[cfg(feature = "scaffold-wallet")]
             LezAuth::Wallet { home, account_id } => {
                 let wc = crate::scaffold::wallet_core(home).map_err(|e| format!("wallet home: {e}"))?;
                 let signing_key = wc
@@ -166,6 +167,14 @@ impl Signer {
                     signing_key,
                 })
             }
+            #[cfg(not(feature = "scaffold-wallet"))]
+            LezAuth::Wallet { .. } => Err(
+                "scaffold wallet auth (LEZ_WALLET_HOME) requires a build with the \
+                 `scaffold-wallet` cargo feature (the v0.2.2 wallet crate needs system \
+                 libpcsclite); use raw-key auth (LEZ_SIGNING_KEY) or rebuild with \
+                 --features scaffold-wallet"
+                    .to_string(),
+            ),
         }
     }
 }

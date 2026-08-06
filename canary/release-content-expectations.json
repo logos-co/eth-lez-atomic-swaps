@@ -54,7 +54,6 @@
       },
       "0.4.1": {
         "binary_strings": [
-          "trial-ops/1",
           "maker-ops.jsonl",
           "swap persistence root (per-profile)",
           "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702"

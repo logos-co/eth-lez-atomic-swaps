@@ -15,8 +15,9 @@ use url::Url;
 use crate::{
     config::{LezAuth, SwapConfig},
     error::{Result, SwapError},
-    scaffold,
 };
+#[cfg(feature = "scaffold-wallet")]
+use crate::scaffold;
 
 /// Terminal outcome of a confirmed LEZ refund attempt.
 ///
@@ -98,6 +99,7 @@ enum LezBackend {
         sequencer: SequencerClient,
         private_key: PrivateKey,
     },
+    #[cfg(feature = "scaffold-wallet")]
     Wallet {
         /// Owns the on-disk wallet handle for the lifetime of the client.
         /// v0.2.2: no longer read directly (the sequencer moved out of it, see
@@ -212,7 +214,16 @@ impl LezClient {
     pub fn new(config: &SwapConfig) -> Result<Self> {
         match &config.lez_auth {
             LezAuth::RawKey(hex_key) => Self::from_raw_key(hex_key, config),
+            #[cfg(feature = "scaffold-wallet")]
             LezAuth::Wallet { home, account_id } => Self::from_wallet(home, account_id, config),
+            #[cfg(not(feature = "scaffold-wallet"))]
+            LezAuth::Wallet { .. } => Err(SwapError::InvalidConfig(
+                "scaffold wallet auth (LEZ_WALLET_HOME) requires a build with the \
+                 `scaffold-wallet` cargo feature (the v0.2.2 wallet crate needs system \
+                 libpcsclite); use raw-key auth (LEZ_SIGNING_KEY) or rebuild with \
+                 --features scaffold-wallet"
+                    .to_string(),
+            )),
         }
     }
 
@@ -252,6 +263,7 @@ impl LezClient {
     /// given account from the wallet config on disk. Uses the WalletCore's
     /// sequencer client by default, unless `LEZ_SEQUENCER_URL` was explicitly
     /// set — in which case that URL overrides the wallet config's sequencer.
+    #[cfg(feature = "scaffold-wallet")]
     pub fn from_wallet(
         wallet_home: &std::path::Path,
         target_account_id: &AccountId,
@@ -298,6 +310,7 @@ impl LezClient {
     fn sequencer(&self) -> &SequencerClient {
         match &self.backend {
             LezBackend::Standalone { sequencer, .. } => sequencer,
+            #[cfg(feature = "scaffold-wallet")]
             LezBackend::Wallet { sequencer, .. } => sequencer,
         }
     }
@@ -305,6 +318,7 @@ impl LezClient {
     fn private_key(&self) -> &PrivateKey {
         match &self.backend {
             LezBackend::Standalone { private_key, .. } => private_key,
+            #[cfg(feature = "scaffold-wallet")]
             LezBackend::Wallet { private_key, .. } => private_key,
         }
     }

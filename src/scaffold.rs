@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(feature = "scaffold-wallet")]
+use std::path::Path;
 
 use lee::AccountId;
 
@@ -20,6 +22,7 @@ pub fn wallet_home() -> PathBuf {
 
 /// Find the wallet config file. Scaffold creates `config.json`;
 /// the wallet crate expects `wallet_config.json`. Check both.
+#[cfg(feature = "scaffold-wallet")]
 fn wallet_config_path(wallet_home: &Path) -> Option<PathBuf> {
     let candidates = [
         wallet_home.join("config.json"),
@@ -30,6 +33,7 @@ fn wallet_config_path(wallet_home: &Path) -> Option<PathBuf> {
 
 /// Create a `WalletCore` from a scaffold wallet home directory.
 /// Handles config.json vs wallet_config.json resolution and storage initialization.
+#[cfg(feature = "scaffold-wallet")]
 pub fn wallet_core(home: &Path) -> Result<wallet::WalletCore> {
     let abs_home = std::fs::canonicalize(home).map_err(|_| {
         SwapError::Scaffold(format!(
@@ -99,6 +103,7 @@ pub fn wallet_core(home: &Path) -> Result<wallet::WalletCore> {
 /// fewer than 2 exist (rc5 wallets no longer carry `initial_accounts` in
 /// config — accounts live in the HD key chain inside storage).
 /// Returns at least 2 accounts (maker + taker).
+#[cfg(feature = "scaffold-wallet")]
 pub fn public_accounts(wc: &mut wallet::WalletCore) -> Result<Vec<WalletAccount>> {
     let mut ids: Vec<_> = wc
         .storage()
@@ -132,6 +137,7 @@ pub fn public_accounts(wc: &mut wallet::WalletCore) -> Result<Vec<WalletAccount>
 /// `sequencers: Vec<SequencerConnectionData>` (multi-sequencer client). We
 /// target the first configured sequencer, matching the previous single-addr
 /// behaviour.
+#[cfg(feature = "scaffold-wallet")]
 pub fn sequencer_url_of(wc: &wallet::WalletCore) -> String {
     wc.config()
         .sequencers
