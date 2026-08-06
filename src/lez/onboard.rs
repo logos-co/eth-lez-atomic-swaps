@@ -328,8 +328,15 @@ pub enum FundingProgress {
     /// account balance read in the same commit confirmation — so a UI reporting
     /// "N claims landed" and "balance X" always shows two numbers from the same
     /// on-chain read — and `total_claims` counts only committed claims.
+    ///
+    /// `tx_hash` is present only when the credit can actually be attributed to
+    /// this claim's transaction: a pinata claim cannot credit without rotating
+    /// the seed, so the seed must have been observed rotated away from the
+    /// challenge this claim solved. `None` means the balance rise is real but
+    /// its source is ambiguous (e.g. a concurrent foreign transfer landed
+    /// first); the count and balance stay authoritative either way.
     Claimed {
-        tx_hash: String,
+        tx_hash: Option<String>,
         total_claims: u64,
         balance: u128,
     },
@@ -416,7 +423,9 @@ pub async fn claim_to_target(
                 );
                 await_claim_commit(sequencer, signer.account_id, balance, &claim.seed)
                     .await
-                    .map(|new_balance| (claim.tx_hash, new_balance))
+                    .map(|(new_balance, attributed)| {
+                        (attributed.then_some(claim.tx_hash), new_balance)
+                    })
             }
             Err(error) => Err(error),
         };
@@ -504,39 +513,77 @@ async fn attempt_claim(
 
 /// Wait for a just-submitted pinata claim to actually COMMIT — the
 /// authoritative signal that its 150-LEZ credit landed, not merely that the
-/// sequencer accepted the submission. Returns the committed balance, read here
-/// so the caller reports the same number it confirmed against.
+/// sequencer accepted the submission. Returns the committed balance (read
+/// here so the caller reports the same number it confirmed against) plus an
+/// attribution flag: `true` when the credit is attributable to THIS claim's
+/// transaction, `false` when the rise is real but its source is ambiguous.
 ///
-/// Commit is observed as the winner balance rising above `prev_balance`. If the
-/// pinata seed rotates away from `claim_seed` while the balance has NOT risen,
-/// some *other* claim committed the challenge our submission targeted, so our
-/// duplicate can never land — return an error so the loop solves the fresh
-/// seed instead of waiting out the full timeout. A final balance re-read guards
-/// the narrow race where our own commit rotated the seed between the two reads.
+/// Commit is observed as the winner balance rising above `prev_balance`.
+/// Attribution uses the pinata seed: a pinata claim cannot credit without
+/// rotating the seed, so a balance rise while the seed still equals
+/// `claim_seed` must have come from elsewhere (e.g. a foreign transfer). If
+/// the seed rotates away while the balance has NOT risen, some *other* claim
+/// committed the challenge our submission targeted, so our duplicate can
+/// never land — return an error so the loop solves the fresh seed instead of
+/// waiting out the full timeout. A final balance re-read guards the narrow
+/// race where our own commit rotated the seed between the two reads.
+///
+/// Every RPC await is additionally bounded by `timeout_at(deadline)` so a
+/// client-level stall (a hung connection jsonrpsee's own timeout misses)
+/// cannot extend the wait past [`CLAIM_COMMIT_TIMEOUT`]; an elapsed timeout
+/// reads as "not committed yet" and falls through to the deadline check.
 async fn await_claim_commit(
     sequencer: &SequencerClient,
     account_id: AccountId,
     prev_balance: u128,
     claim_seed: &[u8; 32],
-) -> Result<u128, String> {
+) -> Result<(u128, bool), String> {
     let deadline = tokio::time::Instant::now() + CLAIM_COMMIT_TIMEOUT;
+    let timeout_msg = || {
+        format!(
+            "claim did not commit within {}s of submission",
+            CLAIM_COMMIT_TIMEOUT.as_secs()
+        )
+    };
     loop {
         // Transient read errors are treated as "not committed yet" rather than
         // aborting: the deadline bounds the wait and a single dropped request
         // must not fail a claim that actually landed (same rationale as
         // ensure_initialized's confirmation loop).
-        if let Ok(balance) = sequencer.get_account_balance(account_id).await
+        if let Ok(Ok(balance)) =
+            tokio::time::timeout_at(deadline, sequencer.get_account_balance(account_id)).await
             && balance > prev_balance
         {
-            return Ok(balance);
+            // Credited. Attribute it to OUR claim only if the seed has
+            // rotated away from the challenge we solved; an unverifiable
+            // read stays unattributed rather than guessing.
+            let attributed = match tokio::time::timeout_at(
+                deadline,
+                faucet::pinata_challenge(sequencer),
+            )
+            .await
+            {
+                Ok(Ok(challenge)) => {
+                    let seed: [u8; 32] = challenge[1..].try_into().expect("33-byte challenge");
+                    seed != *claim_seed
+                }
+                _ => false,
+            };
+            return Ok((balance, attributed));
         }
-        if let Ok(challenge) = faucet::pinata_challenge(sequencer).await {
+        if let Ok(Ok(challenge)) =
+            tokio::time::timeout_at(deadline, faucet::pinata_challenge(sequencer)).await
+        {
             let seed: [u8; 32] = challenge[1..].try_into().expect("33-byte challenge");
             if seed != *claim_seed {
-                if let Ok(balance) = sequencer.get_account_balance(account_id).await
+                if let Ok(Ok(balance)) = tokio::time::timeout_at(
+                    deadline,
+                    sequencer.get_account_balance(account_id),
+                )
+                .await
                     && balance > prev_balance
                 {
-                    return Ok(balance);
+                    return Ok((balance, true));
                 }
                 return Err(
                     "claim was submitted but the faucet challenge rotated before it credited \
@@ -546,10 +593,7 @@ async fn await_claim_commit(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(format!(
-                "claim did not commit within {}s of submission",
-                CLAIM_COMMIT_TIMEOUT.as_secs()
-            ));
+            return Err(timeout_msg());
         }
         tokio::time::sleep(CLAIM_COMMIT_POLL).await;
     }

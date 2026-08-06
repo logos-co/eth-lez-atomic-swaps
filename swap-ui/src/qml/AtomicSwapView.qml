@@ -349,10 +349,15 @@ Item {
                     // nothing can reach it, which a bare "Delivery
                     // connected" used to mask (live 0.4.1 incident: stale
                     // delivery_module, empty board, no error anywhere).
+                    // Gated on messagingHint so the alarm respects the
+                    // backend's post-start grace window (0 peers seconds
+                    // after start is normal dialing) — same gate as
+                    // OfferBoard.fleetIsolated.
                     readonly property bool fleetIsolated:
                         swapBackend.messagingConnected
                         && swapBackend.messagingPeerCountKnown
                         && swapBackend.messagingPeerCount === 0
+                        && swapBackend.messagingHint !== ""
                     text: {
                         if (swapBackend.messagingConnected) {
                             if (swapBackend.messagingPeerCount > 0)
@@ -385,9 +390,7 @@ Item {
                 Text {
                     visible: true
                     text: swapBackend.messagingConnected ? " \u25CF " : " \u25CB "
-                    color: (swapBackend.messagingConnected
-                            && !(swapBackend.messagingPeerCountKnown && swapBackend.messagingPeerCount === 0)
-                            && swapBackend.messagingHint === "")
+                    color: (swapBackend.messagingConnected && swapBackend.messagingHint === "")
                            ? Theme.success : Theme.warning
                     font.pixelSize: Theme.fontSmall
                 }

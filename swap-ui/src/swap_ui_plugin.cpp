@@ -992,27 +992,20 @@ void SwapUiPlugin::setupGenerateLezAccount()
         // (paired with lezWalletHome) and stays untouched here.
         setLezSigningKey(valueString(obj, QStringLiteral("signing_key")));
         // The FFI result already carries the derived base58 account ID, so
-        // surface it immediately instead of waiting on fetchBalances: on a
-        // fresh install fetchBalances refuses to run until the config
-        // validates, and validation requires lez_taker_account_id — which is
-        // exactly the field a first-time user cannot know yet. Relying on the
-        // fetch left SetupView stuck on "Account: (refreshing…)" forever.
-        const auto accountId = valueString(obj, QStringLiteral("account_id"));
-        const auto previousAccount = lezAccount().trimmed();
-        setLezAccount(accountId);
-        // A taker's LEZ payout destination is its own account, so default the
-        // Config tab's "Taker account ID" to the account Setup just derived —
-        // the user should never hand-paste their own ID (#95 feedback).
-        // Non-destructive: only fill an empty field, or update a value that
-        // still points at the account this regeneration just replaced (i.e.
-        // one this same auto-fill wrote earlier). An explicitly configured
-        // foreign value is never touched.
-        const auto takerId = lezTakerAccountId().trimmed();
-        if (!accountId.isEmpty()
-            && (takerId.isEmpty()
-                || (!previousAccount.isEmpty() && takerId == previousAccount))) {
-            setLezTakerAccountId(accountId);
-        }
+        // surface it immediately instead of waiting on fetchBalances' round
+        // trip (which historically never ran on a fresh install because
+        // validation hard-required lez_taker_account_id; that requirement is
+        // gone — see validateConfig — but the direct display is still the
+        // right fix for SetupView's "Account: (refreshing…)").
+        //
+        // Deliberately NOT auto-filled into lez_taker_account_id: that field
+        // is the maker-side designated-counterparty ALLOWLIST (see
+        // src/config.rs SwapConfig::lez_taker_account_id) — the taker never
+        // reads it (it signs with its own account, src/swap/taker.rs), and a
+        // maker rejects a lock naming its own account. Auto-filling the
+        // user's own account here would make their maker reject every real
+        // taker with NotDesignatedTaker.
+        setLezAccount(valueString(obj, QStringLiteral("account_id")));
         setSetupError(QString{});
         validateConfig();
         scheduleConfigSave();
@@ -1124,7 +1117,12 @@ bool SwapUiPlugin::validateConfig()
     require(QStringLiteral("lez_amount"), lezAmount());
     require(QStringLiteral("eth_amount"), ethAmount());
     require(QStringLiteral("eth_recipient_address"), ethRecipientAddress());
-    require(QStringLiteral("lez_taker_account_id"), lezTakerAccountId());
+    // lez_taker_account_id is deliberately NOT required: it is the OPTIONAL
+    // maker-side designated-counterparty allowlist (empty = serve any taker;
+    // swap-ffi maps an empty string to None). The taker never reads it — it
+    // signs with its own account. Requiring it forced first-time users to
+    // hand-paste an ID into a field they should normally leave blank, and
+    // pasting their OWN account makes their maker reject every counterparty.
     require(QStringLiteral("poll_interval_ms"), pollIntervalMs());
     require(QStringLiteral("lez_timelock_minutes"), lezTimelockMinutes());
     require(QStringLiteral("eth_timelock_minutes"), ethTimelockMinutes());

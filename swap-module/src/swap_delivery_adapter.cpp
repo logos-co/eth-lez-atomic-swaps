@@ -1,5 +1,6 @@
 #include "swap_delivery_adapter.h"
 
+#include <limits>
 #include <string>
 
 namespace {
@@ -54,15 +55,18 @@ int swapDeliveryParsePeerCount(const std::string& raw)
         return -1;
     }
 
-    // JSON array of peer descriptors: count its top-level elements.
+    // JSON array of peer descriptors: count its top-level elements. Strict
+    // enough to refuse malformed input (mismatched delimiters, trailing or
+    // empty-segment commas) rather than invent a count from it.
     if (s.front() == '[') {
         if (s.back() != ']') {
             return -1;
         }
-        int depth = 0;
+        std::string openers; // matching-delimiter stack ('[' / '{')
         bool inString = false;
         bool escaped = false;
-        bool content = false;
+        bool anyContent = false;        // any element content at all
+        bool segmentHasContent = false; // content since the last top-level comma
         int commas = 0;
         for (char c : s) {
             if (inString) {
@@ -75,36 +79,53 @@ int swapDeliveryParsePeerCount(const std::string& raw)
                 }
                 continue;
             }
+            const std::size_t depth = openers.size();
             if (c == '"') {
                 inString = true;
-                content = true;
+                anyContent = true;
+                segmentHasContent = true;
             } else if (c == '[' || c == '{') {
-                if (++depth > 1) {
-                    content = true;
+                if (depth >= 1) {
+                    anyContent = true;
+                    segmentHasContent = true;
                 }
+                openers.push_back(c);
             } else if (c == ']' || c == '}') {
-                if (--depth < 0) {
-                    return -1;
+                if (openers.empty()
+                    || (c == ']' && openers.back() != '[')
+                    || (c == '}' && openers.back() != '{')) {
+                    return -1; // mismatched delimiter, e.g. "[1}"
                 }
+                openers.pop_back();
             } else if (depth == 1) {
                 if (c == ',') {
+                    if (!segmentHasContent) {
+                        return -1; // empty segment, e.g. "[,1]" or "[1,,2]"
+                    }
                     ++commas;
+                    segmentHasContent = false;
                 } else if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
-                    content = true;
+                    anyContent = true;
+                    segmentHasContent = true;
                 }
             }
         }
-        if (depth != 0 || inString) {
+        if (!openers.empty() || inString) {
             return -1;
         }
-        return content ? commas + 1 : 0;
+        if (commas > 0 && !segmentHasContent) {
+            return -1; // trailing comma, e.g. "[1,]"
+        }
+        return anyContent ? commas + 1 : 0;
     }
 
-    // Bare (or string-wrapped) non-negative integer.
+    // Bare (or string-wrapped) non-negative integer; anything outside the
+    // int range is unrepresentable and reads as unknown.
     std::size_t consumed = 0;
     try {
-        const long value = std::stol(s, &consumed, 10);
-        if (consumed != s.size() || value < 0) {
+        const long long value = std::stoll(s, &consumed, 10);
+        if (consumed != s.size() || value < 0
+            || value > static_cast<long long>(std::numeric_limits<int>::max())) {
             return -1;
         }
         return static_cast<int>(value);
@@ -181,6 +202,10 @@ struct DeliveryState {
     // "Delivery connected" forever with an empty board). -1 = not yet known.
     int fleetPeerCount = -1;
     int peerProbeFailures = 0;
+    // Failures of the one-shot Version lookup, counted separately so a
+    // module that answers peer counts but not Version stops being asked
+    // after kPeerProbeFailureLimit attempts instead of on every probe.
+    int versionProbeFailures = 0;
     // The installed delivery_module repeatedly failed getNodeInfo — treat it
     // as predating the node-info API (i.e. months out of date).
     bool peerInfoUnsupported = false;
@@ -546,12 +571,20 @@ void probeFleetPeers()
         }
         s.lastPeerProbeMs = now;
         modules = s.modules;
-        needVersion = s.deliveryVersion.isEmpty();
+        needVersion = s.deliveryVersion.isEmpty()
+            && s.versionProbeFailures < kPeerProbeFailureLimit;
     }
 
     // Status polling must stay cheap: never queue behind a long-running
     // delivery operation (createNode can take seconds). If an operation is
-    // in flight, skip this probe and keep the cached value.
+    // in flight, skip this probe and keep the cached value. The lock IS held
+    // across the getNodeInfo calls below — deliberately: every other call
+    // through the shared LogosAPI client serializes on this mutex and the
+    // client's thread-safety under concurrent invocation is not guaranteed,
+    // so copy-then-call-unlocked is not safe here. try_lock keeps the worst
+    // case for the status poll at "skip one probe", never a wait. (The
+    // generated synchronous getNodeInfo takes no per-call timeout to
+    // shorten; the throttle + failure backoff bound repeated stalls.)
     std::unique_lock<std::mutex> opLock(s.operationMutex, std::try_to_lock);
     if (!opLock.owns_lock()) {
         return;
@@ -587,8 +620,15 @@ void probeFleetPeers()
         s.fleetPeerCount = count;
         s.peerProbeFailures = 0;
         s.peerInfoUnsupported = false;
-        if (!version.isEmpty() && s.deliveryVersion.isEmpty()) {
-            s.deliveryVersion = version;
+        if (needVersion) {
+            if (!version.isEmpty()) {
+                if (s.deliveryVersion.isEmpty()) {
+                    s.deliveryVersion = version;
+                }
+                s.versionProbeFailures = 0;
+            } else {
+                ++s.versionProbeFailures;
+            }
         }
     } else {
         s.fleetPeerCount = -1;
@@ -625,6 +665,7 @@ void swapDeliverySetRuntimeLogosAPI(void* api)
     s.swapSubscriptions.clear();
     s.fleetPeerCount = -1;
     s.peerProbeFailures = 0;
+    s.versionProbeFailures = 0;
     s.peerInfoUnsupported = false;
     s.lastPeerProbeMs = 0;
     s.startedAtMs = 0;

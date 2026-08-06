@@ -1447,9 +1447,15 @@ pub async fn fund_to_target(config: &SwapConfig, target: u128, json: bool) -> Re
                         tx_hash,
                         total_claims,
                         balance,
-                    } => println!(
-                        "Claim #{total_claims} committed (tx {tx_hash}, balance {balance})"
-                    ),
+                    } => match tx_hash {
+                        Some(tx) => println!(
+                            "Claim #{total_claims} committed (tx {tx}, balance {balance})"
+                        ),
+                        None => println!(
+                            "Claim #{total_claims} committed (balance {balance}; credit source \
+                             ambiguous, tx not attributed)"
+                        ),
+                    },
                     FundingProgress::ClaimFailed {
                         error,
                         consecutive_failures,

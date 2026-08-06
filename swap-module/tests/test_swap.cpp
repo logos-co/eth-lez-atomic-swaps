@@ -161,6 +161,20 @@ LOGOS_TEST(delivery_peer_count_rejects_garbage_as_unknown) {
     LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"({"peerCount":3})"), -1);
 }
 
+LOGOS_TEST(delivery_peer_count_rejects_malformed_arrays_and_out_of_range) {
+    // Trailing / empty-segment commas must not be counted as elements.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1,]"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[,1]"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1,,2]"), -1);
+    // Mismatched delimiters are malformed, not countable.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1}"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"([{"a":1]])"), -1);
+    // int-range boundary: INT_MAX parses, anything above reads as unknown.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("2147483647"), 2147483647);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("2147483648"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("99999999999999999999"), -1);
+}
+
 LOGOS_TEST(delivery_messaging_requires_runtime_before_init_or_publish) {
     SwapImpl impl;
     LOGOS_ASSERT_CONTAINS(impl.messagingInit("{}"), R"("ok":false)");
