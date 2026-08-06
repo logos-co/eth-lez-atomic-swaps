@@ -309,6 +309,20 @@ void SwapImpl::progressTrampoline(const char* json, void* userData) {
     safeEmit(ctx->emitter, ctx->progressEventName, payload);
 }
 
+std::string SwapImpl::persistenceRoot() {
+    // Read the host-stamped `instancePersistencePath` property off the module's
+    // LogosAPI, captured by the generated provider's onInit and stashed in the
+    // delivery adapter. Empty outside a persistence-provisioning host (unit
+    // tests / lgpd); swap_ui treats an empty return as "unknown" and falls back
+    // to LOGOS_USER_DIR / its legacy path.
+    const std::string root = swapDeliveryRuntimePersistencePath();
+    // Trace the resolved per-profile root so a release/verification grep can
+    // confirm the module is handing swap_ui a profile-scoped path rather than
+    // the shared ui-host tree (issue #99).
+    swapImplTrace("swap persistence root (per-profile): " + root);
+    return root;
+}
+
 std::string SwapImpl::loadEnv(const std::string& path) {
     return takeAndFree(swap_ffi_load_env(path.c_str()));
 }

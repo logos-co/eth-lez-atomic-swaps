@@ -418,6 +418,9 @@ void swapDeliverySetRuntimeLogosAPI(void* api)
     std::lock_guard<std::recursive_mutex> lock(s.mutex);
     s.api = static_cast<LogosAPI*>(api);
     s.modules = s.api ? std::make_shared<LogosModules>(s.api) : nullptr;
+    // The runtime stamps modulePath/instanceId/instancePersistencePath onto the
+    // LogosAPI before any method dispatch, so the property is readable from here
+    // on (see swapDeliveryRuntimePersistencePath()).
     s.nodeCreated = false;
     s.started = false;
     s.subscribed = false;
@@ -429,6 +432,16 @@ void swapDeliverySetRuntimeLogosAPI(void* api)
     if (s.modules) {
         wireEventsLocked(s);
     }
+}
+
+std::string swapDeliveryRuntimePersistencePath()
+{
+    DeliveryState& s = state();
+    std::lock_guard<std::recursive_mutex> lock(s.mutex);
+    if (!s.api) {
+        return {};
+    }
+    return s.api->property("instancePersistencePath").toString().toStdString();
 }
 
 std::string swapDeliveryMessagingInit(const std::string& configJson)
@@ -767,6 +780,8 @@ std::string swapDeliveryFetchSwapEvents(const std::string& hashlockHex)
 #else
 
 void swapDeliverySetRuntimeLogosAPI(void*) {}
+
+std::string swapDeliveryRuntimePersistencePath() { return {}; }
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount)
 {

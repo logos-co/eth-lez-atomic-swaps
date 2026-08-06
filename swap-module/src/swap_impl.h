@@ -48,6 +48,30 @@ public:
     // ---- Synchronous queries ----
     // Each returns the JSON string produced by the underlying FFI call.
 
+    // Per-profile, host-owned persistence root for THIS swap module instance
+    // (shape `<basecamp>/module_data/swap/<id>/`) — or an empty string when the
+    // module runs outside a persistence-provisioning host (unit tests / lgpd).
+    //
+    // The Logos runtime stamps this path onto the module's LogosAPI as the
+    // `instancePersistencePath` property before any method is dispatched (see
+    // logos-liblogos runtime_qt/host/module_initializer.cpp). The generated
+    // provider's onInit hands that LogosAPI to the delivery adapter, which is
+    // where persistenceRoot() reads the property from — no LogosModuleContext
+    // mixin (that lives in a newer cpp-sdk than this module builds against).
+    //
+    // Exists so the out-of-process swap_ui plugin can anchor its config.json +
+    // receipts.jsonl inside the ACTIVE Basecamp profile. swap_ui is a ui_qml
+    // module hosted in a separate ui-host process that never receives
+    // LOGOS_USER_DIR and has no host identity of its own, so its Qt
+    // AppDataLocation fallback lands in a `Logos/ui-host/` tree SHARED across
+    // every Basecamp profile on the machine — leaking two private keys across
+    // profiles (issue #99). By querying this in-process core module (which does
+    // get a correct per-profile path) over the existing swap interface, swap_ui
+    // writes under `<root>/swap_ui/` instead. Empty return means "no
+    // host-provisioned root", and swap_ui falls back to LOGOS_USER_DIR / its
+    // legacy path.
+    std::string persistenceRoot();
+
     // Read a dotenv-style file and return its parsed contents as JSON.
     std::string loadEnv(const std::string& path);
 
