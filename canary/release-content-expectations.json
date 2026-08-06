@@ -57,6 +57,9 @@
           "maker-ops.jsonl",
           "swap persistence root (per-profile)",
           "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702"
+        ],
+        "required_ancestors": [
+          "d80f0353d3cdf19343273d258d433e7fe243bec2"
         ]
       }
     },
@@ -92,6 +95,9 @@
         "binary_strings": [
           "swap_ui persistence root (per-profile)",
           "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702"
+        ],
+        "required_ancestors": [
+          "d80f0353d3cdf19343273d258d433e7fe243bec2"
         ]
       }
     }

@@ -1,14 +1,16 @@
 {
   "name": "swap",
-  "display_name": "ETH ↔ LEZ Atomic Swap",
-  "version": "0.4.0",
+  "display_name": "ETH \u2194 LEZ Atomic Swap",
+  "version": "0.4.1",
   "description": "LEZ <> ETH atomic swap backend (wraps the swap-ffi Rust orchestrator)",
   "author": "Logos",
   "type": "core",
   "interface": "universal",
   "category": "defi",
   "main": "swap_plugin",
-  "dependencies": ["delivery_module"],
+  "dependencies": [
+    "delivery_module"
+  ],
   "include": [],
   "capabilities": [],
   "nix": {
@@ -24,7 +26,9 @@
     "cmake": {
       "find_packages": [],
       "extra_sources": [],
-      "extra_include_dirs": ["lib"],
+      "extra_include_dirs": [
+        "lib"
+      ],
       "extra_link_libraries": []
     }
   }
