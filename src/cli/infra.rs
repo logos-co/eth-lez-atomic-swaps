@@ -58,6 +58,11 @@ pub async fn cmd_infra() -> Result<()> {
     let accounts = scaffold::public_accounts(&mut wc)?;
     let wallet_home = scaffold::wallet_home();
     let sequencer_url = scaffold::sequencer_url_of(&wc);
+    // v0.2.2: the wallet no longer exposes a single `sequencer_client` field
+    // (it moved to an internal MultiSequencerClient), so build a standalone
+    // client for the wallet's configured sequencer.
+    let sequencer = crate::lez::onboard::sequencer_client(&sequencer_url)
+        .map_err(|e| SwapError::LezSequencer(format!("failed to create client: {e}")))?;
     eprintln!(
         " \x1b[36mmaker={} taker={}\x1b[0m",
         &accounts[0].account_id_b58[..8],
@@ -102,7 +107,7 @@ pub async fn cmd_infra() -> Result<()> {
     eprint!("  [\x1b[32mdeploy\x1b[0m] Deploying LEZ HTLC program...");
     let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
     let tx = ProgramDeploymentTransaction { message: msg };
-    wc.sequencer_client
+    sequencer
         .send_transaction(LeeTransaction::ProgramDeployment(tx))
         .await
         .unwrap();

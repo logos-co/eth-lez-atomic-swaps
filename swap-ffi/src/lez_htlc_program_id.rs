@@ -18,11 +18,15 @@
 //! test (`cargo test -p swap-ffi --features demo`) is the drift tripwire:
 //! it asserts this constant equals the pinned guest's ImageID.
 
-/// Canonical LEZ HTLC program ID: the deployment on the public testnet
-/// (`testnet.lez.logos.co`), deploy tx
-/// `c1986c2af3fc007731533d958995507c8d8b1f447d5187cc1b8967ec238c7bf9`.
-/// This is the guest ImageID under the LEZ v0.2.0 pin (tag `v0.2.0`,
-/// a58fbce2), which this branch builds — the checked-in constant and the
-/// pinned guest's ImageID converge, and the drift test above enforces it.
+/// Canonical LEZ HTLC program ID: the guest ImageID under the LEZ v0.2.2 pin
+/// (tag `v0.2.2`, `d6e4ae69`), which this branch builds — the checked-in
+/// constant and the pinned guest's ImageID converge, and the drift test above
+/// enforces it. Verified locally 2026-08-06 via
+/// `cargo test -p swap-ffi --features demo`.
+///
+/// The public testnet was reset + upgraded to v0.2.2 on 2026-08-06; the HTLC
+/// program is (re)deployed against this ImageID as part of that rollout (the
+/// deploy tx / on-chain redeploy is handled by the release orchestrator, out
+/// of band from this build-only change).
 pub(crate) const LEZ_HTLC_PROGRAM_ID_HEX: &str =
-    "27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070";
+    "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702";

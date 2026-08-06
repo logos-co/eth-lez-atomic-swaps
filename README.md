@@ -25,7 +25,7 @@ Run setup once from the repo root:
 make setup
 ```
 
-`make setup` wraps `lgs setup` in [`scripts/scaffold-setup.sh`](scripts/scaffold-setup.sh), which bridges two gaps scaffold has with the pinned LEZ v0.2.0 repo layout (wallet crate under `lez/`, no preconfigured debug wallet account — upstream [Scaffold #240](https://github.com/logos-co/scaffold/issues/240)): it retries setup with a layout symlink and seeds the default wallet address `lgs run`'s topup step needs. Use `make setup` rather than plain `lgs setup` until #240 lands in the adopted pin.
+`make setup` wraps `lgs setup` in [`scripts/scaffold-setup.sh`](scripts/scaffold-setup.sh), which bridges two gaps scaffold has with the pinned LEZ v0.2.2 repo layout (wallet crate under `lez/`, no preconfigured debug wallet account — upstream [Scaffold #240](https://github.com/logos-co/scaffold/issues/240)): it retries setup with a layout symlink and seeds the default wallet address `lgs run`'s topup step needs. Use `make setup` rather than plain `lgs setup` until #240 lands in the adopted pin.
 
 For the headless demo swap and the test suite, use:
 
@@ -70,7 +70,7 @@ What each phase does:
 
 | Command | Why it is needed |
 |---|---|
-| `make setup` | Runs `lgs setup` through the [v0.2.0 bridge](scripts/scaffold-setup.sh): fetches `logos-blockchain-circuits` into `.scaffold/lez-cache/circuits` (driven by the `[circuits]` block in [`scaffold.toml`](scaffold.toml)), creates the local LEZ checkout and wallet under `.scaffold/`, and seeds the default wallet address. |
+| `make setup` | Runs `lgs setup` through the [v0.2.2 bridge](scripts/scaffold-setup.sh): fetches `logos-blockchain-circuits` into `.scaffold/lez-cache/circuits` (driven by the `[circuits]` block in [`scaffold.toml`](scaffold.toml)), creates the local LEZ checkout and wallet under `.scaffold/`, and seeds the default wallet address. |
 | `lgs basecamp build` | Runs the aggregate module build, producing the `swap`, `swap_ui`, and `delivery_module` LGX artifacts under `.scaffold/basecamp/{lgx,portable}/`. |
 | `lgs basecamp setup` | Builds the portable `bin-macos-app` Basecamp (`aa237766` / tag `0.2.3`) and the `cli-portable` LGPM (`202af6fa`, the rev that Basecamp pin builds against), then seeds the two Basecamp profiles. |
 | `lgs basecamp install` | Installs the three `#lgx-portable` packages (`delivery_module` + `swap` as modules, `swap_ui` as a plugin) via `lgpm cli-portable` into scaffold's default profiles as a stack check; the `maker` / `taker` profiles are provisioned the same way automatically on their first `lgs basecamp launch`. The portable Basecamp and `lgpm cli-portable` agree on the bare `darwin-arm64` variant, so the install completes with zero variant errors. |
@@ -197,7 +197,7 @@ Run setup once from the repo root:
 make setup
 ```
 
-`make setup` must finish successfully before `make infra` or most other flows. It runs `lgs setup` through the [v0.2.0 bridge](scripts/scaffold-setup.sh) (see [Local Checks](#default-local-checks)): fetching circuits into `.scaffold/lez-cache/circuits` (from the `[circuits]` block in `scaffold.toml`), running the scaffold LEZ setup, creating the local LEZ checkout and wallet under `.scaffold/`, and seeding the default wallet address.
+`make setup` must finish successfully before `make infra` or most other flows. It runs `lgs setup` through the [v0.2.2 bridge](scripts/scaffold-setup.sh) (see [Local Checks](#default-local-checks)): fetching circuits into `.scaffold/lez-cache/circuits` (from the `[circuits]` block in `scaffold.toml`), running the scaffold LEZ setup, creating the local LEZ checkout and wallet under `.scaffold/`, and seeding the default wallet address.
 
 You do not need `lgs init`. This repo already ships a checked-in [`scaffold.toml`](scaffold.toml) with the expected relative paths.
 
@@ -363,7 +363,7 @@ Scaffold-native (`lgs`) commands are the primary flow for setup, module builds, 
 
 | Command | What it does |
 |---|---|
-| `make setup` | Run `lgs setup` via the v0.2.0 bridge: fetch circuits, create the LEZ checkout + wallet, seed the default wallet address |
+| `make setup` | Run `lgs setup` via the v0.2.2 bridge: fetch circuits, create the LEZ checkout + wallet, seed the default wallet address |
 | `lgs basecamp build` | Build the `swap` / `swap_ui` / `delivery_module` LGX artifacts |
 | `lgs basecamp setup` | Build the portable Basecamp + LGPM and seed the profiles |
 | `lgs basecamp install` | Install the `#lgx-portable` packages into each profile via `lgpm cli-portable` |

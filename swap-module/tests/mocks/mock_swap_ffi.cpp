@@ -78,7 +78,7 @@ char* swap_ffi_refund_eth(const char*, const char*)
 
 char* swap_ffi_default_lez_htlc_program_id()
 {
-    return copyJson("27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070");
+    return copyJson("9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702");
 }
 
 char* swap_ffi_generate_eth_key()

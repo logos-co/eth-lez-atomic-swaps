@@ -70,7 +70,7 @@ The swap module needs these endpoints/values:
 | Setting | Value |
 | --- | --- |
 | LEZ sequencer RPC | `https://testnet.lez.logos.co` |
-| LEZ swap program ID | `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` (deployed on the public testnet 2026-07-21; matches the LEZ v0.2.0 client pin on `master`) |
+| LEZ swap program ID | `9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702` (deployed on the public testnet 2026-07-21; matches the LEZ v0.2.2 client pin on `master`) |
 | ETH HTLC contract (Sepolia) | `0x351B0EA07739FA9F6769213927D7836a790A5FAF` (INTERFACE_VERSION 2) |
 | ETH RPC (Sepolia, websocket) | `wss://ethereum-sepolia-rpc.publicnode.com` |
 
@@ -114,7 +114,7 @@ wallet-CLI commands.
 
   Repeat until funded (a maker locking 1000 LEZ needs ≥7 claims). The
   `wallet` CLI comes from the `logos-execution-zone` repo at the same
-  v0.2.0 tag the module pins — see [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/master/docs/testnet.md) for
+  v0.2.2 tag the module pins — see [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/master/docs/testnet.md) for
   building it and for account create/init commands.
 
 ## How this catalog works (for maintainers)

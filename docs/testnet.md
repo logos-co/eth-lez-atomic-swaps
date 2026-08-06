@@ -7,26 +7,28 @@ Ethereum Sepolia. The first end-to-end atomic swap on this stack completed on
 Public-mode implementation remains **NO-GO** until the release blockers in the
 normative [signed protocol v2 contract](protocol-v2.md) are satisfied.
 
-## Version pin — why v0.2.0 (final)
+## Version pin — why v0.2.2
 
 The public testnet at `https://testnet.lez.logos.co` runs
-**logos-execution-zone `v0.2.0` (final, commit `a58fbce2`)**. This was verified
-by fingerprint: all five builtin program ImageIDs returned by the testnet's
-`getProgramIds` RPC match the `v0.2.0` tag's checked-in program ELFs
-bit-for-bit (`amm`, `authenticated_transfer`, `pinata`,
-`privacy_preserving_circuit`, `token`), and do **not** match `v0.2.0-rc5`.
+**logos-execution-zone `v0.2.2` (commit `d6e4ae69`)** after its 2026-08-06
+reset + upgrade. This was verified by fingerprint: all five builtin program
+ImageIDs returned by the testnet's `getProgramIds` RPC match the `v0.2.2`
+tag's checked-in program ELFs bit-for-bit (`amm`, `authenticated_transfer`,
+`pinata`, `privacy_preserving_circuit`, `token`), and do **not** match the
+prior `v0.2.0` pin (`a58fbce2`) — v0.2.0 clients' transactions are silently
+dropped by the v0.2.2 sequencer.
 
 The pin **must track the deployed sequencer version exactly**, because builtin
 program IDs are computed client-side from ELFs embedded at build time. A
 client pinned to any other tag produces transfer transactions whose
 `program_id` the sequencer does not recognize — they are silently dropped.
-When the testnet upgrades, bump the eight `tag = "v0.2.0"` git deps in
+When the testnet upgrades, bump the eight `tag = "v0.2.2"` git deps in
 `Cargo.toml` + one in `programs/lez-htlc/methods/guest/Cargo.toml` and rebuild
 (the guest ImageID changes with the pin — redeploy the program and update
 `LEZ_HTLC_PROGRAM_ID`).
 
 The scaffold localnet toolchain (scaffold.toml `[repos.lez]`) is pinned to the
-same `a58fbce2` commit, so the localnet demo and the public-testnet client run
+same `d6e4ae69` commit, so the localnet demo and the public-testnet client run
 the identical LEZ version in lockstep.
 
 Note: no `logos-blockchain-circuits` tarball is needed for cargo builds of
@@ -62,8 +64,8 @@ pinned code).
 | What | Value |
 |---|---|
 | LEZ sequencer RPC | `https://testnet.lez.logos.co` |
-| LEZ HTLC program ID (guest ImageID) | `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` |
-| LEZ HTLC deployment tx | `c1986c2af3fc007731533d958995507c8d8b1f447d5187cc1b8967ec238c7bf9` |
+| LEZ HTLC program ID (guest ImageID) | `9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702` (v0.2.2 pin) |
+| LEZ HTLC deployment tx | _pending redeploy against the v0.2.2 ImageID (the 2026-08-06 reset wiped chain state; the release orchestrator redeploys and records the new tx)_ |
 | EthHTLC contract (Sepolia) | `0x351B0EA07739FA9F6769213927D7836a790A5FAF` (minTimelockDelta=300s, INTERFACE_VERSION=2) |
 | ETH RPC (app requires WebSocket) | `wss://ethereum-sepolia-rpc.publicnode.com` |
 
@@ -126,7 +128,7 @@ only after every v2 release blocker is cleared.
 1. **Build**: `cargo build --release --bin swap-cli` (risc0 toolchain needed
    only if you rebuild the guest / run `--features demo`).
 2. **LEZ wallet** (per peer): build the `wallet` binary from
-   logos-execution-zone `v0.2.0`, then:
+   logos-execution-zone `v0.2.2`, then:
    ```sh
    export LEE_WALLET_HOME_DIR=$PWD/my-wallet
    mkdir -p $LEE_WALLET_HOME_DIR
@@ -157,7 +159,7 @@ ETH_HTLC_ADDRESS=0x351B0EA07739FA9F6769213927D7836a790A5FAF
 LEZ_SEQUENCER_URL=https://testnet.lez.logos.co
 LEZ_WALLET_HOME=<abs path to wallet home>
 LEZ_ACCOUNT_ID=<this peer's base58 account id>
-LEZ_HTLC_PROGRAM_ID=27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070
+LEZ_HTLC_PROGRAM_ID=9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702
 LEZ_AMOUNT=1000
 ETH_AMOUNT=0.0001
 LEZ_TIMELOCK_MINUTES=20     # LEZ short — maker locks second

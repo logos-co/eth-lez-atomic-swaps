@@ -10,17 +10,17 @@ path = "src/main.rs"
 
 [dependencies]
 # The app library — LezClient, EthHTLC sol types, config parsers. Pulling this
-# in transitively shares the workspace's single LEZ v0.2.0 pin.
+# in transitively shares the workspace's single LEZ v0.2.2 pin.
 swap-orchestrator = { path = ".." }
 
 # LEZ crates — same tag as the workspace root (cargo unifies these with the
 # swap-orchestrator pins; a version bump is one coordinated edit).
-lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
-lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["host"] }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["client"] }
-sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
-programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0", features = ["artifacts"] }
-authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.0" }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2", features = ["host"] }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2", features = ["client"] }
+sequencer_service_protocol = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2", features = ["artifacts"] }
+authenticated_transfer_core = { git = "https://github.com/logos-blockchain/logos-execution-zone", tag = "v0.2.2" }
 # Pinata (faucet) system account id — pulled in transitively via
 # swap-orchestrator's src/lez/faucet.rs, which this crate re-exports from
 # (see src/faucet.rs); no direct use here.

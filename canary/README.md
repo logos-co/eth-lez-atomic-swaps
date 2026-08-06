@@ -30,7 +30,7 @@ CANARY_RESULT {"leg":"chain","status":"red","evidence":"…","duration_s":42}
 
 | Leg | Script | What it proves | Cost / platform |
 |-----|--------|----------------|-----------------|
-| **chain** | `leg-chain.sh` | On a LEZ localnet: a **valid** typed transfer is accepted, included, and (funded) actually moves balance; and a **deliberately-invalid** `bare-u128` transfer is **loudly rejected**. | localnet + v0.2.0 toolchain |
+| **chain** | `leg-chain.sh` | On a LEZ localnet: a **valid** typed transfer is accepted, included, and (funded) actually moves balance; and a **deliberately-invalid** `bare-u128` transfer is **loudly rejected**. | localnet + v0.2.2 toolchain |
 | **swap** | `leg-swap.sh` | A headless **two-peer protocol swap** completes: both CLI peers report `Completed` with the **same preimage** (the atomicity invariant). Wraps `make demo`; does not test Basecamp. | heaviest: localnet + risc0 + Anvil |
 | **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64, linux-amd64, linux-arm64** (see below) |
 | **catalog** | `leg-catalog.sh` | The **live** release catalog chain is intact: `logos-repo.json → index.json →` each `.lgx` asset URL, with names/versions cross-checked against each module's `metadata.json`. | cheap, network-only, any OS |
@@ -47,11 +47,11 @@ canary/run-all.sh catalog release-content  # the cheap+fast subset
 ## Red-light policy — a failing leg is a *signal*, not a canary bug
 
 The canary is **born with a legitimate red light.** The chain leg asserts that a
-malformed instruction is *loudly rejected*; today the LEZ v0.2.0 sequencer
+malformed instruction is *loudly rejected*; today the LEZ v0.2.2 sequencer
 **silently accepts and drops it**
 ([logos-blockchain/logos-execution-zone#640](https://github.com/logos-blockchain/logos-execution-zone/issues/640)).
 That assertion fails **on purpose** — it is the canary doing its job, surfacing a
-real upstream bug the atomic-swaps team lost hours to during the v0.2.0
+real upstream bug the atomic-swaps team lost hours to during the v0.2.2
 migration (fixed on our side in commit `df93c67` by switching to the typed
 `authenticated_transfer_core::Instruction::Transfer { amount }`).
 
@@ -72,11 +72,11 @@ leg flips to `pass` and the canary tells you the golden path got *better*.
 ## Running the chain leg locally (the money shot)
 
 The chain leg's heavy lifting is `canary/chain-probe`, a standalone Rust binary
-pinned to the **same v0.2.0 (`a58fbce`) LEZ deps** as the app, so its client
+pinned to the **same v0.2.2 (`d6e4ae69`) LEZ deps** as the app, so its client
 speaks the same wire/program-id version as the sequencer and the public testnet.
 It:
 
-1. checks sequencer health and **program-id compatibility** (client v0.2.0 vs the
+1. checks sequencer health and **program-id compatibility** (client v0.2.2 vs the
    running sequencer's pin — a mismatch means the localnet is a different LEZ
    version and the experiment would be confounded, so it reports `broken`);
 2. funds two debug-genesis accounts from the vault and initializes them under
@@ -115,7 +115,7 @@ on a free port. If no prebuilt binary exists it falls back to
   `swap-module/flake.nix`.
 - **`localnet-legs`** (chain + swap): **opt-in** via `workflow_dispatch`, and
   `continue-on-error`. Honest reason: booting a localnet needs the
-  `sequencer_service` binary built from the LEZ v0.2.0 repo (a 20–30 min cold
+  `sequencer_service` binary built from the LEZ v0.2.2 repo (a 20–30 min cold
   Rust build), and the swap leg also needs risc0 + Anvil + the app's HTLC guest.
   GitHub-hosted runners are ephemeral, so a cold toolchain build every night is
   wasteful and flaky. **TODO(self-hosted):** move this job to a self-hosted

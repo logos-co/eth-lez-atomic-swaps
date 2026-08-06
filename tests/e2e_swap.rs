@@ -96,6 +96,10 @@ impl TestEnv {
         let taker_lez_id = accounts[1].account_id;
         let sequencer_url = scaffold::sequencer_url_of(&wc);
         let wallet_home = scaffold::wallet_home();
+        // v0.2.2: the wallet no longer exposes a `sequencer_client` field —
+        // build a standalone client for the wallet's configured sequencer.
+        let sequencer = swap_orchestrator::lez::onboard::sequencer_client(&sequencer_url)
+            .expect("failed to build sequencer client");
 
         scaffold::wallet_topup(Some(&accounts[0].account_id_b58))
             .await
@@ -107,7 +111,7 @@ impl TestEnv {
         // Deploy LEZ HTLC program.
         let msg = ProgramDeploymentMessage::new(LEZ_HTLC_PROGRAM_ELF.to_vec());
         let tx = ProgramDeploymentTransaction { message: msg };
-        wc.sequencer_client
+        sequencer
             .send_transaction(LeeTransaction::ProgramDeployment(tx))
             .await
             .unwrap();

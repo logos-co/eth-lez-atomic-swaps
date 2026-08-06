@@ -45,7 +45,7 @@ The release policy object is immutable for a running process and MUST be loaded 
 | ETH HTLC | `0x351b0ea07739fa9f6769213927d7836a790a5faf` |
 | ETH HTLC interface | `INTERFACE_VERSION = 2` |
 | ETH HTLC runtime code hash | `0xbad9367560aa868d44420e15b958ad1c5644cdd20ef4bed85af4d1c33d3fa1a2` |
-| LEZ HTLC program ID | `0x27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070` |
+| LEZ HTLC program ID | `0x9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702` |
 | LEZ chain ID | one nonzero authoritative 32-byte release pin; currently blocked |
 | Maker offer signer | one pinned EOA; currently blocked |
 | Maker ETH recipient | MUST equal the pinned offer signer for v2 trial |

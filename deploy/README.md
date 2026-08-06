@@ -7,7 +7,7 @@ pieces.
 
 ## Why a container
 
-The build needs Rust 1.93 with network-fetching build scripts (LEZ v0.2.0
+The build needs Rust 1.93 with network-fetching build scripts (LEZ v0.2.2
 deps) **and** Node >=20 for `offer-publisher/`. A hermetic image is the only
 thing reproducible on a bare box:
 
@@ -115,7 +115,7 @@ Public testnet endpoints (already defaulted in `maker.env.example`):
 - LEZ sequencer: `https://testnet.lez.logos.co`
 - ETH RPC: `wss://ethereum-sepolia-rpc.publicnode.com`
 - ETH HTLC (v2, current): `0x351B0EA07739FA9F6769213927D7836a790A5FAF`
-- LEZ HTLC program: `27720b5b0345135d8e684eb172c27f5fb237548cc891a3ec889d0ed340504070`
+- LEZ HTLC program: `9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702`
 
 ## Build + run
 

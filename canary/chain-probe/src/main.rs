@@ -1,12 +1,12 @@
 //! canary-chain-probe — the executable heart of leg-chain.sh.
 //!
 //! It exercises the real builder journey against a LEZ sequencer:
-//!   1. health + program-id compatibility (client v0.2.0 vs the sequencer's pin)
+//!   1. health + program-id compatibility (client v0.2.2 vs the sequencer's pin)
 //!   2. a VALID typed transfer  -> assert accepted + included (+ effect, if funded)
 //!   3. the DELIBERATELY-INVALID bare-`u128` transfer (bug #640's payload) ->
 //!      ASSERT it is LOUDLY REJECTED.
 //!
-//! Assertion (3) is expected to FAIL today: at v0.2.0 the sequencer accepts the
+//! Assertion (3) is expected to FAIL today: at v0.2.2 the sequencer accepts the
 //! malformed instruction (returns a tx hash), includes it, and the transfer
 //! simply never executes — no error anywhere (logos-blockchain/logos-execution-zone#640).
 //! That is the canary's legitimate red light, not a canary defect. The exit
@@ -237,12 +237,12 @@ async fn main() {
     let at_program = programs::authenticated_transfer().id();
     match prog_ids.get(AT_KEY) {
         Some(seq_id) if *seq_id == at_program => {
-            log("program-id compatibility: OK (client v0.2.0 == sequencer)");
+            log("program-id compatibility: OK (client v0.2.2 == sequencer)");
         }
         Some(seq_id) => verdict(
             "broken",
             &format!(
-                "program-id mismatch: sequencer '{AT_KEY}' id {seq_id:?} != v0.2.0 client {at_program:?}; \
+                "program-id mismatch: sequencer '{AT_KEY}' id {seq_id:?} != v0.2.2 client {at_program:?}; \
                  the running localnet is a different LEZ pin — transfer experiment would be confounded"
             ),
         ),
@@ -859,7 +859,7 @@ mod tests {
     // Shape (b): accepted-at-submit + NEVER included + pre-submit controls
     // healthy + the POST-malformed control ALSO included + reads working =>
     // red(10), the pre-inclusion silent drop (this is how #640 manifests on
-    // the real v0.2.0 localnet).
+    // the real v0.2.2 localnet).
     #[test]
     fn not_included_post_control_included_is_red_pre_inclusion_drop() {
         assert_eq!(
