@@ -239,7 +239,7 @@ Item {
 
                 Button {
                     text: swapBackend.balancesLoading ? "Refreshing" : "Refresh"
-                    enabled: !swapBackend.balancesLoading && !swapBackend.running
+                    enabled: !swapBackend.balancesLoading
                     Layout.preferredHeight: 28
                     font.pixelSize: 11
                     background: Rectangle {
