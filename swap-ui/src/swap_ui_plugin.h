@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "swap_ui_interface.h"
+#include "balance_refresh_coordinator.h"
 #include "LogosViewPluginBase.h"
 #include "rep_swap_ui_source.h"
 
@@ -157,6 +158,8 @@ private:
                          const QString& successStatus,
                          const QString& failureStatus);
     void fetchBalancesFromLoadedEnv();
+    void requestAutomaticBalanceRefresh();
+    void completeBalanceRefresh(const QString& resultJson);
     void applyBalancesResult(const QString& resultJson);
     void handleMakerFinished(const QString& resultJson);
     void handleTakerFinished(const QString& resultJson);
@@ -228,6 +231,7 @@ private:
     std::vector<std::function<void()>> m_pendingMessagingContinuations;
     int m_deliveryPortsShift = 0;
     QString m_loadedEnvPath;
+    BalanceRefreshCoordinator m_balanceRefreshCoordinator;
     QString m_coordinationRole;
     bool m_coordinationTakerPublished = false;
     bool m_swapEventsSubscribed = false;

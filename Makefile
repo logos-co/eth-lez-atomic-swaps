@@ -1,5 +1,5 @@
 .PHONY: contracts demo infra \
-       setup localnet-start localnet-stop test basecamp-ui-smoke
+       setup localnet-start localnet-stop test basecamp-ui-smoke swap-ui-unit
 
 .DEFAULT_GOAL := contracts
 
@@ -108,6 +108,16 @@ BASECAMP_USER_DIR = $(CURDIR)/.scaffold/basecamp/profiles/$*/xdg-data/Logos/Logo
 # Anvil and never uses a module-owned app host.
 basecamp-ui-smoke:
 	bash .github/scripts/run-basecamp-ui-smoke.sh
+
+# Pure, headless swap-ui logic tests. These compile only dependency-free
+# helpers; they do not launch Basecamp or any module-owned application host.
+swap-ui-unit:
+	@balance_bin=$$(mktemp /tmp/atomic-swaps-balance-refresh.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/balance_refresh_coordinator_test.cpp -o "$$balance_bin"; \
+		"$$balance_bin"
+	@timelock_bin=$$(mktemp /tmp/atomic-swaps-timelock.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/timelock_math_test.cpp -o "$$timelock_bin"; \
+		"$$timelock_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
