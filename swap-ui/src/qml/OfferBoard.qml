@@ -58,6 +58,17 @@ Item {
         && swapBackend.messagingConnected
         && browseReady
 
+    // The delivery node is up + subscribed but has a CONFIRMED zero fleet
+    // peers: nothing published anywhere can reach this board. Distinct from
+    // "count not known yet" (messagingPeerCountKnown false), which stays on
+    // the optimistic waking-up copy. Gated on messagingHint so the alarm only
+    // fires once the backend's post-start grace window has passed — 0 peers
+    // in the first seconds of a healthy startup is normal dialing.
+    readonly property bool fleetIsolated: swapBackend.messagingConnected
+        && swapBackend.messagingPeerCountKnown
+        && swapBackend.messagingPeerCount === 0
+        && swapBackend.messagingHint !== ""
+
     // Selected offer (plain object copy; depends on modelRev + selectedKey)
     readonly property var sel: {
         void board.modelRev
@@ -581,7 +592,7 @@ Item {
                             width: 16; height: 16; radius: width / 2
                             color: "transparent"
                             border.width: 2
-                            border.color: board.marketLive ? Theme.accent : Theme.warning
+                            border.color: (board.marketLive && !board.fleetIsolated) ? Theme.accent : Theme.warning
 
                             ParallelAnimation {
                                 running: offersModel.count === 0 && board.visible
@@ -605,7 +616,7 @@ Item {
                         Rectangle {
                             anchors.centerIn: parent
                             width: 10; height: 10; radius: 5
-                            color: board.marketLive ? Theme.accent : Theme.warning
+                            color: (board.marketLive && !board.fleetIsolated) ? Theme.accent : Theme.warning
                         }
                     }
 
@@ -623,6 +634,10 @@ Item {
                                 return "Finish network setup to browse"
                             if (!swapBackend.messagingConnected)
                                 return "Connecting to the swap network…"
+                            if (board.fleetIsolated)
+                                return "Connected, but no fleet peers"
+                            if (swapBackend.messagingHint !== "")
+                                return "Delivery needs attention"
                             return "No offers on the board yet"
                         }
                         color: Theme.textPrimary
@@ -644,6 +659,10 @@ Item {
                                 return swapBackend.messagingRetrying
                                        ? "Waiting for the delivery fleet. Offers will stream in as soon as a peer is found."
                                        : "Delivery is starting automatically."
+                            if (board.fleetIsolated)
+                                return "Your delivery node is running and subscribed, but attached to zero fleet peers — offers cannot arrive. Check that the delivery_module is up to date in the module manager, then restart Basecamp."
+                            if (swapBackend.messagingHint !== "")
+                                return swapBackend.messagingHint
                             // Browsing never required Config; only accepting
                             // an offer does. Nudge the still-unconfigured case
                             // toward set up to *trade*, not "to see offers" —

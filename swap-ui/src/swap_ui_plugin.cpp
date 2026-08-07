@@ -270,7 +270,9 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
 
     setMessagingConnected(false);
     setMessagingPeerCount(0);
+    setMessagingPeerCountKnown(false);
     setMessagingConnectionStatus(QString{});
+    setMessagingHint(QString{});
     setMessagingRetrying(false);
     setOffersJson(QString{});
     setOfferResultJson(QString{});
@@ -987,10 +989,23 @@ void SwapUiPlugin::setupGenerateLezAccount()
         const auto obj = parseObject(result);
         // Only the signing key is a config field (raw-key auth derives its
         // account ID from it) — lezAccountId is the WALLET-mode field
-        // (paired with lezWalletHome) and stays untouched here; fetchBalances
-        // below is what surfaces the derived account ID (as lezAccount) for
-        // display, exactly like every other raw-key profile.
+        // (paired with lezWalletHome) and stays untouched here.
         setLezSigningKey(valueString(obj, QStringLiteral("signing_key")));
+        // The FFI result already carries the derived base58 account ID, so
+        // surface it immediately instead of waiting on fetchBalances' round
+        // trip (which historically never ran on a fresh install because
+        // validation hard-required lez_taker_account_id; that requirement is
+        // gone — see validateConfig — but the direct display is still the
+        // right fix for SetupView's "Account: (refreshing…)").
+        //
+        // Deliberately NOT auto-filled into lez_taker_account_id: that field
+        // is the maker-side designated-counterparty ALLOWLIST (see
+        // src/config.rs SwapConfig::lez_taker_account_id) — the taker never
+        // reads it (it signs with its own account, src/swap/taker.rs), and a
+        // maker rejects a lock naming its own account. Auto-filling the
+        // user's own account here would make their maker reject every real
+        // taker with NotDesignatedTaker.
+        setLezAccount(valueString(obj, QStringLiteral("account_id")));
         setSetupError(QString{});
         validateConfig();
         scheduleConfigSave();
@@ -1102,7 +1117,12 @@ bool SwapUiPlugin::validateConfig()
     require(QStringLiteral("lez_amount"), lezAmount());
     require(QStringLiteral("eth_amount"), ethAmount());
     require(QStringLiteral("eth_recipient_address"), ethRecipientAddress());
-    require(QStringLiteral("lez_taker_account_id"), lezTakerAccountId());
+    // lez_taker_account_id is deliberately NOT required: it is the OPTIONAL
+    // maker-side designated-counterparty allowlist (empty = serve any taker;
+    // swap-ffi maps an empty string to None). The taker never reads it — it
+    // signs with its own account. Requiring it forced first-time users to
+    // hand-paste an ID into a field they should normally leave blank, and
+    // pasting their OWN account makes their maker reject every counterparty.
     require(QStringLiteral("poll_interval_ms"), pollIntervalMs());
     require(QStringLiteral("lez_timelock_minutes"), lezTimelockMinutes());
     require(QStringLiteral("eth_timelock_minutes"), ethTimelockMinutes());
@@ -1928,7 +1948,10 @@ void SwapUiPlugin::pollMessagingStatus()
         const bool connected = obj.value(QStringLiteral("connected")).toBool(false);
         setMessagingConnected(connected);
         setMessagingPeerCount(obj.value(QStringLiteral("peer_count")).toInt(0));
+        setMessagingPeerCountKnown(
+            obj.value(QStringLiteral("peer_count_known")).toBool(false));
         setMessagingConnectionStatus(obj.value(QStringLiteral("connection_status")).toString());
+        setMessagingHint(obj.value(QStringLiteral("delivery_hint")).toString());
         if (connected) {
             setMessagingRetrying(false);
         } else if (m_autoMessagingEnabled && !m_messagingInitInFlight) {
@@ -2060,10 +2083,13 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
             return;
         }
         // Steps mirror src/lez/onboard.rs::FundingProgress: Initializing,
-        // AlreadyInitialized, Initialized, CheckingBalance, Claimed,
-        // ClaimFailed, TargetReached. Surfacing the raw step name (rather
-        // than translating it) keeps SetupView.qml's progress text in sync
-        // with the Rust doc comments describing each phase.
+        // AlreadyInitialized, Initialized, CheckingBalance, ClaimSubmitted,
+        // Claimed, ClaimFailed, TargetReached. Surfacing the raw step name
+        // (rather than translating it) keeps SetupView.qml's progress text in
+        // sync with the Rust doc comments describing each phase. Claimed now
+        // fires only once a claim COMMITS on-chain and carries the balance
+        // from the same commit read, so the claims counter and the balance
+        // readout can never contradict each other.
         setSetupStep(step);
         if (data.contains(QStringLiteral("balance"))) {
             setSetupBalance(valueString(data, QStringLiteral("balance")));

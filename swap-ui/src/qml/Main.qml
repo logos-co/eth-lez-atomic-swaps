@@ -90,6 +90,12 @@ Item {
 
         readonly property bool messagingConnected: root.backend ? root.backend.messagingConnected : false
         readonly property int messagingPeerCount: root.backend ? root.backend.messagingPeerCount : 0
+        // Safe defaults matter: views test `messagingHint !== ""`, and an
+        // UNBRIDGED property would read as undefined — making that check
+        // permanently true. Every backend property a view reads MUST be
+        // bridged here (enforced by tests/check-qml-backend-contract.mjs).
+        readonly property bool messagingPeerCountKnown: root.backend ? root.backend.messagingPeerCountKnown : false
+        readonly property string messagingHint: root.backend ? root.backend.messagingHint : ""
         readonly property string messagingConnectionStatus: root.backend ? root.backend.messagingConnectionStatus : ""
         readonly property bool messagingRetrying: root.backend ? root.backend.messagingRetrying : false
         readonly property string offersJson: root.backend ? root.backend.offersJson : ""
@@ -191,6 +197,15 @@ Item {
         function refreshHistory() {
             if (!root.ready) return
             root.watch(root.backend.refreshHistory())
+        }
+
+        // Was missing from the facade (caught by
+        // tests/check-qml-backend-contract.mjs): HistoryView's "Reset app
+        // data" confirm called an undefined member and threw a TypeError
+        // instead of resetting.
+        function resetConfig() {
+            if (!root.ready) return
+            root.watch(root.backend.resetConfig())
         }
 
         function clearHistory() {

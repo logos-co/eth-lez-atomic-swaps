@@ -176,10 +176,13 @@ ScrollView {
                 errorText: configRoot.errorFor("lez_htlc_program_id")
             }
             ConfigField {
-                label: "Taker Account ID"
+                label: "Designated Taker (optional)"
                 text: swapBackend.lezTakerAccountId
                 onValueEdited: (val) => swapBackend.setConfigValue("lez_taker_account_id", val)
-                placeholderText: "base58"
+                placeholderText: "base58 — leave empty for public offers"
+                hint: "Maker-only allowlist: restrict your offers to this one counterparty account. "
+                      + "Leave empty to serve any taker. Never your own account — takers receive on "
+                      + "the account derived from their signing key automatically."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("lez_taker_account_id")
             }
