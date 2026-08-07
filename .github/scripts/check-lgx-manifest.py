@@ -29,22 +29,32 @@ WHAT IS CHECKED
    a falsy metadata value is not copied, so asserting on it would be asserting
    on something the bundler never promised.
 
-   Deliberately NOT compared:
-     * `main`  -- metadata holds a base name ("swap_plugin"), the manifest holds
-                  a per-variant filename map. Different shapes by design.
-     * `icon`  -- rewritten to the bundled basename, or "" when unset.
-     * `hashes`, `manifestVersion` -- produced by lgx, not copied from metadata.
-     * anything not in bundle.sh's allowlist (`interface`, `nix`, `capabilities`,
-       `include`, ...) is not expected to appear in the manifest at all.
+   Deliberately NOT compared: everything in BUILD_ONLY below, each with the
+   reason it does not round-trip recorded next to it.
 
-2. manifestVersion FLOOR. Hard failure if the package-format version stamped by
+2. CLASSIFICATION -- every key in metadata.json must be in ROUND_TRIP_FIELDS or
+   BUILD_ONLY, and an unclassified key is a HARD FAILURE.
+
+   This is the part that catches the NEXT dropped field rather than only the one
+   #60 already found. Checking a fixed tuple of known fields can only ever
+   re-detect known fields: add `subtitle` to metadata.json tomorrow, have the
+   pinned bundler drop it, and a round-trip-only check stays green because it
+   never looked. Forcing every key to be classified turns "a new metadata field
+   appeared" into a one-line decision made deliberately -- does this belong in
+   the artifact, yes or no -- instead of leaving the answer to whatever
+   bundle.sh happens to know about on the day it runs.
+
+   Ported from the sibling repo logos-co/lez-faucet
+   (scripts/check-lgx-manifest.py), whose guard already worked this way.
+
+3. manifestVersion FLOOR. Hard failure if the package-format version stamped by
    lgx is older than MIN_MANIFEST_VERSION. This is the second half of #60: the
    pinned lgx still had `Manifest::CURRENT_VERSION = "0.2.0"` (bumped to 0.3.0
    in logos-package@18b0075). A floor catches a backwards pin without going
    stale in the false-positive direction -- raise the constant when the
    packaging stack's format version advances and this repo has moved onto it.
 
-3. manifestVersion vs MODULE version era -- SURFACED, NOT FATAL. #60's smell
+4. manifestVersion vs MODULE version era -- SURFACED, NOT FATAL. #60's smell
    test was "manifestVersion 0.2.0 on a 0.3.0 module". It is a good smell but a
    bad assertion: the manifest FORMAT version and the MODULE version are
    independent numbers that only happened to be comparable here. Making it fatal
@@ -87,6 +97,28 @@ ROUND_TRIP_FIELDS = (
     "dependencies",
     "view",
 )
+
+# Keys that legitimately do NOT appear verbatim in the packaged manifest, each
+# with the reason -- because "it's fine, trust me" is how the round trip rotted
+# in the first place. Add to this only after checking what bundle.sh does with
+# the key; if it belongs in the artifact it goes in ROUND_TRIP_FIELDS instead.
+BUILD_ONLY = {
+    "main": "transformed: metadata holds a bare plugin base name "
+    '("swap_plugin"), the manifest holds a per-variant filename map '
+    '({"linux-amd64": "swap_plugin.so", ...}) written by `lgx create`',
+    "icon": "transformed: the manifest holds the bundled icon's basename, or "
+    '"" when there is no icon (this repo sets it null)',
+    "interface": "consumed by logos-module-builder's codegen to pick the "
+    "universal/native binding shape; never a manifest field",
+    "codegen": "consumed by logos-module-builder's codegen (impl header/class, "
+    ".rep wiring); never a manifest field",
+    "nix": "consumed by logos-module-builder to shape the derivation -- build "
+    "and runtime nixpkgs packages, external libraries, CMake knobs",
+    "capabilities": "not part of the manifest schema (logos-package README, "
+    '"Manifest schema"); the capability grant lives in the host, not the bundle',
+    "include": "consumed by logos-module-builder when staging extra payload "
+    "files into the variant directory",
+}
 
 # Lowest package-format version this repo accepts in a published .lgx.
 # 0.3.0 = logos-package@18b0075 onward. Bump when the stack moves on.
@@ -194,7 +226,31 @@ def main():
             continue
         print(f"  [ ok ] {field}: {json.dumps(actual, ensure_ascii=False)}")
 
-    # ---- 2. manifestVersion floor -----------------------------------------
+    # ---- 2. every metadata key is classified ------------------------------
+    # ROUND_TRIP_FIELDS alone can only re-detect fields someone already thought
+    # about. This loop is what notices a key nobody has classified yet, which is
+    # the shape the NEXT #60 will arrive in.
+    print()
+    for field in metadata:
+        if field in ROUND_TRIP_FIELDS:
+            continue
+        if field in BUILD_ONLY:
+            print(f"  [bld ] {field}: {BUILD_ONLY[field]}")
+            continue
+        failures.append(
+            f"{field}: UNCLASSIFIED key in metadata.json. This guard requires every "
+            f"metadata key to be declared either round-tripping or build-only, so that a "
+            f"newly added field cannot be silently dropped by the packaging toolchain the "
+            f"way display_name was in issue #60. Decide which it is and say so in "
+            f"{os.path.relpath(__file__)}: if it must reach the packaged manifest.json, add "
+            f"it to ROUND_TRIP_FIELDS (and confirm the pinned nix-bundle-lgx bundle.sh "
+            f"copies it -- a field in that tuple the bundler does not know about will fail "
+            f"the round-trip check above, which is the correct outcome); otherwise add it "
+            f"to BUILD_ONLY with the reason it does not appear. Current value: "
+            f"{json.dumps(metadata[field], ensure_ascii=False)}"
+        )
+
+    # ---- 3. manifestVersion floor -----------------------------------------
     manifest_version = manifest.get("manifestVersion")
     print()
     print(f"  manifestVersion : {manifest_version!r}  (floor {MIN_MANIFEST_VERSION})")
@@ -219,7 +275,7 @@ def main():
             f"inputs in flake.lock."
         )
 
-    # ---- 3. era comparison (surfaced, not fatal) --------------------------
+    # ---- 4. era comparison (surfaced, not fatal) --------------------------
     module_version = metadata.get("version")
     mod = parse_version(module_version)
     if mv is not None and mod is not None:
@@ -250,7 +306,10 @@ def main():
         )
         return 1
 
-    print(f"OK: every round-trip field in {args.metadata} survived packaging.")
+    print(
+        f"OK: every round-trip field in {args.metadata} survived packaging, and every "
+        f"key it carries is classified."
+    )
     return 0
 
 

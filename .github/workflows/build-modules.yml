@@ -101,6 +101,7 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
       - name: nix build .#lgx-portable (${{ matrix.module }}, ${{ matrix.variant }})
+        id: build
         shell: bash
         # NO `continue-on-error` and NO soft-failure handling, deliberately.
         # Two pre-existing upstream blockers are expected to turn the Linux (and
@@ -132,6 +133,16 @@ jobs:
           out=$(nix build .#lgx-portable --print-out-paths --no-link --show-trace)
           echo "Built: $out"
           echo "LGX_OUT=$out" >> "$GITHUB_ENV"
+          # Name the .lgx itself, not just the directory holding it, so the
+          # upload below hands `linux-install-load` one file rather than a
+          # store path it would have to glob. The basename comes from the
+          # packaging tool, not from this repo, so it is not safe to guess.
+          lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)
+          if [[ -z "$lgx" ]]; then
+            echo "::error::nix build produced no .lgx under $out"
+            exit 1
+          fi
+          echo "lgx=$lgx" >> "$GITHUB_OUTPUT"
 
       # The guard for issue #60. `swap` 0.3.0 shipped a manifest with no
       # `display_name` and `manifestVersion: "0.2.0"`, and every gate in the
@@ -158,3 +169,532 @@ jobs:
             --metadata "${{ matrix.module }}/metadata.json" \
             --lgx "$LGX_OUT" \
             --label "${{ matrix.module }} (${{ matrix.variant }})"
+
+      # Hand the Linux bundles to `linux-install-load` below. Only Linux: a
+      # darwin-arm64 bundle has nowhere to go there, and uploading it would
+      # only cost time.
+      #
+      # The .lgx sits in the Nix store, which is root-owned and read-only.
+      # upload-artifact reads rather than writes so that is fine, but the file
+      # arrives with the store's 0444 and no execute bit. Nothing downstream
+      # needs one: lgpm reads the archive.
+      - name: Upload the .lgx for the install/load smoke test
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lgx-${{ matrix.module }}-${{ matrix.variant }}
+          path: ${{ steps.build.outputs.lgx }}
+          if-no-files-found: error
+          # Purely a hand-off between two jobs of the same run. Keeping these
+          # for the 90-day default would retain a few hundred MB per pull
+          # request for nobody.
+          retention-days: 1
+
+  # ── Does a Linux package actually install and load? ────────────────────────
+  #
+  # `build` above proves a .lgx can be PRODUCED on Linux and that it describes
+  # itself correctly. Neither is the claim a user makes. Until this job existed,
+  # no Linux artifact this repository had ever produced had been installed or
+  # loaded by anything: the app was developed and verified on macOS, and the
+  # Linux variants shipped from 0.3.0 onward on the strength of a tar listing.
+  #
+  # `swap` is the riskier of the two binaries and the reason this job is worth
+  # its runtime. swap_plugin.so reaches libswap_ffi.so, which statically links
+  # librapidsnark.a, libgmp.a, libfr.a and libfq.a from the `-pic` archives and
+  # pulls in RISC Zero and zerokit. Static linking resolves symbols at build
+  # time and then goes quiet; whether a dynamic loader will accept the result is
+  # a separate question that only a loader can answer. The sibling repo
+  # logos-co/lez-faucet proved this shape works for a much simpler module
+  # (its PR #10); this is the same test pointed at the hard case.
+  #
+  # It takes the bundles the matrix above just built, on the same architecture
+  # that built them, and puts them through the path a user takes:
+  #
+  #   1. lgpm, the package manager Basecamp installs with. `install --file` is
+  #      PackageManagerLib::installPluginFile behind a CLI, so variant selection
+  #      and the on-disk layout are the real ones. `tar xzf` would have proved
+  #      neither, since it skips the variant selection that is the whole point.
+  #   2. ldd and dlopen(RTLD_NOW): the dynamic linker's own answer, with lazy
+  #      binding switched off so an unresolved symbol fails here instead of in
+  #      front of a user. See scripts/dlopen-check.c.
+  #   3. logoscore, the real module host. It and Basecamp are the two frontends
+  #      over logos-liblogos, so it runs the same ModuleManager, the same
+  #      protocol gate and the same QPluginLoader the desktop app runs.
+  #
+  # Both tools are pinned, hash-checked release binaries. That is what a user
+  # has, and building either from Nix would put a Qt compile in front of a job
+  # whose value is that it answers in minutes once the matrix is done.
+  #
+  # WHY THIS LIVES HERE rather than in ci.yml: it consumes the .lgx files the
+  # `build` job produces, via `needs: build` and the artifact upload above.
+  # GitHub Actions cannot express a cross-workflow job dependency without
+  # `workflow_run`, which fires on a separate event, loses the pull request
+  # context and cannot gate the PR the way a `needs:` edge does. Splitting it
+  # out would mean either rebuilding the bundles or testing stale ones.
+  #
+  # What this deliberately does NOT prove:
+  #
+  #   - The Basecamp GUI, or any GUI. Nothing opens a window.
+  #   - swap_ui as a running view. Its backend plugin is installed and dlopen'd,
+  #     but a ui_qml package's view needs a QML engine and the Logos Design
+  #     System, so logoscore is not asked to load it.
+  #   - Any swap behaviour: no offer made, no chain touched, no key material.
+  #   - Instantiation of `swap` by the host. See the load step for why, and for
+  #     the assertion that keeps that gap honest.
+  linux-install-load:
+    name: Install and load (${{ matrix.variant }})
+    # The whole matrix, including the darwin legs. A build failure anywhere
+    # skips this job rather than letting it fail on a missing artifact, which
+    # is the more readable of the two outcomes.
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: linux-amd64
+            runs-on: ubuntu-latest         # x86_64
+            arch: x86_64
+            # `readelf -h` spelling, asserted so that a bundle built for the
+            # other architecture cannot pass by being installed on a runner
+            # that never tries to load it.
+            elf-machine: Advanced Micro Devices X86-64
+            lgpm-sha256: 41c897a6da6db0ecabe03c0098b9bd0652ea8cd2eaf091e2d646a65b71260780
+            logoscore-sha256: 6f216f4b807520194dd0e4d1a3d69bd2bc83f38781a5e7b2c1abf66e40143b33
+          - variant: linux-arm64
+            runs-on: ubuntu-24.04-arm      # Public GitHub arm64 runner
+            arch: aarch64
+            elf-machine: AArch64
+            lgpm-sha256: 0ffa8f33f94d11a1e27985cd8d18f9814b69c38fc2d61614d87a479f0c7ac1e2
+            logoscore-sha256: 3ea4a454681c2867717c1de6f72d7d0dd25549d840e2534386c917d70602c9ee
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 20
+    env:
+      # Both tools ship as AppImages and GitHub's Ubuntu images carry no
+      # libfuse2, so the AppImage runtime cannot mount itself. This unpacks to a
+      # temporary directory and execs from there instead.
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      # Nothing here opens a window, but liblogos constructs a Qt application
+      # object; offscreen keeps that from wanting an X server.
+      QT_QPA_PLATFORM: offscreen
+      # Pinned rather than "latest": a tool that changes under the job turns
+      # this from evidence into weather. Bump deliberately, with the hashes.
+      LGPM_VERSION: '0.2.1'
+      LOGOSCORE_VERSION: '0.2.2'
+    steps:
+      - uses: actions/checkout@v4
+
+      # Separate directories rather than one merged download, so the install
+      # step can name each package instead of globbing and hoping the right two
+      # files are there. The .lgx basename comes from the packaging tool, not
+      # from this repository, so it is not something to pattern-match against.
+      - name: Download the core module bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lgx-swap-module-${{ matrix.variant }}
+          path: lgx/core
+
+      - name: Download the UI module bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lgx-swap-ui-${{ matrix.variant }}
+          path: lgx/ui
+
+      - name: Fetch lgpm and logoscore
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+
+          fetch() {
+            local url=$1 want=$2 out=$3
+            curl -fsSL --retry 3 --retry-all-errors -o "$out" "$url"
+            echo "$want  $out" | sha256sum -c -
+          }
+
+          fetch \
+            "https://github.com/logos-co/logos-package-manager/releases/download/${LGPM_VERSION}/lgpm-${{ matrix.arch }}-linux.tar.gz" \
+            '${{ matrix.lgpm-sha256 }}' "$tools/lgpm.tar.gz"
+          fetch \
+            "https://github.com/logos-co/logos-logoscore-cli/releases/download/${LOGOSCORE_VERSION}/logoscore-${{ matrix.arch }}-linux.tar.gz" \
+            '${{ matrix.logoscore-sha256 }}' "$tools/logoscore.tar.gz"
+
+          tar -xzf "$tools/lgpm.tar.gz" -C "$tools"
+          tar -xzf "$tools/logoscore.tar.gz" -C "$tools"
+          # The AppImage runtime reads its own path from /proc/self/exe, so
+          # rename rather than symlink and the payload still resolves.
+          mv "$tools/lgpm-${{ matrix.arch }}.AppImage" "$tools/lgpm"
+          mv "$tools/logoscore-${{ matrix.arch }}.AppImage" "$tools/logoscore"
+          chmod +x "$tools/lgpm" "$tools/logoscore"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Versions under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          lgpm --version
+          logoscore --version
+
+      # A Logos module deliberately does NOT bundle Qt, and a bare `ldd` saying
+      #
+      #   libQt6Core.so.6 => not found
+      #
+      # is correct behaviour rather than a defect. A Logos module is a Qt plugin
+      # and must share the HOST's Qt instance; two QtCores in one process is
+      # undefined behaviour, not redundancy. Those SONAMEs resolve because
+      # whichever process dlopens the plugin has already loaded them.
+      #
+      # Checking the module from a bare shell therefore measures the shell, not
+      # the package. So give the loader the host's libraries: logoscore's
+      # AppImage carries the same Qt 6 its own process runs, which is the
+      # closest stand-in available here for Basecamp's. The sibling repo hit
+      # exactly this and fixed it the same way; do not "fix" the package for it.
+      #
+      # libglvnd is the same story one layer out. The host's own libQt6Gui.so.6
+      # names libOpenGL.so.0, libEGL.so.1 and libGLX.so.0 as NEEDED and expects
+      # the system to supply them — AppImages must not bundle graphics driver
+      # libraries. Any Linux desktop running Basecamp has them; a GitHub runner
+      # has only some, so install the set.
+      - name: Stage the host's libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libopengl0 libegl1 libglx0
+
+          extract="$RUNNER_TEMP/host"
+          mkdir -p "$extract"
+          # `--appimage-extract` is handled by the AppImage runtime itself and
+          # needs no FUSE, but APPIMAGE_EXTRACT_AND_RUN would pass the flag on
+          # to logoscore, which knows nothing about it. Drop it for this call.
+          ( cd "$extract" && env -u APPIMAGE_EXTRACT_AND_RUN logoscore --appimage-extract >/dev/null )
+
+          # Locate the directory by what is in it rather than by a hardcoded
+          # usr/lib, so a change in the bundle layout is a clear failure here
+          # instead of a confusing one three steps later.
+          qt_core=$(find "$extract" -name 'libQt6Core.so.6' -print -quit)
+          if [[ -z "$qt_core" ]]; then
+            echo "::error::no libQt6Core.so.6 in the extracted logoscore bundle"
+            exit 1
+          fi
+          host_lib=$(dirname "$qt_core")
+          echo "host libraries: $host_lib"
+          echo "LOGOS_HOST_LIB=$host_lib" >> "$GITHUB_ENV"
+
+      # The step that makes this an installation rather than an extraction.
+      # lgpm chooses the platform variant itself: on x86_64 it asks for
+      # linux-x86_64 first and falls back to linux-amd64, which is the name the
+      # release matrix uses, so the fallback is the live path here.
+      - name: Install both packages with lgpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          modules_dir="$RUNNER_TEMP/logos/modules"
+          plugins_dir="$RUNNER_TEMP/logos/ui-plugins"
+          mkdir -p "$modules_dir" "$plugins_dir"
+          echo "LOGOS_MODULES_DIR=$modules_dir" >> "$GITHUB_ENV"
+          echo "LOGOS_UI_PLUGINS_DIR=$plugins_dir" >> "$GITHUB_ENV"
+
+          core=$(find lgx/core -name '*.lgx' | head -n1)
+          ui=$(find lgx/ui -name '*.lgx' | head -n1)
+          [[ -n "$core" && -n "$ui" ]] || { echo "::error::missing .lgx input"; exit 1; }
+
+          # Core before UI: swap_ui declares swap as a dependency.
+          for pkg in "$core" "$ui"; do
+            echo "::group::lgpm install $(basename "$pkg")"
+            lgpm --modules-dir "$modules_dir" --ui-plugins-dir "$plugins_dir" \
+              install --file "$pkg"
+            echo "::endgroup::"
+          done
+
+          lgpm --modules-dir "$modules_dir" --ui-plugins-dir "$plugins_dir" list
+
+      # Requirement two: the right variant was chosen, and the payload landed
+      # where a loader looks — `<modules-dir>/<name>/`, which is the layout
+      # liblogos scans through this same library.
+      - name: Check the installed layout and variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+
+          check() {
+            local dir=$1 name=$2 main=$3
+            echo "--- $name in $dir"
+            if [[ ! -d "$dir/$name" ]]; then
+              echo "::error::$name was not installed into $dir"; fail=1; return
+            fi
+            # lgpm writes this file with the variant it actually selected, so it
+            # is the package manager's own answer rather than ours.
+            local got
+            got=$(cat "$dir/$name/variant" 2>/dev/null || echo '<absent>')
+            echo "variant: $got"
+            if [[ "$got" != '${{ matrix.variant }}' ]]; then
+              echo "::error::$name installed variant '$got', expected ${{ matrix.variant }}"
+              fail=1
+            fi
+            if [[ ! -f "$dir/$name/manifest.json" ]]; then
+              echo "::error::$name has no manifest.json"; fail=1
+            else
+              python3 -c "import json,sys; m=json.load(open(sys.argv[1])); print('manifest:', m.get('name'), m.get('version'), m.get('type'))" \
+                "$dir/$name/manifest.json"
+            fi
+            if [[ ! -f "$dir/$name/$main" ]]; then
+              echo "::error::$name is missing its main library $main"; fail=1; return
+            fi
+            local machine
+            machine=$(readelf -h "$dir/$name/$main" | sed -n 's/^  Machine: *//p')
+            echo "ELF machine: $machine"
+            if [[ "$machine" != '${{ matrix.elf-machine }}' ]]; then
+              echo "::error::$main is ${machine}, expected ${{ matrix.elf-machine }}"
+              fail=1
+            fi
+          }
+
+          check "$LOGOS_MODULES_DIR"    swap    swap_plugin.so
+          check "$LOGOS_UI_PLUGINS_DIR" swap_ui swap_ui_plugin.so
+
+          # swap's Rust orchestrator ships beside the plugin rather than inside
+          # it; the plugin is useless without it, and a bundle that dropped it
+          # would still pass every check above.
+          if [[ ! -f "$LOGOS_MODULES_DIR/swap/libswap_ffi.so" ]]; then
+            echo "::error::swap is missing libswap_ffi.so"
+            fail=1
+          fi
+
+          # The UI package is a view, so its QML entry point has to survive the
+          # trip as well; the backend plugin alone is not the app. This path is
+          # the `view` field of swap-ui/metadata.json.
+          if [[ ! -f "$LOGOS_UI_PLUGINS_DIR/swap_ui/qml/Main.qml" ]]; then
+            echo "::error::swap_ui is missing qml/Main.qml"
+            fail=1
+          fi
+
+          exit $fail
+
+      # `ldd` answers a question the build cannot: with the host's libraries
+      # present, does every dependency this module names actually resolve? A
+      # "not found" line here is a broken package even though every earlier step
+      # was green.
+      #
+      # The full output is printed rather than only the failures, because the
+      # paths are the interesting part: they show which libraries the bundle
+      # carried itself and which it took from the host.
+      - name: Resolve shared library dependencies (ldd)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$LOGOS_HOST_LIB"
+          fail=0
+          for so in "$LOGOS_MODULES_DIR/swap/swap_plugin.so" \
+                    "$LOGOS_MODULES_DIR/swap/libswap_ffi.so" \
+                    "$LOGOS_UI_PLUGINS_DIR/swap_ui/swap_ui_plugin.so"; do
+            echo "::group::ldd $(basename "$so")"
+            # Run from the containing directory: these bundles resolve their
+            # siblings through an $ORIGIN runpath, so ldd has to see the .so
+            # where it was installed, not where the job happens to be.
+            ( cd "$(dirname "$so")" && ldd "./$(basename "$so")" ) | tee "$RUNNER_TEMP/ldd.txt"
+            echo "::endgroup::"
+            if grep -q 'not found' "$RUNNER_TEMP/ldd.txt"; then
+              echo "::error::unresolved dependencies for $(basename "$so"):"
+              grep 'not found' "$RUNNER_TEMP/ldd.txt"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # The headline assertion. RTLD_NOW binds every relocation at load, so an
+      # unresolved symbol out of the static rapidsnark/gmp/fr/fq link fails
+      # HERE rather than the first time a user presses Swap.
+      #
+      # Loading also runs the objects' ELF initialisers, which is the first time
+      # any of this payload's instructions execute on Linux. If a run dies with
+      # signal 4 / status 132 (SIGILL) rather than a dlopen error message,
+      # read that as a CPU feature problem — rapidsnark's field arithmetic is
+      # hand-written x86-64 assembly using ADX/BMI2 — and not as a link defect.
+      - name: dlopen the plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$LOGOS_HOST_LIB"
+          cc -O0 -Wall -Wextra -Werror -o "$RUNNER_TEMP/dlopen-check" scripts/dlopen-check.c
+          "$RUNNER_TEMP/dlopen-check" "$LOGOS_MODULES_DIR/swap/swap_plugin.so"
+          "$RUNNER_TEMP/dlopen-check" "$LOGOS_UI_PLUGINS_DIR/swap_ui/swap_ui_plugin.so"
+
+      # `logos_protocol_version` is the field the host gates loading on.
+      # liblogos reads it out of the plugin's embedded Qt metadata — not out of
+      # metadata.json on disk and not out of the .lgx manifest, neither of which
+      # carries it — and a module without it loads only because the current host
+      # is permissive:
+      #
+      #   Module swap carries no usable logos_protocol_version
+      #   (pre-protocol build) — loading permissively
+      #
+      # A host that stops being permissive refuses the module outright. Nothing
+      # in this repository sets the field and nothing should: logos-module-builder
+      # stamps it in preConfigure from the logos-protocol header the whole stack
+      # links, ahead of moc, and would overwrite anything written by hand. What
+      # this repo can own is evidence about whether the stamp arrived, which is a
+      # property of the flake.lock pin and can regress on a `nix flake update`
+      # with no build or test failure.
+      #
+      # REPORTED, NOT ASSERTED, and that is a deliberate difference from the
+      # sibling repo. `swap` is known to build unstamped today, and the fix needs
+      # a coordinated logos-module-builder + delivery_module migration. Failing
+      # here would gate every PR on someone else's release. The value is that the
+      # answer is printed on every run, so the day it changes is visible.
+      - name: Protocol version stamp (reported)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$LOGOS_MODULES_DIR/swap/swap_plugin.so" \
+                    "$LOGOS_UI_PLUGINS_DIR/swap_ui/swap_ui_plugin.so" <<'PY'
+          import re, sys
+
+          pattern = re.compile(rb"logos_protocol_version.(\d+\.\d+\.\d+)")
+          for path in sys.argv[1:]:
+              with open(path, "rb") as handle:
+                  match = pattern.search(handle.read())
+              if match is None:
+                  print(f"::notice::{path.rsplit('/', 1)[-1]} carries no "
+                        "logos_protocol_version stamp — this host loads it only "
+                        "permissively (pre-protocol build)")
+              else:
+                  print(f"{path}: logos_protocol_version "
+                        f"{match.group(1).decode()}")
+          PY
+
+      # The real host. logoscore scans the same directory lgpm installed into,
+      # resolves modules through logos-liblogos, applies the protocol gate and
+      # hands the file to QPluginLoader — the sequence Basecamp performs, minus
+      # the window.
+      #
+      # THE HONEST LIMIT OF THIS STEP. `swap` declares a dependency on
+      # `delivery_module`, which lives in a different repository, publishes no
+      # release artifact, and is not in this bundle. logos-liblogos resolves
+      # dependencies BEFORE it calls QPluginLoader, so `load-module swap` stops
+      # at the dependency gate and the plugin is never instantiated:
+      #
+      #   Module not found in known modules: delivery_module
+      #   Missing dependencies detected: delivery_module
+      #   Cannot resolve dependencies for: swap
+      #
+      # That is correct host behaviour and is identical on macOS — Basecamp
+      # installs delivery_module alongside swap. It is NOT a Linux defect, and
+      # supplying delivery_module here would mean a cold Nix build of zerokit
+      # and liblogosdelivery on a runner with an empty store, putting another
+      # repository's build health in front of this question.
+      #
+      # So this step asserts what it can, precisely, rather than pretending:
+      #   * the host DISCOVERS swap from the installed layout at the right
+      #     version — real evidence that liblogos parsed what lgpm wrote;
+      #   * the load attempt fails ONLY at the dependency gate. If it ever fails
+      #     for a loader reason instead, the grep below does not match and the
+      #     step goes red. A regression that broke the .so cannot pass here.
+      # Instantiation of `swap` itself remains unproven, and the summary says so.
+      - name: Load in the module host (logoscore)
+        id: host
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/logoscore.log"
+          # A private config directory, so the daemon cannot pick up state from
+          # anywhere else on the runner and a client command cannot reach a
+          # daemon this step did not start.
+          export LOGOSCORE_CONFIG_DIR="$RUNNER_TEMP/logoscore-home"
+
+          logoscore -D -m "$LOGOS_MODULES_DIR" > "$log" 2>&1 &
+
+          # Poll rather than sleep: startup cost differs between the two runner
+          # classes, and a fixed sleep is either flaky or slow.
+          for _ in $(seq 1 60); do
+            if logoscore status >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          if ! logoscore status; then
+            echo "::error::logoscore daemon did not come up"
+            cat "$log"
+            exit 1
+          fi
+
+          echo "::group::modules the host discovered"
+          # --json explicitly: logoscore picks its output shape from whether
+          # stdout is a TTY, and the parse below must not depend on that.
+          logoscore --json list-modules | tee "$RUNNER_TEMP/modules.json"
+          echo "::endgroup::"
+
+          # The host found swap where lgpm put it, and read its manifest.
+          python3 - "$RUNNER_TEMP/modules.json" <<'PY'
+          import json, sys
+          mods = {m["name"]: m for m in json.load(open(sys.argv[1]))}
+          if "swap" not in mods:
+              print("::error::logoscore did not discover swap in the modules dir")
+              raise SystemExit(1)
+          print(f"host sees swap: {json.dumps(mods['swap'])}")
+          PY
+
+          echo "--- loading swap (expected to stop at the delivery_module gate)"
+          # `set -e` is on and this is expected to be non-zero, so capture the
+          # status rather than letting it kill the step. Never pipe a command
+          # whose exit code matters.
+          set +e
+          logoscore load-module swap > "$RUNNER_TEMP/load.json" 2>&1
+          load_status=$?
+          set -e
+          cat "$RUNNER_TEMP/load.json"
+          echo "load-module swap exited $load_status"
+
+          if [[ $load_status -eq 0 ]]; then
+            echo "::notice::swap LOADED — delivery_module resolved after all."
+            echo "::group::module-info swap"
+            logoscore module-info swap
+            echo "::endgroup::"
+            echo "host_result=loaded" >> "$GITHUB_OUTPUT"
+          else
+            # The one acceptable failure: the declared cross-repo dependency is
+            # absent. Anything else — a QPluginLoader failure, a protocol
+            # refusal, a symbol error — must fail this step.
+            if grep -q 'Missing dependencies detected: delivery_module' "$log" &&
+               grep -q 'Cannot resolve dependencies for: swap' "$log"; then
+              echo "::notice::swap was refused at the delivery_module dependency gate, before QPluginLoader. Expected: delivery_module is a separate repository and is not installed here."
+              echo "host_result=dependency-gate" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::swap failed to load for a reason OTHER than the missing delivery_module dependency. This is a real defect — see the daemon log below."
+              cat "$log"
+              exit 1
+            fi
+          fi
+
+          logoscore unload-module swap >/dev/null 2>&1 || true
+          logoscore stop || true
+
+          # Printed unconditionally, not just on failure. The protocol gate and
+          # the plugin loader both report here, and a green run whose log is
+          # full of warnings is worth seeing.
+          echo "::group::daemon log"
+          cat "$log"
+          echo "::endgroup::"
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Linux install and load — ${{ matrix.variant }}"
+            echo
+            echo "- runner: \`${{ matrix.runs-on }}\` (${{ matrix.arch }})"
+            echo "- installed with: \`lgpm ${LGPM_VERSION}\`"
+            echo "- host: \`logoscore ${LOGOSCORE_VERSION}\` (logos-liblogos, the same host library as Basecamp)"
+            echo "- \`swap_plugin.so\` + \`swap_ui_plugin.so\`: **${{ steps.host.outcome == 'success' && 'installed, resolved and dlopen(RTLD_NOW)-ed' || 'see the failure above' }}**"
+            case "${{ steps.host.outputs.host_result }}" in
+              loaded)
+                echo "- \`logoscore load-module swap\`: **loaded**" ;;
+              dependency-gate)
+                echo "- \`logoscore load-module swap\`: **refused at the \`delivery_module\` dependency gate**, before QPluginLoader — expected here, that module is a separate repository with no release artifact. Instantiation by the host is therefore NOT proven." ;;
+              *)
+                echo "- \`logoscore load-module swap\`: did not reach a verdict" ;;
+            esac
+            echo
+            echo "Headless. No GUI, no QML view rendered, no swap behaviour exercised."
+          } >> "$GITHUB_STEP_SUMMARY"
