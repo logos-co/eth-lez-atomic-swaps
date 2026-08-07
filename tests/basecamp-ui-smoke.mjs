@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { moduleCommand } from "./basecamp-ui-process-match.mjs";
 
 const appBin = process.env.BASECAMP_BIN;
 const userDir = process.env.BASECAMP_USER_DIR;
@@ -66,17 +67,6 @@ function formatProcessTree(rootPid) {
   const descendantPids = new Set(descendantsOf(rootPid).map((row) => row.pid));
   const rows = processRows().filter((row) => row.pid === rootPid || descendantPids.has(row.pid));
   return rows.map((row) => `${row.pid}\t${row.ppid}\t${row.pgid}\t${row.command}`).join("\n") + "\n";
-}
-
-function moduleCommand(rows, executable, moduleName) {
-  const escaped = moduleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedExecutable = executable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Bundle wrappers use the public executable name, while Linux process
-  // command lines expose the wrapped ELF basename (for example,
-  // `.logos_host.elf`). Both are the same Basecamp-owned host path.
-  const executableBasename = `(?:${escapedExecutable}|\\.${escapedExecutable}\\.elf)`;
-  const expression = new RegExp(`(?:^|/)${executableBasename}(?:\\s|$).*--name(?:=|\\s+)${escaped}(?:\\s|$)`);
-  return rows.find((row) => expression.test(row.command));
 }
 
 class FatalWaitError extends Error {}
