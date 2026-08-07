@@ -61,6 +61,16 @@
         "required_ancestors": [
           "d80f0353d3cdf19343273d258d433e7fe243bec2"
         ]
+      },
+      "0.4.2": {
+        "binary_strings": [
+          "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702",
+          "maker-ops.jsonl",
+          "swap persistence root (per-profile)"
+        ],
+        "required_ancestors": [
+          "d9db65facfc095a3d9f668eed9b52e99478990e7"
+        ]
       }
     },
     "swap_ui": {
@@ -97,6 +107,22 @@
         ],
         "required_ancestors": [
           "d80f0353d3cdf19343273d258d433e7fe243bec2"
+        ]
+      },
+      "0.4.2": {
+        "qml_grep": [
+          "trial-evidence/1",
+          "Copy safe evidence",
+          "feedbackUrl",
+          "safeEvidenceJson",
+          "Three steps, no hand-typed keys: generate an ETH key, create a LEZ account, then fund it.",
+          "Designated Taker (optional)"
+        ],
+        "binary_strings": [
+          "swap_ui persistence root (per-profile)"
+        ],
+        "required_ancestors": [
+          "d9db65facfc095a3d9f668eed9b52e99478990e7"
         ]
       }
     }
