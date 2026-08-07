@@ -69,7 +69,8 @@
           "swap persistence root (per-profile)"
         ],
         "required_ancestors": [
-          "d9db65facfc095a3d9f668eed9b52e99478990e7"
+          "d9db65facfc095a3d9f668eed9b52e99478990e7",
+          "e94bdbf6d15f2e30fe0eb1f1a5b4bd1294868868"
         ]
       }
     },
@@ -122,7 +123,8 @@
           "swap_ui persistence root (per-profile)"
         ],
         "required_ancestors": [
-          "d9db65facfc095a3d9f668eed9b52e99478990e7"
+          "d9db65facfc095a3d9f668eed9b52e99478990e7",
+          "e94bdbf6d15f2e30fe0eb1f1a5b4bd1294868868"
         ]
       }
     }
