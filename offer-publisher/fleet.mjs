@@ -12,8 +12,13 @@
 
 export const OFFERS_CONTENT_TOPIC = "/atomic-swaps/1/offers/json";
 
-// logos.dev preset: cluster 2, autosharding with 8 shards.
-export const NETWORK_CONFIG = { clusterId: 2, numShardsInCluster: 8 };
+// logos.dev preset: cluster 3, autosharding with 8 shards.
+// NOTE (2026-08-08): the fleet migrated cluster 2 -> cluster 3 during the
+// Aug-7/8 LEZ/delivery upgrade. Peers still speak filter+lightpush and still
+// use 8 shards, but only serve cluster 3 now; cluster 2 subscribes are
+// rejected ("filter subscribe returned false" / "lightpush rejected by all
+// peers"). Our content topic autoshards to /waku/2/rs/3/7 under this config.
+export const NETWORK_CONFIG = { clusterId: 3, numShardsInCluster: 8 };
 
 // Static bootstrap peers baked into the logos.dev preset (TCP — Node.js only).
 export const FLEET_TCP_PEERS = [
