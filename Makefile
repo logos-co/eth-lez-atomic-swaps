@@ -1,5 +1,6 @@
 .PHONY: contracts demo infra \
-       setup localnet-start localnet-stop test basecamp-ui-smoke swap-ui-unit
+       setup localnet-start localnet-stop test basecamp-ui-smoke swap-ui-unit \
+       basecamp-dev
 
 .DEFAULT_GOAL := contracts
 
@@ -108,6 +109,19 @@ BASECAMP_USER_DIR = $(CURDIR)/.scaffold/basecamp/profiles/$*/xdg-data/Logos/Logo
 # Anvil and never uses a module-owned app host.
 basecamp-ui-smoke:
 	bash .github/scripts/run-basecamp-ui-smoke.sh
+
+# LOCAL working-tree module harness for macOS (see docs/local-dev-harness.md).
+# Builds swap + swap_ui from the CURRENT working tree, installs them plus the
+# pinned delivery_module into an isolated dev profile via scaffold's pinned
+# lgpm, stamps a distinct -dev.<sha> version into each manifest (so the corner
+# badge proves which build is live), and launches Basecamp against it. This is
+# the ~3-6 min inner loop that kills the "Basecamp kept loading a stale module"
+# failure class. Unlike `basecamp-ui-smoke` it drives the developer's real
+# Basecamp interactively (no headless inspector); unlike `lgs basecamp launch`
+# it does NOT scrub+replay, so the dev-version stamp survives. Pass extra flags
+# through ARGS, e.g. `make basecamp-dev ARGS=--skip-build`.
+basecamp-dev:
+	bash scripts/basecamp-dev.sh $(ARGS)
 
 # Pure, headless swap-ui logic tests. These compile only dependency-free
 # helpers; they do not launch Basecamp or any module-owned application host.
