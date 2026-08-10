@@ -2,6 +2,7 @@
 #include "../src/swap_impl.h"
 
 #include <QCoreApplication>
+#include <QString>
 
 #include <chrono>
 #include <mutex>
@@ -11,6 +12,7 @@
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
 int swapDeliveryParsePeerCount(const std::string& raw);
+QString swapDeliveryConfigJson(const std::string& configJson);
 
 extern "C" {
 void mock_swap_ffi_reset();
@@ -185,6 +187,50 @@ LOGOS_TEST(delivery_messaging_requires_runtime_before_init_or_publish) {
 
 LOGOS_TEST(delivery_eth_amount_decimal_normalizes_to_wei) {
     LOGOS_ASSERT_EQ(swapDeliveryEthAmountToWei("0.00000000000000001"), std::string("10"));
+}
+
+// The logos.dev fleet migrated Waku cluster 2 -> 3 (8 shards). deliveryConfig
+// must force cluster 3 over the still-cluster-2 preset, both as flat keys (for
+// the pinned v0.1.x module, which overrides preset values with individual keys)
+// and as messagingOverrides (for v0.2.0's per-layer object). See PR #117.
+LOGOS_TEST(delivery_config_forces_logos_dev_cluster_three) {
+    const std::string cfg = swapDeliveryConfigJson("{}").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"logos.dev")");
+    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":3)");
+    LOGOS_ASSERT_CONTAINS(cfg, R"("numShardsInCluster":8)");
+    LOGOS_ASSERT_CONTAINS(cfg, R"("messagingOverrides")");
+    // The nested override must also name cluster 3 (not just the flat key).
+    const std::string overrides = cfg.substr(cfg.find(R"("messagingOverrides")"));
+    LOGOS_ASSERT(overrides.find(R"("clusterId":3)") != std::string::npos);
+    LOGOS_ASSERT(overrides.find(R"("numShardsInCluster":8)") != std::string::npos);
+}
+
+// A caller that pins its own clusterId owns the network choice: no cluster-3
+// override is injected, and no messagingOverrides object is added.
+LOGOS_TEST(delivery_config_respects_explicit_cluster) {
+    const std::string cfg = swapDeliveryConfigJson(R"({"clusterId":2})").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":2)");
+    LOGOS_ASSERT(cfg.find(R"("clusterId":3)") == std::string::npos);
+    LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
+}
+
+// A non-logos.dev preset (e.g. the RLN twn network) is never forced onto the
+// logos.dev fleet's cluster.
+LOGOS_TEST(delivery_config_non_logos_preset_untouched) {
+    const std::string cfg = swapDeliveryConfigJson(R"({"preset":"twn"})").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"twn")");
+    LOGOS_ASSERT(cfg.find(R"("clusterId":3)") == std::string::npos);
+    LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
+}
+
+// An explicit full `delivery` config is passed through verbatim — the caller
+// owns every key, so no fleet override is injected.
+LOGOS_TEST(delivery_config_explicit_delivery_passthrough) {
+    const std::string cfg =
+        swapDeliveryConfigJson(R"({"delivery":{"preset":"custom","clusterId":9}})").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"custom")");
+    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":9)");
+    LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
 
 LOGOS_TEST(fetch_offers_preserves_empty_offers_shape_without_runtime) {

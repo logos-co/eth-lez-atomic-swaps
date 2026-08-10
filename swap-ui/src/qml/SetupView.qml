@@ -53,22 +53,31 @@ ScrollView {
     // always reads "time spent in the CURRENT phase".
     property int setupStepElapsedSeconds: 0
 
-    Timer {
-        running: swapBackend.setupRunning
-        interval: 1000
-        repeat: true
-        onTriggered: setupRoot.setupStepElapsedSeconds += 1
-    }
-
-    Connections {
-        target: swapBackend
-        function onSetupStepChanged() { setupRoot.setupStepElapsedSeconds = 0 }
-        function onSetupRunningChanged() { setupRoot.setupStepElapsedSeconds = 0 }
-    }
-
     Flickable {
         contentHeight: col.implicitHeight + Theme.spacingXLarge * 2
         boundsBehavior: Flickable.StopAtBounds
+
+        // The elapsed-seconds ticker and its reset hook live INSIDE the
+        // Flickable on purpose. ScrollView adopts the FIRST Flickable in its
+        // contentData as its scroll surface; a non-Flickable object appended
+        // ahead of it (a Timer/Connections declared directly under setupRoot)
+        // makes ScrollView spin up its own implicit Flickable and demote this
+        // one to a zero-sized ordinary child — collapsing the whole layout to
+        // the origin (the 0.4.2 Setup-tab overlap regression, #113). Keeping
+        // these non-visual helpers here guarantees the Flickable stays the
+        // ScrollView's sole direct content child.
+        Timer {
+            running: swapBackend.setupRunning
+            interval: 1000
+            repeat: true
+            onTriggered: setupRoot.setupStepElapsedSeconds += 1
+        }
+
+        Connections {
+            target: swapBackend
+            function onSetupStepChanged() { setupRoot.setupStepElapsedSeconds = 0 }
+            function onSetupRunningChanged() { setupRoot.setupStepElapsedSeconds = 0 }
+        }
 
         ColumnLayout {
             id: col
