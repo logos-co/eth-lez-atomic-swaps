@@ -100,6 +100,47 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
+
+      # ── Push the cold-built closure to the shared Nix binary cache ──────────
+      #
+      # This job is the PRODUCER for the cache (docs/nix-cache.md): it builds all
+      # three variants cold on every master push, so its store ends up holding
+      # exactly the slow-changing deps (risc0, Qt, the liblogos chains) that the
+      # every-PR jobs want to pull instead of rebuild.
+      #
+      # It pushes but deliberately does NOT substitute (`skip-use: true`): the
+      # build below must stay a genuine COLD build to keep measuring the release
+      # build's real cost (see the header comment — the release pipeline has no
+      # cache either). This action's own step only SNAPSHOTS the store now; the
+      # push happens in its post-job step, after the cold build, so it cannot warm
+      # the build it measures.
+      #
+      # Gated to `push` (never pull requests): fork PRs cannot read the secret,
+      # and only master's canonical closures belong in the cache. The cache is
+      # configured through repo variables (docs/nix-cache.md), so moving to org
+      # infra is a two-value change with no workflow edit; when the vars/secret
+      # are unset these steps no-op and the build is unaffected.
+      - name: Resolve Nix cache endpoint
+        id: nixcache
+        if: github.event_name == 'push' && vars.NIX_CACHE_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='${{ vars.NIX_CACHE_URL }}'
+          echo "endpoint=${url%/*}/" >> "$GITHUB_OUTPUT"
+          echo "cache=${url##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Push build outputs to the Nix cache (producer; snapshot now, push post-job)
+        if: github.event_name == 'push' && steps.nixcache.outputs.cache != ''
+        uses: ryanccn/attic-action@5635a15ef0c5462194ffbd05d1daeddc74625c3a # v0.5.0
+        with:
+          endpoint: ${{ steps.nixcache.outputs.endpoint }}
+          cache: ${{ steps.nixcache.outputs.cache }}
+          token: ${{ secrets.NIX_CACHE_PUSH_TOKEN }}
+          # Producer only: do NOT add the cache as a substituter, so the build
+          # below stays a genuine cold build.
+          skip-use: true
+
       - name: nix build .#lgx-portable (${{ matrix.module }}, ${{ matrix.variant }})
         id: build
         shell: bash
