@@ -312,41 +312,133 @@ echo "==> staging verification passed"
 
 # ---------------------------------------------------------------------------
 # 7. Resolve the Basecamp bundle to launch.
-#    Preference (coordinator guidance): the reproducible scaffold pin when it is
-#    already realizable from the Nix store, else the installed .app for speed.
+#    Delivery context creation (delivery_module.createNode) is validated ONLY
+#    against the scaffold-pinned Basecamp. On an older host (e.g. 0.2.1) it
+#    fails at startup with "createNode failed: Failed to create Delivery
+#    context" — see the root-cause note in docs/local-dev-harness.md. So the
+#    harness now PROVIDES the validated bundle itself, in strict order:
+#      1. cached pinned bundle  — a prior run's gc-rooted nix out-link; instant.
+#      2. build pinned bundle   — one-time cold macOS build (~5-15 min), then
+#                                 cached under $cache_dir for instant reuse.
+#      3. installed /Applications app — LAST RESORT. Used directly (no build)
+#         only when it is already >= the validated version; otherwise it is
+#         launched with a LOUD banner because delivery is known to break there.
 # ---------------------------------------------------------------------------
+
+# The scaffold basecamp pin ([repos.basecamp].pin) builds this Basecamp release;
+# it is the version delivery_module.createNode is validated against. Bump in
+# lockstep when the pin advances to a new Basecamp release.
+validated_basecamp_version="0.2.3"
+pinned_link="$cache_dir/basecamp-pinned"   # nix out-link == gc-rooted cache
+
+plist_version() {
+  /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+    "$1/Contents/Info.plist" 2>/dev/null || echo "?"
+}
+# Exit 0 iff $1 >= $2 as dotted-numeric versions; non-zero on "older" OR when
+# either side is unparseable (so an unknown version never masquerades as new).
+version_ge() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+def parse(v):
+    parts = [int(p) for p in v.split(".") if p.isdigit()]
+    return tuple(parts) if parts else None
+a, b = parse(sys.argv[1]), parse(sys.argv[2])
+sys.exit(0 if (a is not None and b is not None and a >= b) else 1)
+PY
+}
+app_in_bundle() { find "$1" -maxdepth 2 -iname '*basecamp*.app' -print 2>/dev/null | head -1; }
+bin_in_app()    { local b="$1/Contents/MacOS/LogosBasecamp"; [[ -x "$b" ]] && printf '%s\n' "$b"; }
+find_installed_app() { find /Applications -maxdepth 1 -iname '*basecamp*.app' -print 2>/dev/null | head -1; }
+
 resolve_basecamp_bin() {
-  local out bin
-  # Explicit override wins.
+  local out app bin
+  # Explicit override wins, unconditionally.
   if [[ -n "${BASECAMP_APP:-}" ]]; then
-    bin="$BASECAMP_APP/Contents/MacOS/LogosBasecamp"
-    [[ -x "$bin" ]] || { echo "BASECAMP_APP has no LogosBasecamp binary: $bin" >&2; return 1; }
+    bin=$(bin_in_app "$BASECAMP_APP") \
+      || { echo "BASECAMP_APP has no LogosBasecamp binary: $BASECAMP_APP/Contents/MacOS/LogosBasecamp" >&2; return 1; }
     echo "installed(override):$BASECAMP_APP:$bin"; return 0
   fi
-  if [[ "$FORCE_INSTALLED" == 0 ]]; then
-    # Pinned scaffold bundle. --pinned-basecamp forces a (possibly long) build;
-    # otherwise only use it when already substitutable/realized (max-jobs 0).
-    local jobflag=(); [[ "$FORCE_PINNED" == 1 ]] || jobflag=(--max-jobs 0)
-    if out=$(nix build "$basecamp_ref" --no-link --print-out-paths "${jobflag[@]}" 2>/dev/null); then
-      out=$(printf '%s\n' "$out" | sed '/^$/d' | head -1)
-      bin=$(find "$out" -type f -name LogosBasecamp -path '*MacOS*' 2>/dev/null | head -1)
-      [[ -x "$bin" ]] || bin=$(find "$out" -type f -perm -111 -name LogosBasecamp 2>/dev/null | head -1)
-      if [[ -x "$bin" ]]; then echo "pinned:$out:$bin"; return 0; fi
-    fi
-    [[ "$FORCE_PINNED" == 1 ]] && { echo "pinned basecamp build did not yield a LogosBasecamp binary" >&2; return 1; }
+
+  if [[ "$FORCE_INSTALLED" == 1 ]]; then
+    app=$(find_installed_app)
+    [[ -n "$app" ]] || { echo "no Basecamp .app under /Applications; set BASECAMP_APP or drop --installed-app" >&2; return 1; }
+    bin=$(bin_in_app "$app") || { echo "installed app has no LogosBasecamp binary: $app" >&2; return 1; }
+    echo "installed:$app:$bin"; return 0
   fi
-  # Fall back to the installed app.
-  local app=""
-  while IFS= read -r c; do app="$c"; break; done < <(find /Applications -maxdepth 1 -iname '*basecamp*.app' -print 2>/dev/null)
-  [[ -n "$app" ]] || { echo "no Basecamp .app under /Applications; set BASECAMP_APP or use --pinned-basecamp" >&2; return 1; }
-  bin="$app/Contents/MacOS/LogosBasecamp"
-  [[ -x "$bin" ]] || { echo "installed app has no LogosBasecamp binary: $bin" >&2; return 1; }
-  echo "installed:$app:$bin"; return 0
+
+  # (1) Cached pinned bundle — a prior run's out-link, still valid in the store.
+  if [[ "$FORCE_PINNED" == 0 && -L "$pinned_link" ]]; then
+    out=$(readlink "$pinned_link" 2>/dev/null || true)
+    if [[ -n "$out" && -d "$out" ]]; then
+      app=$(app_in_bundle "$out"); bin=$(bin_in_app "$app" 2>/dev/null || true)
+      [[ -n "$bin" ]] && { echo "pinned-cached:$app:$bin"; return 0; }
+    fi
+  fi
+
+  # An installed app already >= the validated version is a valid host — use it
+  # and skip the long build. (Not applicable under --pinned-basecamp.)
+  if [[ "$FORCE_PINNED" == 0 ]]; then
+    app=$(find_installed_app)
+    if [[ -n "$app" ]] && version_ge "$(plist_version "$app")" "$validated_basecamp_version"; then
+      bin=$(bin_in_app "$app") && { echo "installed-ok:$app:$bin"; return 0; }
+    fi
+  fi
+
+  # (2) Build the pinned bundle, caching it via a gc-rooted out-link so the next
+  #     run hits tier (1) instantly. nix progress streams to the terminal
+  #     (stderr); 1>&2 keeps nix's stdout out of the captured result.
+  echo "==> Basecamp: building scaffold's pinned bundle v$validated_basecamp_version ($basecamp_attr)." >&2
+  echo "    ONE-TIME cost (cold: ~5-15 min on macOS; then cached to" >&2
+  echo "    $pinned_link for instant reuse). Delivery context creation is" >&2
+  echo "    validated only on this bundle. Skip with --installed-app / BASECAMP_APP." >&2
+  local start; start=$(date +%s)
+  if nix build "$basecamp_ref" --out-link "$pinned_link" 1>&2; then
+    out=$(readlink "$pinned_link" 2>/dev/null || true)
+    app=$(app_in_bundle "$out"); bin=$(bin_in_app "$app" 2>/dev/null || true)
+    if [[ -n "$bin" ]]; then
+      echo "    pinned bundle ready in $(( $(date +%s) - start ))s -> $app" >&2
+      echo "pinned-built:$app:$bin"; return 0
+    fi
+    echo "pinned basecamp build produced no LogosBasecamp binary under $out" >&2
+  else
+    echo "pinned basecamp build FAILED (see nix output above)." >&2
+  fi
+
+  # --pinned-basecamp is an explicit reproducibility request: never silently
+  # downgrade to the installed app.
+  [[ "$FORCE_PINNED" == 1 ]] && { echo "could not provide the pinned Basecamp bundle (see error above)" >&2; return 1; }
+
+  # (3) LAST RESORT: installed app (a loud banner fires below if it is stale).
+  app=$(find_installed_app)
+  [[ -n "$app" ]] || { echo "no pinned bundle and no Basecamp .app under /Applications; set BASECAMP_APP or --pinned-basecamp" >&2; return 1; }
+  bin=$(bin_in_app "$app") || { echo "installed app has no LogosBasecamp binary: $app" >&2; return 1; }
+  echo "installed-fallback:$app:$bin"; return 0
 }
 
 resolved=$(resolve_basecamp_bin) || exit 1
 bc_kind=${resolved%%:*}; rest=${resolved#*:}; bc_app=${rest%%:*}; basecamp_bin=${rest#*:}
-app_version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$bc_app/Contents/Info.plist" 2>/dev/null || echo "?")
+app_version=$(plist_version "$bc_app")
+
+# Loud banner when we could only reach an installed host older than the
+# validated version — delivery context creation is known to break there.
+case "$bc_kind" in
+  installed|installed-fallback|"installed(override)")
+    if ! version_ge "$app_version" "$validated_basecamp_version"; then
+      cat >&2 <<BANNER
+
+  ##########################################################################
+  ##  WARNING  host Basecamp v$app_version  <  validated v$validated_basecamp_version
+  ##  This host is KNOWN TO BREAK delivery context creation
+  ##  ("createNode failed: Failed to create Delivery context"): swap offers
+  ##  will NOT load and any delivery-dependent result is UNRELIABLE.
+  ##  Fix: let the harness build the pinned bundle (drop --installed-app /
+  ##  BASECAMP_APP), or install Basecamp >= v$validated_basecamp_version.
+  ##########################################################################
+BANNER
+    fi
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 8. Layout-drift guard (REUSED pattern from Makefile basecamp-launch-%): the
@@ -365,7 +457,8 @@ staged_delivery_ver=$(mver "$modules_dir/delivery_module/manifest.json")
 
 echo
 echo "==> ready"
-echo "    Basecamp          : $bc_app  (v$app_version) [$bc_kind]"
+echo "    Basecamp          : $bc_app"
+echo "    Basecamp version  : v$app_version  (validated: v$validated_basecamp_version) [$bc_kind]"
 echo "    isolated user-dir : $user_dir"
 echo "    modules dir       : $modules_dir"
 echo "    plugins dir       : $plugins_dir"
