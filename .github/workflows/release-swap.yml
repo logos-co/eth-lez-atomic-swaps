@@ -19,6 +19,13 @@ name: Release swap
 on:
   workflow_dispatch: {}
 
+# Shared with release-swap-ui.yml and release-on-merge.yml so a manual dispatch
+# cannot run concurrently with a merge-triggered release and have both write the
+# same tag and assets. See release-on-merge.yml for the full rationale.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   release:
     uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1

@@ -14,6 +14,12 @@ name: Release swap_ui
 on:
   workflow_dispatch: {}
 
+# Shared with release-swap.yml and release-on-merge.yml — see the rationale in
+# release-on-merge.yml.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   release:
     uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1

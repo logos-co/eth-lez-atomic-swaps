@@ -1,0 +1,93 @@
+name: Release on merge
+
+# Publishes the swap modules when a merge to `master` changes a declared
+# version, so a released fix reaches the Basecamp catalog without anyone
+# remembering to dispatch a workflow.
+#
+# The trigger is the version files themselves, not every push. The shared action
+# reads the version from `<module_path>/metadata.json` and tags
+# `<name>-v<version>`; it has no idea what a push changed, so gating on `paths:`
+# is what makes the rule below actually true rather than merely usually true:
+#
+#     bump metadata.json (the usual `chore(release):` commit)  ->  merging publishes
+#     merge anything else                                      ->  workflow never starts
+#
+# Without the paths filter every merge would run four jobs and fire two
+# `rebuild-index` dispatches, each of which re-downloads and verifies every .lgx
+# across all 17 releases in this repo. That is a real cost to pay on commits that
+# cannot possibly release anything.
+#
+# The trade-off: the shared action treats a release missing its `.lgx` or
+# `sidecar.json` as unpublished and would rebuild it on a later run, but with
+# this filter an unrelated merge no longer provides that nudge. Heal a partial
+# release with a manual dispatch of release-swap{,-ui}.yml.
+#
+# Deliberately NOT enforcing swap/swap_ui version parity, unlike the faucet's
+# equivalent workflow: swap 0.3.1 was a legitimate swap-only re-release (the
+# packaging fix that restored display_name; swap_ui's manifest was already
+# correct and was not rebuilt). A parity gate here would have blocked it.
+# Consequence: `needs:` below orders the two releases, it does not pair them.
+# Bumping one module alone publishes exactly that module and leaves the other at
+# its current version — which is sometimes right, so it is on you to know which
+# case you are in.
+#
+# Separate path from canary-channel.yml, which stays the fast unversioned route
+# for branch testing (sentinel 0.99.<run-number>). This workflow only ever
+# publishes real, human-chosen version numbers.
+#
+# No release loop is possible: the only push the chain makes is
+# `git push -f origin refs/tags/<tag>` to re-point the release tag. That is a
+# tag ref and cannot match `push: branches:`, regardless of who authored it.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - swap-module/metadata.json
+      - swap-ui/metadata.json
+
+# One group across every workflow in this repo that can publish a release, so a
+# manual dispatch of release-swap.yml cannot race a merge run and have two jobs
+# write the same tag, upload the same assets, and force-push the same ref. Not
+# scoped to github.ref: a dispatch runs on a different ref and still must not
+# overlap. cancel-in-progress is false because cancelling mid-publish is exactly
+# how a release ends up with a .lgx but no sidecar.json.
+#
+# Caveat worth knowing: GitHub keeps at most one *pending* run per group. Three
+# version-bump merges inside one release cycle would silently drop the middle
+# one. The paths filter makes that unlikely rather than impossible.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  # release-swap-ui.yml: "Release swap FIRST for a given version pair — Basecamp
+  # resolves swap_ui's declared `swap` dependency from the same catalog index."
+  # `needs:` guarantees core's *release* is published before ui builds; it does
+  # not guarantee core is in the index first, since rebuild-index runs
+  # asynchronously off a repository_dispatch. The index converges anyway because
+  # each rebuild rescans every release. Two separately triggered workflows would
+  # give no ordering at all, which is why both modules are jobs here.
+  #
+  # Consequence of `needs:`: if core's release job fails — a linux-arm64 leg
+  # breaking hard, say — ui is skipped even when its own build would have
+  # succeeded. That is the intended trade.
+  core:
+    permissions:
+      contents: write
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    with:
+      module_path: swap-module
+      # Inputs deliberately identical to release-swap.yml, including the
+      # spelled-out variant list — see the rationale there.
+      variants: "darwin-arm64,linux-amd64,linux-arm64"
+
+  ui:
+    needs: core
+    permissions:
+      contents: write
+    uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
+    with:
+      module_path: swap-ui
+      # Inputs deliberately identical to release-swap-ui.yml.
+      variants: "darwin-arm64,linux-amd64,linux-arm64"
