@@ -135,11 +135,11 @@ int swapDeliveryParsePeerCount(const std::string& raw)
 }
 
 // logos.dev fleet Waku network parameters (2026-08 migration). The fleet was
-// redeployed from cluster 2 to cluster 3 (still 8 autosharding shards) during
-// the Aug-7/8 LEZ/delivery upgrade window; see PR #117 for the matching
-// offer-publisher change.
+// redeployed from cluster 2 to cluster 3 during the Aug-7/8 LEZ/delivery
+// upgrade window; see PR #117 for the matching offer-publisher change. The
+// shard count is unchanged — the cluster-2 preset already ran 8 autoshards and
+// the cluster-3 preset keeps that — so only the cluster id needs overriding.
 constexpr int kLogosDevClusterId = 3;
-constexpr int kLogosDevNumShards = 8;
 
 // Only QtCore is needed to build the createNode config JSON — not the logos
 // SDK — so this is guarded on QtCore rather than the SDK headers below. That
@@ -182,30 +182,25 @@ QString swapDeliveryConfigJson(const std::string& configJson)
     // Force the logos.dev fleet onto Waku cluster 3 (see kLogosDevClusterId).
     // The preset still resolves to cluster 2, and a node left there dials the
     // fleet but has every subscribe/lightpush rejected — meshing with 0 peers,
-    // so no offers arrive. We write the override two ways so it lands across
-    // delivery_module versions:
-    //   * flat clusterId / numShardsInCluster — the pinned v0.1.1 resolves the
-    //     preset and then lets individual keys OVERRIDE it (per its README),
-    //     and it silently ignores keys it does not know;
-    //   * messagingOverrides — the v0.2.0 per-layer override object, which
-    //     v0.1.x treats as one of those ignored unknown keys.
-    // Both are harmless on the version that does not consume them. Only applied
-    // to the logos.dev preset, and never when the caller pinned its own
-    // clusterId, so a custom or `twn` config is never clobbered.
+    // so no offers arrive.
+    //
+    // Emit ONLY the flat `clusterId`. createNode's config parser REJECTS any
+    // key it does not recognise: delivery_module v0.1.1 fails createNode with
+    //   "Unrecognized configuration option(s) found:
+    //    [numShardsInCluster, messagingOverrides]"
+    // → "Failed to create Delivery context" (confirmed against the owner's live
+    // logs), despite the module README claiming unknown keys are silently
+    // ignored — they are NOT. `clusterId` is a recognised WakuNodeConf key that
+    // overrides the preset's cluster; the shard count needs no override (the
+    // preset already runs 8 autoshards), and `messagingOverrides` is a shape no
+    // shipped delivery_module parses. Applied only to the logos.dev preset, and
+    // never when the caller pinned its own clusterId, so a custom or `twn`
+    // config is never clobbered.
     if (preset == QStringLiteral("logos.dev") && !input.contains(QStringLiteral("clusterId"))) {
         cfg.insert(QStringLiteral("clusterId"), kLogosDevClusterId);
-        cfg.insert(QStringLiteral("numShardsInCluster"), kLogosDevNumShards);
-        cfg.insert(QStringLiteral("messagingOverrides"), QJsonObject{
-            {QStringLiteral("clusterId"), kLogosDevClusterId},
-            {QStringLiteral("numShardsInCluster"), kLogosDevNumShards}
-        });
     } else if (input.contains(QStringLiteral("clusterId"))) {
         // Caller pinned a cluster explicitly — pass it through untouched.
         cfg.insert(QStringLiteral("clusterId"), input.value(QStringLiteral("clusterId")));
-        if (input.contains(QStringLiteral("numShardsInCluster"))) {
-            cfg.insert(QStringLiteral("numShardsInCluster"),
-                       input.value(QStringLiteral("numShardsInCluster")));
-        }
     }
     return QString::fromUtf8(QJsonDocument(cfg).toJson(QJsonDocument::Compact));
 }

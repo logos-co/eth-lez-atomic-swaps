@@ -189,28 +189,40 @@ LOGOS_TEST(delivery_eth_amount_decimal_normalizes_to_wei) {
     LOGOS_ASSERT_EQ(swapDeliveryEthAmountToWei("0.00000000000000001"), std::string("10"));
 }
 
-// The logos.dev fleet migrated Waku cluster 2 -> 3 (8 shards). deliveryConfig
-// must force cluster 3 over the still-cluster-2 preset, both as flat keys (for
-// the pinned v0.1.x module, which overrides preset values with individual keys)
-// and as messagingOverrides (for v0.2.0's per-layer object). See PR #117.
+// The logos.dev fleet migrated Waku cluster 2 -> 3. deliveryConfig must force
+// cluster 3 over the still-cluster-2 preset with the flat `clusterId` key ONLY.
+// createNode REJECTS unrecognised keys — delivery_module v0.1.1 fails createNode
+// with "Unrecognized configuration option(s) found: [numShardsInCluster,
+// messagingOverrides]" -> "Failed to create Delivery context" — so those keys
+// must never be emitted; the preset already runs 8 autoshards. See PR #117 and
+// the delivery-context-creation fix.
 LOGOS_TEST(delivery_config_forces_logos_dev_cluster_three) {
     const std::string cfg = swapDeliveryConfigJson("{}").toStdString();
     LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"logos.dev")");
     LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":3)");
-    LOGOS_ASSERT_CONTAINS(cfg, R"("numShardsInCluster":8)");
-    LOGOS_ASSERT_CONTAINS(cfg, R"("messagingOverrides")");
-    // The nested override must also name cluster 3 (not just the flat key).
-    const std::string overrides = cfg.substr(cfg.find(R"("messagingOverrides")"));
-    LOGOS_ASSERT(overrides.find(R"("clusterId":3)") != std::string::npos);
-    LOGOS_ASSERT(overrides.find(R"("numShardsInCluster":8)") != std::string::npos);
+    // Source contract: the unrecognised keys that break createNode must never
+    // appear in the emitted config.
+    LOGOS_ASSERT(cfg.find("numShardsInCluster") == std::string::npos);
+    LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
 
 // A caller that pins its own clusterId owns the network choice: no cluster-3
-// override is injected, and no messagingOverrides object is added.
+// override is injected, and no unrecognised keys are added.
 LOGOS_TEST(delivery_config_respects_explicit_cluster) {
     const std::string cfg = swapDeliveryConfigJson(R"({"clusterId":2})").toStdString();
     LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":2)");
     LOGOS_ASSERT(cfg.find(R"("clusterId":3)") == std::string::npos);
+    LOGOS_ASSERT(cfg.find("numShardsInCluster") == std::string::npos);
+    LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
+}
+
+// Even if a caller supplies the (unrecognised) numShardsInCluster key, it must
+// never be forwarded into the createNode config — createNode would reject it.
+LOGOS_TEST(delivery_config_drops_unrecognized_shard_key) {
+    const std::string cfg =
+        swapDeliveryConfigJson(R"({"clusterId":2,"numShardsInCluster":8})").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":2)");
+    LOGOS_ASSERT(cfg.find("numShardsInCluster") == std::string::npos);
     LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
 
