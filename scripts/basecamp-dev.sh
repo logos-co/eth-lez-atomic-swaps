@@ -172,14 +172,24 @@ echo
 # ---------------------------------------------------------------------------
 build_out() {
   # Realize a flake ref; print its single out-path on stdout, progress on stderr.
+  # On a TTY the full build log streams live (-L): a cold Rust compile can sit
+  # silent for minutes otherwise and read as "stuck". Non-TTY (CI, pipes)
+  # keeps the quiet capture-and-dump-on-failure behavior.
   local label=$1 ref=$2; shift 2
   echo "==> building $label ($ref)" >&2
   local start out tmp="/tmp/basecamp-dev.$$.$RANDOM"
   start=$(date +%s)
-  if ! nix build "$ref" --no-link --print-out-paths "$@" >"$tmp" 2>"$tmp.err"; then
-    echo "$label build failed:" >&2; cat "$tmp.err" >&2; rm -f "$tmp" "$tmp.err"; return 1
+  if [[ -t 2 ]]; then
+    if ! out=$(nix build "$ref" --no-link --print-out-paths -L "$@"); then
+      echo "$label build failed (log above)" >&2; return 1
+    fi
+    out=$(printf '%s\n' "$out" | sed '/^$/d')
+  else
+    if ! nix build "$ref" --no-link --print-out-paths "$@" >"$tmp" 2>"$tmp.err"; then
+      echo "$label build failed:" >&2; cat "$tmp.err" >&2; rm -f "$tmp" "$tmp.err"; return 1
+    fi
+    out=$(sed '/^$/d' "$tmp"); rm -f "$tmp" "$tmp.err"
   fi
-  out=$(sed '/^$/d' "$tmp"); rm -f "$tmp" "$tmp.err"
   echo "    $label built in $(( $(date +%s) - start ))s -> $out" >&2
   printf '%s\n' "$out"
 }
