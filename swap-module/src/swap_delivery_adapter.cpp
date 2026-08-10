@@ -134,6 +134,83 @@ int swapDeliveryParsePeerCount(const std::string& raw)
     }
 }
 
+// logos.dev fleet Waku network parameters (2026-08 migration). The fleet was
+// redeployed from cluster 2 to cluster 3 (still 8 autosharding shards) during
+// the Aug-7/8 LEZ/delivery upgrade window; see PR #117 for the matching
+// offer-publisher change.
+constexpr int kLogosDevClusterId = 3;
+constexpr int kLogosDevNumShards = 8;
+
+// Only QtCore is needed to build the createNode config JSON — not the logos
+// SDK — so this is guarded on QtCore rather than the SDK headers below. That
+// keeps it compiled (and therefore unit-tested) in the header-less test build,
+// which links QtCore, so the tests exercise the real shipping code path rather
+// than a hand-maintained twin. Self-contained (own parse, no SDK helpers) so
+// it does not depend on anything inside the SDK #if branch.
+#if __has_include(<QtCore/QJsonDocument>)
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonValue>
+#include <QtCore/QString>
+
+// Builds the JSON handed to delivery_module.createNode(). Exposed (external
+// linkage) so the swap-module unit tests can assert the fleet cluster override
+// travels in the config.
+QString swapDeliveryConfigJson(const std::string& configJson)
+{
+    const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(configJson));
+    const QJsonObject input = doc.isObject() ? doc.object() : QJsonObject{};
+
+    const QJsonValue delivery = input.value(QStringLiteral("delivery"));
+    if (delivery.isObject()) {
+        // Explicit full delivery config: the caller owns every key, so respect
+        // it verbatim (no fleet override injected).
+        return QString::fromUtf8(QJsonDocument(delivery.toObject()).toJson(QJsonDocument::Compact));
+    }
+
+    const QString preset = input.value(QStringLiteral("preset")).toString(QStringLiteral("logos.dev"));
+
+    QJsonObject cfg{
+        {QStringLiteral("logLevel"), input.value(QStringLiteral("logLevel")).toString(QStringLiteral("INFO"))},
+        {QStringLiteral("mode"), input.value(QStringLiteral("mode")).toString(QStringLiteral("Core"))},
+        {QStringLiteral("preset"), preset}
+    };
+    if (input.contains(QStringLiteral("portsShift"))) {
+        cfg.insert(QStringLiteral("portsShift"), input.value(QStringLiteral("portsShift")));
+    }
+
+    // Force the logos.dev fleet onto Waku cluster 3 (see kLogosDevClusterId).
+    // The preset still resolves to cluster 2, and a node left there dials the
+    // fleet but has every subscribe/lightpush rejected — meshing with 0 peers,
+    // so no offers arrive. We write the override two ways so it lands across
+    // delivery_module versions:
+    //   * flat clusterId / numShardsInCluster — the pinned v0.1.1 resolves the
+    //     preset and then lets individual keys OVERRIDE it (per its README),
+    //     and it silently ignores keys it does not know;
+    //   * messagingOverrides — the v0.2.0 per-layer override object, which
+    //     v0.1.x treats as one of those ignored unknown keys.
+    // Both are harmless on the version that does not consume them. Only applied
+    // to the logos.dev preset, and never when the caller pinned its own
+    // clusterId, so a custom or `twn` config is never clobbered.
+    if (preset == QStringLiteral("logos.dev") && !input.contains(QStringLiteral("clusterId"))) {
+        cfg.insert(QStringLiteral("clusterId"), kLogosDevClusterId);
+        cfg.insert(QStringLiteral("numShardsInCluster"), kLogosDevNumShards);
+        cfg.insert(QStringLiteral("messagingOverrides"), QJsonObject{
+            {QStringLiteral("clusterId"), kLogosDevClusterId},
+            {QStringLiteral("numShardsInCluster"), kLogosDevNumShards}
+        });
+    } else if (input.contains(QStringLiteral("clusterId"))) {
+        // Caller pinned a cluster explicitly — pass it through untouched.
+        cfg.insert(QStringLiteral("clusterId"), input.value(QStringLiteral("clusterId")));
+        if (input.contains(QStringLiteral("numShardsInCluster"))) {
+            cfg.insert(QStringLiteral("numShardsInCluster"),
+                       input.value(QStringLiteral("numShardsInCluster")));
+        }
+    }
+    return QString::fromUtf8(QJsonDocument(cfg).toJson(QJsonDocument::Compact));
+}
+#endif // __has_include(<QtCore/QJsonDocument>)
+
 #if __has_include("logos_api.h") && __has_include("logos_sdk.h") && __has_include("logos_types.h")
 
 #include "logos_api.h"
@@ -381,25 +458,6 @@ std::string canonicalHashlockFromSwapTopic(const QString& topic)
         return {};
     }
     return canonicalHashlockHex(match.captured(1).toStdString());
-}
-
-QString deliveryConfigJson(const std::string& configJson)
-{
-    const QJsonObject input = parseObject(configJson);
-    const QJsonValue delivery = input.value(QStringLiteral("delivery"));
-    if (delivery.isObject()) {
-        return QString::fromUtf8(QJsonDocument(delivery.toObject()).toJson(QJsonDocument::Compact));
-    }
-
-    QJsonObject cfg{
-        {QStringLiteral("logLevel"), input.value(QStringLiteral("logLevel")).toString(QStringLiteral("INFO"))},
-        {QStringLiteral("mode"), input.value(QStringLiteral("mode")).toString(QStringLiteral("Core"))},
-        {QStringLiteral("preset"), input.value(QStringLiteral("preset")).toString(QStringLiteral("logos.dev"))}
-    };
-    if (input.contains(QStringLiteral("portsShift"))) {
-        cfg.insert(QStringLiteral("portsShift"), input.value(QStringLiteral("portsShift")));
-    }
-    return QString::fromUtf8(QJsonDocument(cfg).toJson(QJsonDocument::Compact));
 }
 
 QStringList swapAcceptKeys()
@@ -705,7 +763,7 @@ std::string swapDeliveryMessagingInit(const std::string& configJson)
     }
 
     if (needsCreate) {
-        LogosResult created = modules->delivery_module.createNode(deliveryConfigJson(configJson));
+        LogosResult created = modules->delivery_module.createNode(swapDeliveryConfigJson(configJson));
         if (!created.success) {
             return logosError(QStringLiteral("createNode"), created);
         }
@@ -814,17 +872,24 @@ std::string swapDeliveryMessagingStatus()
     QString hint;
     if (s.started && s.subscribed) {
         if (s.peerInfoUnsupported) {
+            // State the observable fact, then give conditional advice: an
+            // update may or may not exist (at time of writing no published
+            // build answers this check), so we do not assert one does.
             hint = QStringLiteral(
-                "delivery_module did not answer its peer-count API — it is "
-                "likely out of date; update it in the Basecamp module manager");
+                "delivery_module did not answer its peer-count check — offers "
+                "may not be arriving. If the module manager shows an update, "
+                "install it; this build may otherwise predate the check.");
         } else if (s.fleetPeerCount == 0
                    && QDateTime::currentMSecsSinceEpoch() - s.startedAtMs
                           > kZeroPeerAlarmGraceMs) {
             // Grace-gated: 0 peers seconds after start is normal dialing,
-            // not isolation.
+            // not isolation. Factual tone — a stale build is one possible
+            // cause, not a certainty.
             hint = QStringLiteral(
-                "connected to 0 fleet peers — offers cannot arrive; check "
-                "that delivery_module is up to date");
+                "connected to 0 fleet peers, so offers cannot arrive. This can "
+                "mean the fleet moved on from this build's network; if the "
+                "module manager shows a delivery_module update, install it and "
+                "restart Basecamp.");
         }
     }
     if (!hint.isEmpty()) {
