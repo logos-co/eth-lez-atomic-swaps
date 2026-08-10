@@ -229,8 +229,12 @@ swap_ui_lgx=$(find_single_lgx swap_ui "$swap_ui_out")
 
 # ---------------------------------------------------------------------------
 # 3. delivery_module dependency: override | cache | build the scaffold pin.
+#    The cache file is keyed by the scaffold.toml flake ref, so a pin bump
+#    (e.g. v0.1.1 -> v0.2.0) invalidates it instead of silently reusing a
+#    stale .lgx of the previous release.
 # ---------------------------------------------------------------------------
-delivery_cache="$cache_dir/delivery_module.lgx"
+delivery_cache_key=$(printf '%s' "$delivery_flake" | shasum -a 256 | cut -c1-12)
+delivery_cache="$cache_dir/delivery_module-${delivery_cache_key}.lgx"
 if [[ -n "${DELIVERY_MODULE_LGX:-}" ]]; then
   [[ -f "$DELIVERY_MODULE_LGX" ]] || { echo "DELIVERY_MODULE_LGX not found: $DELIVERY_MODULE_LGX" >&2; exit 1; }
   echo "==> delivery_module: using override $DELIVERY_MODULE_LGX"; delivery_lgx="$DELIVERY_MODULE_LGX"
@@ -238,14 +242,13 @@ elif [[ -f "$delivery_cache" ]]; then
   echo "==> delivery_module: reusing cached $delivery_cache"; delivery_lgx="$delivery_cache"
 else
   [[ "$delivery_flake" == *"#lgx" ]] || { echo "bad [modules.delivery_module].flake in scaffold.toml: $delivery_flake" >&2; exit 1; }
-  # The standalone delivery_module flake pins its OWN nixpkgs, which predates
-  # crates.io's User-Agent fix, so its zerokit vendor step dies with a 403 (the
-  # working-tree swap/swap_ui flakes don't hit this — they pin nixpkgs-crates-io
-  # internally). Mirror the CI smoke's single scoped override exactly. Drop this
-  # once logos-delivery advances its nixpkgs past 2026-04-26.
-  delivery_nixpkgs='github:danisharora099/nixpkgs/3134d7bb12629545b1f3e5b1d2faadbf861484fd'
-  delivery_out=$(build_out delivery_module "${delivery_flake%#lgx}#lgx-portable" \
-    --override-input logos-delivery/nixpkgs "$delivery_nixpkgs")
+  # No nixpkgs override needed since the v0.2.0 pin: its logos-delivery
+  # (f8b03659) locks nixpkgs 535f3e69 (2026-06-03), which postdates the
+  # crates.io User-Agent fix (NixOS/nixpkgs#512735, 2026-04-26) that the
+  # v0.1.1-era `--override-input logos-delivery/nixpkgs` workaround existed
+  # for. Building the flake untouched also keeps its lock eligible for the
+  # Logos Attic binary cache instead of forcing a cold rebuild.
+  delivery_out=$(build_out delivery_module "${delivery_flake%#lgx}#lgx-portable")
   cp "$(find_single_lgx delivery_module "$delivery_out")" "$delivery_cache"
   echo "    cached delivery_module -> $delivery_cache"; delivery_lgx="$delivery_cache"
 fi

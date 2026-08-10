@@ -191,11 +191,23 @@ LOGOS_TEST(delivery_eth_amount_decimal_normalizes_to_wei) {
 
 // The logos.dev fleet migrated Waku cluster 2 -> 3. deliveryConfig must force
 // cluster 3 over the still-cluster-2 preset with the flat `clusterId` key ONLY.
-// createNode REJECTS unrecognised keys — delivery_module v0.1.1 fails createNode
-// with "Unrecognized configuration option(s) found: [numShardsInCluster,
-// messagingOverrides]" -> "Failed to create Delivery context" — so those keys
-// must never be emitted; the preset already runs 8 autoshards. See PR #117 and
-// the delivery-context-creation fix.
+// Source-verified against delivery_module v0.2.0 (bundled logos-delivery
+// f8b03659): the flat blob parses via parseFlatConf
+// (logos_delivery/api/conf/logos_delivery_conf_json.nim:58-100) and the
+// EXPLICIT clusterId beats the preset's cluster 2 — presets only fill unset
+// fields (checkSetPresetValueToField, logos_delivery/waku/factory/
+// conf_builder/waku_conf_builder.nim:355-389) — landing the node on
+// /waku/2/rs/3/<shard>. clusterId must NOT move into `messagingOverrides`
+// (that is the reliability-layer conf; a clusterId there is rejected, and the
+// layered parser also rejects mixing messagingOverrides with bare keys like
+// portsShift). createNode REJECTS unrecognised keys in every shipped version —
+// v0.1.1 fails createNode with "Unrecognized configuration option(s) found:
+// [numShardsInCluster, messagingOverrides]" -> "Failed to create Delivery
+// context" — so those keys must never be emitted; the preset already runs 8
+// autoshards. Note delivery_module v0.1.x is unsupportable on the migrated
+// fleet regardless of emission: its logos-delivery (509c8755) stomps the
+// explicit clusterId with the preset's cluster 2 (waku_conf_builder.nim:
+// 313-324). See PR #117 and the delivery-context-creation fix.
 LOGOS_TEST(delivery_config_forces_logos_dev_cluster_three) {
     const std::string cfg = swapDeliveryConfigJson("{}").toStdString();
     LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"logos.dev")");

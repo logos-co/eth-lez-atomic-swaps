@@ -184,18 +184,41 @@ QString swapDeliveryConfigJson(const std::string& configJson)
     // fleet but has every subscribe/lightpush rejected — meshing with 0 peers,
     // so no offers arrive.
     //
-    // Emit ONLY the flat `clusterId`. createNode's config parser REJECTS any
-    // key it does not recognise: delivery_module v0.1.1 fails createNode with
-    //   "Unrecognized configuration option(s) found:
-    //    [numShardsInCluster, messagingOverrides]"
-    // → "Failed to create Delivery context" (confirmed against the owner's live
-    // logs), despite the module README claiming unknown keys are silently
-    // ignored — they are NOT. `clusterId` is a recognised WakuNodeConf key that
-    // overrides the preset's cluster; the shard count needs no override (the
-    // preset already runs 8 autoshards), and `messagingOverrides` is a shape no
-    // shipped delivery_module parses. Applied only to the logos.dev preset, and
-    // never when the caller pinned its own clusterId, so a custom or `twn`
-    // config is never clobbered.
+    // Emit ONLY the flat `clusterId` — the shape delivery_module v0.2.0's
+    // SOURCE honours (READMEs have lied before; both claims below are
+    // source-verified):
+    //
+    //  * v0.2.0 (bundled logos-delivery f8b03659): the flat blob parses via
+    //    parseFlatConf (logos_delivery/api/conf/logos_delivery_conf_json.nim:
+    //    58-100, reached at :148-155) and the builder merge order makes the
+    //    EXPLICIT clusterId win — the preset only fills unset fields
+    //    (checkSetPresetValueToField + applyNetworkPresetConf,
+    //    logos_delivery/waku/factory/conf_builder/waku_conf_builder.nim:
+    //    355-389). Result: cluster 3 with the preset's entry nodes and 8
+    //    autoshards, i.e. pubsub topics /waku/2/rs/3/<shard>.
+    //    Do NOT move clusterId into `messagingOverrides`: that object is a
+    //    MessagingClientConf (reliability layer), not a WakuNodeConf, so a
+    //    clusterId there is REJECTED — and the layered parser also rejects
+    //    mixing messagingOverrides with bare top-level keys like portsShift
+    //    (logos_delivery_conf_json.nim:102-188).
+    //
+    //  * v0.1.x (bundled logos-delivery 509c8755) CANNOT be steered to
+    //    cluster 3: it parses the same flat clusterId, then applyNetworkConf
+    //    unconditionally overwrites it with the preset's cluster 2
+    //    (waku/factory/conf_builder/waku_conf_builder.nim:313-324; warn
+    //    "Cluster id was provided alongside a network conf" used=2
+    //    discarded=3). Dropping the preset to dodge the stomp forfeits the
+    //    fleet entry-node wiring, so v0.1.x is unsupportable against the
+    //    migrated fleet — delivery_module >= 0.2.0 is REQUIRED (the hint copy
+    //    in swapDeliveryMessagingStatus says so too).
+    //
+    // createNode still REJECTS unrecognised keys in both versions (v0.1.1
+    // fails with "Unrecognized configuration option(s) found: …" → "Failed to
+    // create Delivery context", confirmed against the owner's live logs), so
+    // nothing beyond recognised flat keys may be emitted; the shard count
+    // needs no override (the preset already runs 8 autoshards). Applied only
+    // to the logos.dev preset, and never when the caller pinned its own
+    // clusterId, so a custom or `twn` config is never clobbered.
     if (preset == QStringLiteral("logos.dev") && !input.contains(QStringLiteral("clusterId"))) {
         cfg.insert(QStringLiteral("clusterId"), kLogosDevClusterId);
     } else if (input.contains(QStringLiteral("clusterId"))) {
@@ -867,24 +890,28 @@ std::string swapDeliveryMessagingStatus()
     QString hint;
     if (s.started && s.subscribed) {
         if (s.peerInfoUnsupported) {
-            // State the observable fact, then give conditional advice: an
-            // update may or may not exist (at time of writing no published
-            // build answers this check), so we do not assert one does.
+            // State the observable fact, then the known floor: the migrated
+            // logos.dev fleet needs delivery_module >= 0.2.0 (older builds are
+            // preset-pinned to the dead cluster 2 — see swapDeliveryConfigJson).
             hint = QStringLiteral(
                 "delivery_module did not answer its peer-count check — offers "
-                "may not be arriving. If the module manager shows an update, "
-                "install it; this build may otherwise predate the check.");
+                "may not be arriving. The logos.dev fleet requires "
+                "delivery_module >= 0.2.0; install the update from the module "
+                "manager and restart Basecamp.");
         } else if (s.fleetPeerCount == 0
                    && QDateTime::currentMSecsSinceEpoch() - s.startedAtMs
                           > kZeroPeerAlarmGraceMs) {
             // Grace-gated: 0 peers seconds after start is normal dialing,
-            // not isolation. Factual tone — a stale build is one possible
-            // cause, not a certainty.
+            // not isolation. The dominant cause is a pre-0.2.0
+            // delivery_module: its preset stomps the cluster-3 override
+            // (source-verified — see swapDeliveryConfigJson), leaving the
+            // node meshed with nobody on cluster 2.
             hint = QStringLiteral(
-                "connected to 0 fleet peers, so offers cannot arrive. This can "
-                "mean the fleet moved on from this build's network; if the "
-                "module manager shows a delivery_module update, install it and "
-                "restart Basecamp.");
+                "connected to 0 fleet peers, so offers cannot arrive. The "
+                "logos.dev fleet (Waku cluster 3) requires delivery_module "
+                ">= 0.2.0 — older builds are pinned to cluster 2 by their "
+                "preset. Install the delivery_module update from the module "
+                "manager and restart Basecamp.");
         }
     }
     if (!hint.isEmpty()) {

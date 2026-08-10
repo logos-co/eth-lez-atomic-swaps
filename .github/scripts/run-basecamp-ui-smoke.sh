@@ -101,15 +101,18 @@ find_single_lgx() {
 
 # Build the same portable package variants that Basecamp consumes. The module
 # flakes remain package-only; the host and test framework come from Basecamp.
-# Keep the two scoped nixpkgs workarounds identical to the PR-time module
-# matrix: the pinned builder and Delivery nixpkgs revisions predate
-# crates.io's User-Agent fix. They change only the affected nested input, not
-# this repo's flake outputs or host selection.
+# Keep the scoped nixpkgs workarounds identical to the PR-time module matrix:
+# the pinned builder nixpkgs revision (and the v0.1.1 delivery-module input
+# still pinned inside swap-module/flake.nix) predate crates.io's User-Agent
+# fix. They change only the affected nested input, not this repo's flake
+# outputs or host selection.
+#
+# The scaffold-pinned delivery_module (v0.2.0) needs NO override: its
+# logos-delivery (f8b03659) locks nixpkgs 535f3e69 (2026-06-03), past the
+# NixOS/nixpkgs#512735 fix (2026-04-26), and building it with an untouched
+# lock keeps its Attic binary-cache eligibility.
 module_builder_nixpkgs='github:danisharora099/nixpkgs/eaec81d3b8a8d2339e25c718a1650b2c45adf726'
 delivery_nixpkgs='github:danisharora099/nixpkgs/3134d7bb12629545b1f3e5b1d2faadbf861484fd'
-delivery_overrides=(
-  --override-input logos-delivery/nixpkgs "$delivery_nixpkgs"
-)
 swap_overrides=(
   --override-input logos-module-builder/nixpkgs "$module_builder_nixpkgs"
   --override-input delivery_module/logos-delivery/nixpkgs "$delivery_nixpkgs"
@@ -119,7 +122,7 @@ swap_ui_overrides=(
   --override-input swap/logos-module-builder/nixpkgs "$module_builder_nixpkgs"
   --override-input swap/delivery_module/logos-delivery/nixpkgs "$delivery_nixpkgs"
 )
-delivery_output=$(build_one delivery_module "$delivery_ref" "${delivery_overrides[@]}")
+delivery_output=$(build_one delivery_module "$delivery_ref")
 swap_output=$(build_one swap 'git+file:.?dir=swap-module#lgx-portable' "${swap_overrides[@]}")
 swap_ui_output=$(build_one swap_ui 'git+file:.?dir=swap-ui#lgx-portable' "${swap_ui_overrides[@]}")
 lgpm_output=$(build_one lgpm "$lgpm_ref#cli-portable")
