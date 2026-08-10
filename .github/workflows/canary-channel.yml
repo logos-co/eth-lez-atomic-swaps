@@ -93,6 +93,14 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           submodules: false
+      # Canary tooling lives on the default branch and may be absent from
+      # inputs.ref (any branch cut before the canary channel merged) — the
+      # first dispatch failed exactly this way. Run the scan/index tooling
+      # from a side checkout of the workflow's own (default-branch) ref.
+      - uses: actions/checkout@v4
+        with:
+          path: .canary-tools
+          sparse-checkout: canary
       - id: gen
         shell: bash
         env:
@@ -153,6 +161,14 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           submodules: false
+      # Canary tooling lives on the default branch and may be absent from
+      # inputs.ref (any branch cut before the canary channel merged) — the
+      # first dispatch failed exactly this way. Run the scan/index tooling
+      # from a side checkout of the workflow's own (default-branch) ref.
+      - uses: actions/checkout@v4
+        with:
+          path: .canary-tools
+          sparse-checkout: canary
 
       # Pin to the same immutable Nix installer SHA build-modules.yml uses.
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -212,7 +228,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 canary/canary-content-scan.py \
+          python3 .canary-tools/canary/canary-content-scan.py \
             --lgx "${{ steps.build.outputs.lgx }}" \
             --module "${{ matrix.logical }}" \
             --manifest-name "${{ matrix.logical }}"
@@ -235,7 +251,7 @@ jobs:
           # Emit this asset's index fragment. The URL is known ahead of publish:
           # the asset lands on the `canary` release tag under this exact name.
           base="https://github.com/${{ github.repository }}/releases/download/canary"
-          python3 canary/canary-index.py emit-entry \
+          python3 .canary-tools/canary/canary-index.py emit-entry \
             --lgx "$stage/$asset" \
             --url "$base/$asset" \
             --publisher-ref "canary-${SHORTSHA} (${{ inputs.ref }})" \
@@ -266,6 +282,14 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           submodules: false
+      # Canary tooling lives on the default branch and may be absent from
+      # inputs.ref (any branch cut before the canary channel merged) — the
+      # first dispatch failed exactly this way. Run the scan/index tooling
+      # from a side checkout of the workflow's own (default-branch) ref.
+      - uses: actions/checkout@v4
+        with:
+          path: .canary-tools
+          sparse-checkout: canary
 
       - name: Download all built assets + fragments
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -294,7 +318,7 @@ jobs:
         run: |
           set -euo pipefail
           ls -la dl
-          python3 canary/canary-index.py assemble \
+          python3 .canary-tools/canary/canary-index.py assemble \
             --fragments dl \
             --repository-name eth-lez-atomic-swaps \
             --out canary-index.json
