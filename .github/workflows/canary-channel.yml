@@ -1,0 +1,345 @@
+name: Canary channel
+
+# A FAST, UNOFFICIAL install channel for branch builds. Dispatch this on any
+# ref and, minutes later, the requested module(s) are installable in Basecamp
+# from the rolling `canary` prerelease — no version bump, no `release-swap*.yml`
+# dispatch, no `rebuild-index` round-trip. Time-to-test on a branch drops from
+# the full official-release path (~2.5 h: two release workflows, three-variant
+# matrix each, index rebuild, human bumps) to ~15-25 min for a single-platform
+# build of one module.
+#
+# HOW IT DIFFERS FROM THE OFFICIAL PATH
+#   * Single platform by DEFAULT (darwin-arm64) — that is the speed win. The
+#     official release always builds all three variants; here you pay for only
+#     the one you will test unless you ask for `all`.
+#   * Content is VERIFIED BEFORE anything is published: every built .lgx is
+#     byte-scanned against release-content-expectations.json's highest markers
+#     (canary/canary-content-scan.py). A build that does not contain the code it
+#     claims fails the job and publishes nothing.
+#   * Publishes to ONE rolling prerelease tagged `canary`, replacing same-named
+#     assets in place, alongside a `canary-index.json` shaped exactly like the
+#     official index.json. Testers add logos-repo-canary.json as a SECOND
+#     Basecamp repository and update from it. Never point public testers here.
+#
+# VERSION SCHEME — SENTINEL, NOT SEMVER-PRERELEASE. The published version is
+# `0.99.<run-number>`. This is deliberately a plain dotted-integer string, not a
+# semver prerelease like `0.4.3-canary.<sha>`, because:
+#   * It sorts ABOVE every real 0.4.x release under BOTH strict-semver AND the
+#     loose "extract the integers" comparator this repo's own canary uses
+#     (canary/leg-catalog.sh: `re.findall(r"\d+", v)`), so Basecamp ALWAYS
+#     offers the canary as the newest available regardless of what is installed.
+#     A `0.4.3-canary.<sha>` prerelease sorts BELOW the eventual real `0.4.3`
+#     under semver and, worse, a hex shortsha injects stray integers into a
+#     loose comparator's key — unpredictable ordering.
+#   * `<run-number>` increases monotonically per workflow, so re-dispatching a
+#     branch always publishes a higher version and Basecamp re-offers the update.
+# The real provenance (ref + short SHA) is NOT lost: it is stamped into the
+# asset filename, the `publisherRef` of every index entry, and the job summary.
+# See canary/README.md ("Canary channel") for the operator-facing writeup.
+#
+# DISPATCH-AFTER-MERGE LIMITATION: workflow_dispatch only lists a workflow that
+# exists on the DEFAULT branch. So this file must land on master before its
+# first run is possible; the very first canary of 0.4.3's branch happens after
+# this PR merges. (A future `pull_request` label trigger could canary a branch
+# pre-merge — intentionally out of scope here.)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or SHA to build (default master)"
+        type: string
+        default: master
+      platform:
+        description: "Platform(s) to build — single is the speed win"
+        type: choice
+        default: darwin-arm64
+        options:
+          - darwin-arm64
+          - linux-amd64
+          - linux-arm64
+          - all
+      modules:
+        description: "Which module(s) to build"
+        type: choice
+        default: both
+        options:
+          - both
+          - swap
+          - swap_ui
+
+concurrency:
+  # One canary publish at a time — the release-asset replace step is not safe to
+  # run concurrently against the same rolling tag.
+  group: canary-channel
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create/update the rolling `canary` prerelease + assets
+
+jobs:
+  # ── Fan the two choice inputs out into a concrete build matrix. ─────────────
+  # Doing this in a tiny job (rather than a static matrix + `if:`) keeps the
+  # build job's matrix exactly the set the operator asked for, so a
+  # single-platform single-module dispatch spawns exactly one build leg.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      shortsha: ${{ steps.gen.outputs.shortsha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          submodules: false
+      - id: gen
+        shell: bash
+        env:
+          IN_PLATFORM: ${{ inputs.platform }}
+          IN_MODULES: ${{ inputs.modules }}
+        run: |
+          set -euo pipefail
+          shortsha="$(git rev-parse --short HEAD)"
+          echo "shortsha=$shortsha" >> "$GITHUB_OUTPUT"
+          matrix="$(IN_PLATFORM="$IN_PLATFORM" IN_MODULES="$IN_MODULES" python3 - <<'PY'
+          import json, os
+          # variant -> runner, mirroring build-modules.yml's runner matrix.
+          RUNNERS = {
+              "darwin-arm64": "macos-latest",
+              "linux-amd64":  "ubuntu-latest",
+              "linux-arm64":  "ubuntu-24.04-arm",
+          }
+          # module dir -> logical package name (the .lgx manifest / index name).
+          MODULES = {"swap": "swap-module", "swap_ui": "swap-ui"}
+
+          platform = os.environ["IN_PLATFORM"]
+          variants = list(RUNNERS) if platform == "all" else [platform]
+          which = os.environ["IN_MODULES"]
+          logical = list(MODULES) if which == "both" else [which]
+
+          include = []
+          for name in logical:
+              for variant in variants:
+                  include.append({
+                      "logical": name,             # swap | swap_ui
+                      "module_dir": MODULES[name],  # swap-module | swap-ui
+                      "variant": variant,
+                      "runs-on": RUNNERS[variant],
+                  })
+          print(json.dumps({"include": include}))
+          PY
+          )"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Build matrix:"; echo "$matrix" | python3 -m json.tool
+
+  # ── Build + content-verify each (module, platform). ────────────────────────
+  # Reuses build-modules.yml's EXACT nix invocation so a green build here means
+  # the same thing it does there. Then byte-scans the .lgx BEFORE handing it on
+  # to publish — content verification gates the publish, per the header.
+  build:
+    needs: setup
+    name: ${{ matrix.logical }} (${{ matrix.variant }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 60
+    env:
+      SHORTSHA: ${{ needs.setup.outputs.shortsha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      # Pin to the same immutable Nix installer SHA build-modules.yml uses.
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      # Stamp the SENTINEL version into metadata.json BEFORE building, so the
+      # .lgx's own manifest, the index entry, and the entry's version all agree
+      # (see the header's version-scheme note). The tree is a throwaway CI
+      # checkout; the dirty edit is picked up by `nix build` from the working
+      # tree (path: flake inputs) and never committed.
+      - name: Stamp sentinel version into metadata.json
+        id: stamp
+        shell: bash
+        env:
+          MODULE_DIR: ${{ matrix.module_dir }}
+        run: |
+          set -euo pipefail
+          version="0.99.${{ github.run_number }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          meta="$MODULE_DIR/metadata.json"
+          version="$version" python3 - "$meta" <<'PY'
+          import json, os, sys
+          p = sys.argv[1]
+          m = json.load(open(p))
+          old = m.get("version")
+          m["version"] = os.environ["version"]
+          json.dump(m, open(p, "w"), indent=2)
+          open(p, "a").write("\n")
+          print(f"{p}: version {old} -> {m['version']}")
+          PY
+
+      - name: nix build .#lgx-portable (${{ matrix.logical }}, ${{ matrix.variant }})
+        id: build
+        shell: bash
+        env:
+          MODULE_DIR: ${{ matrix.module_dir }}
+        run: |
+          set -euo pipefail
+          cd "$MODULE_DIR"
+          # Byte-for-byte the release/build-modules command: the PORTABLE bundle
+          # (.#lgx-portable, not .#lgx which tags a "-dev" suffix Basecamp
+          # rejects). --print-out-paths writes the store path to stdout.
+          out=$(nix build .#lgx-portable --print-out-paths --no-link --show-trace)
+          echo "Built: $out"
+          lgx=$(find "$out" -maxdepth 2 -name '*.lgx' | head -n1)
+          if [[ -z "$lgx" ]]; then
+            echo "::error::nix build produced no .lgx under $out"; exit 1
+          fi
+          echo "lgx=$lgx" >> "$GITHUB_OUTPUT"
+
+      # THE GATE. Content verification before publish: scan the freshly-built
+      # .lgx against the highest markers in release-content-expectations.json.
+      # A miss fails the job and nothing is published.
+      - name: Verify built .lgx content (byte scan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 canary/canary-content-scan.py \
+            --lgx "${{ steps.build.outputs.lgx }}" \
+            --module "${{ matrix.logical }}" \
+            --manifest-name "${{ matrix.logical }}"
+
+      # Package like a release asset (a plain .lgx), but name it to carry
+      # module + platform + shortsha so the rolling release can hold many at
+      # once without collision.
+      - name: Package the canary asset
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/canary-out"
+          mkdir -p "$stage"
+          asset="${{ matrix.logical }}-canary-${{ matrix.variant }}-${SHORTSHA}.lgx"
+          cp "${{ steps.build.outputs.lgx }}" "$stage/$asset"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "stage=$stage" >> "$GITHUB_OUTPUT"
+
+          # Emit this asset's index fragment. The URL is known ahead of publish:
+          # the asset lands on the `canary` release tag under this exact name.
+          base="https://github.com/${{ github.repository }}/releases/download/canary"
+          python3 canary/canary-index.py emit-entry \
+            --lgx "$stage/$asset" \
+            --url "$base/$asset" \
+            --publisher-ref "canary-${SHORTSHA} (${{ inputs.ref }})" \
+            --out "$stage/fragment-${{ matrix.logical }}-${{ matrix.variant }}.json"
+
+      - name: Upload asset + fragment for the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canary-${{ matrix.logical }}-${{ matrix.variant }}
+          path: |
+            ${{ steps.pkg.outputs.stage }}/${{ steps.pkg.outputs.asset }}
+            ${{ steps.pkg.outputs.stage }}/fragment-${{ matrix.logical }}-${{ matrix.variant }}.json
+          if-no-files-found: error
+          retention-days: 3
+
+  # ── Publish everything that built + verified to the rolling `canary` tag. ───
+  publish:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHORTSHA: ${{ needs.setup.outputs.shortsha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Download all built assets + fragments
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dl
+          pattern: canary-*
+          merge-multiple: true
+
+      - name: Ensure the rolling `canary` prerelease exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view canary --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "canary release already exists — will replace same-named assets"
+          else
+            gh release create canary \
+              --repo "${{ github.repository }}" \
+              --prerelease \
+              --title "Canary channel (unstable)" \
+              --notes "Rolling, UNSTABLE branch builds. Assets are replaced in place; do not depend on any specific one. Never point public testers here. See canary/README.md." \
+              --target master
+          fi
+
+      - name: Assemble canary-index.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la dl
+          python3 canary/canary-index.py assemble \
+            --fragments dl \
+            --repository-name eth-lez-atomic-swaps \
+            --out canary-index.json
+          echo "--- canary-index.json ---"
+          python3 -m json.tool canary-index.json
+
+      - name: Upload .lgx assets + index to the `canary` release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Replace same-named assets in place (--clobber). The .lgx assets carry
+          # the shortsha, so distinct SHAs accumulate; canary-index.json is
+          # always overwritten to point at the newest set.
+          shopt -s nullglob
+          assets=(dl/*.lgx canary-index.json)
+          echo "Uploading: ${assets[*]}"
+          gh release upload canary "${assets[@]}" \
+            --repo "${{ github.repository }}" --clobber
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rel="https://github.com/${{ github.repository }}/releases/tag/canary"
+          idx="https://github.com/${{ github.repository }}/releases/download/canary/canary-index.json"
+          {
+            echo "## Canary channel published"
+            echo
+            echo "- ref: \`${{ inputs.ref }}\` (short \`${SHORTSHA}\`)"
+            echo "- platform: \`${{ inputs.platform }}\` · modules: \`${{ inputs.modules }}\`"
+            echo "- version (sentinel): \`0.99.${{ github.run_number }}\`"
+            echo "- release: [$rel]($rel) (prerelease)"
+            echo "- index: [$idx]($idx)"
+            echo
+            echo "### Assets published"
+            echo '```'
+            (cd dl && ls -1 *.lgx 2>/dev/null || echo "(no .lgx — check the build job)")
+            echo '```'
+            echo
+            echo "### Install in Basecamp"
+            echo "Add this repo descriptor as a SECOND Basecamp repository, then update:"
+            echo '```'
+            echo "https://raw.githubusercontent.com/${{ github.repository }}/master/logos-repo-canary.json"
+            echo '```'
+            echo
+            echo "> Unstable. Never point public testers at this channel."
+          } >> "$GITHUB_STEP_SUMMARY"

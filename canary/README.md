@@ -127,6 +127,61 @@ All jobs cache aggressively (magic-nix-cache for the nix store, `rust-cache` for
 cargo) and upload a `canary-status-*.json` artifact; a final `summary` job rolls
 them into one job-summary table via `canary/summarize.py`.
 
+## Canary channel — install a branch build in Basecamp in minutes
+
+`.github/workflows/canary-channel.yml` is a **fast, unofficial install channel**
+for branch builds. It lets you test an unreleased branch in the real Basecamp
+host **~15-25 min** after CI compiles it, instead of the full official-release
+path (**~2.5 h**: two `release-swap*.yml` dispatches, a three-variant matrix
+each, an index rebuild, and a human version bump).
+
+**Use it:**
+
+1. **Dispatch** `canary-channel.yml` on your branch (Actions → Canary channel →
+   Run workflow). Inputs: `ref` (branch/SHA, default `master`), `platform`
+   (default `darwin-arm64` — single-platform is the speed win; also
+   `linux-amd64`, `linux-arm64`, `all`), `modules` (`both` | `swap` | `swap_ui`).
+2. The run **builds** the requested module(s) with the same
+   `nix build .#lgx-portable` the release uses, **byte-scans** each `.lgx`
+   against `release-content-expectations.json`'s highest markers **before
+   publishing anything** (a build that doesn't contain the code it claims fails
+   the job), then **publishes** to the rolling `canary` prerelease alongside a
+   `canary-index.json` shaped exactly like the official `index.json`.
+3. In Basecamp, **add a second repository** pointing at the canary descriptor's
+   raw URL:
+   ```
+   https://raw.githubusercontent.com/logos-co/eth-lez-atomic-swaps/master/logos-repo-canary.json
+   ```
+   Then **update the modules from it.** The job summary prints the exact release
+   URL, the assets published, and this line.
+
+**Never point public testers at this channel.** It ships unstable, unsigned,
+in-place-replaced branch builds.
+
+**Version scheme (deliberate):** the canary publishes as the sentinel
+`0.99.<run-number>`, a plain dotted-integer string — *not* a semver prerelease
+like `0.4.3-canary.<sha>`. The sentinel sorts above every real `0.4.x` under
+both strict-semver and the loose "extract the integers" comparator this repo's
+own `leg-catalog.sh` uses, so Basecamp **always** offers the canary as the
+newest available regardless of what's installed; `<run-number>` increases every
+dispatch so re-runs always re-offer. A `0.4.3-canary.<sha>` prerelease would
+instead sort *below* the eventual real `0.4.3` and inject stray integers from a
+hex shortsha into a loose comparator. The real provenance (ref + short SHA) is
+kept in the asset filename, each index entry's `publisherRef`, and the summary.
+
+**Two local scripts back the workflow** (both runnable on any `.lgx`, no
+network):
+
+| Script | Role |
+|--------|------|
+| `canary/canary-content-scan.py` | Local-file twin of `leg-release-content.sh`: byte-scans a built `.lgx` against the module's highest `release-content-expectations.json` markers, over **every variant present** (a single-platform canary carries one). Gates the publish. |
+| `canary/canary-index.py` | `emit-entry` turns one `.lgx` + its URL into an index fragment; `assemble` groups fragments into a full schemaV2 `canary-index.json`. |
+
+**First-run limitation:** `workflow_dispatch` only lists a workflow that exists
+on the **default branch**, so the first canary dispatch is possible only *after*
+this workflow merges to `master`. (A future `pull_request` label trigger could
+canary a branch pre-merge — out of scope here.)
+
 ## Graduation plan
 
 Stage 1 proves the concept in-repo. Next:
