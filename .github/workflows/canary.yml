@@ -96,6 +96,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # Pull unchanged deps (risc0, Qt, the liblogos chains) from the shared
+          # binary cache instead of rebuilding them. Reads are public — no token.
+          # Pure config: the URL + key are repo variables (docs/nix-cache.md), so
+          # moving to org infra needs no workflow edit; unset vars just yield
+          # empty (ignored) lines. This leg is a pure CONSUMER — build-modules.yml
+          # is the producer that pushes.
+          extra-conf: |
+            extra-substituters = ${{ vars.NIX_CACHE_URL }}
+            extra-trusted-public-keys = ${{ vars.NIX_CACHE_PUBLIC_KEY }}
       - uses: DeterminateSystems/magic-nix-cache-action@main   # aggressive nix store cache
       - uses: actions/setup-python@v5
         with:
