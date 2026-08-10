@@ -148,10 +148,13 @@ constexpr int kLogosDevClusterId = 3;
 // than a hand-maintained twin. Self-contained (own parse, no SDK helpers) so
 // it does not depend on anything inside the SDK #if branch.
 #if __has_include(<QtCore/QJsonDocument>)
+#include <QtCore/QByteArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonValue>
+#include <QtCore/QMetaType>
 #include <QtCore/QString>
+#include <QtCore/QVariant>
 
 // Builds the JSON handed to delivery_module.createNode(). Exposed (external
 // linkage) so the swap-module unit tests can assert the fleet cluster override
@@ -227,6 +230,54 @@ QString swapDeliveryConfigJson(const std::string& configJson)
     }
     return QString::fromUtf8(QJsonDocument(cfg).toJson(QJsonDocument::Compact));
 }
+
+// Decodes the `payload` argument of delivery_module's `messageReceived` event
+// into raw message bytes. Exposed (external linkage) so the swap-module unit
+// tests can pin the contract. Returns an empty QByteArray for any shape it
+// does not recognise.
+//
+// The shape changed between delivery_module versions (live incident
+// 2026-08-10: the fleet delivered offers and this adapter silently dropped
+// every one of them by parsing the new shape with the old contract):
+//
+//  * v0.2.0 (typed `logos_events:` codegen) declares
+//    `messageReceived(messageHash tstr, contentTopic tstr, payload bstr,
+//    timestamp int)` (delivery_module.lidl; delivery_module_plugin.h:278) and
+//    emits the RAW payload bytes (delivery_module_plugin.cpp:170). The
+//    generated cdylib events sidecar marshals `bstr` as the canonical tagged
+//    wire form {"_bytes": "<base64url>"} (logos_protocol.h / logos_codec.h),
+//    and every Qt-side hop decodes that back to a **QByteArray**
+//    (logos-cpp-sdk logos_json_convert.cpp, nlohmannToQVariant's
+//    isTaggedBytes branch; re-encoded/decoded losslessly by
+//    qvariantToNlohmann / nlohmannArgsToQVariantList on each transport hop).
+//    So the QVariant that arrives here is a QByteArray holding the raw
+//    message payload — there is NO base64 layer left to strip.
+//
+//  * v0.1.x hand-marshalled the event and emitted the payload as a base64
+//    **QString** (its delivery_module_plugin.cpp:125,
+//    `QString::fromLatin1(payloadBytes.toBase64())`). Kept as a fallback
+//    because it costs three lines — but v0.1.x cannot reach the migrated
+//    fleet anyway (see swapDeliveryConfigJson), so it is strictly legacy.
+//    Decoding is strict (AbortOnBase64DecodingErrors): arbitrary text —
+//    including raw JSON that would "decode" into garbage under Qt's default
+//    lenient mode — is rejected instead of silently corrupted.
+QByteArray swapDeliveryDecodeEventPayload(const QVariant& payloadArg)
+{
+    if (payloadArg.userType() == QMetaType::QByteArray) {
+        // delivery_module >= 0.2.0: raw payload bytes.
+        return payloadArg.toByteArray();
+    }
+    if (payloadArg.userType() == QMetaType::QString) {
+        // delivery_module v0.1.x: base64 text.
+        const auto decoded = QByteArray::fromBase64Encoding(
+            payloadArg.toString().toUtf8(),
+            QByteArray::Base64Encoding | QByteArray::AbortOnBase64DecodingErrors);
+        if (decoded) {
+            return *decoded;
+        }
+    }
+    return {};
+}
 #endif // __has_include(<QtCore/QJsonDocument>)
 
 #if __has_include("logos_api.h") && __has_include("logos_sdk.h") && __has_include("logos_types.h")
@@ -247,6 +298,7 @@ QString swapDeliveryConfigJson(const std::string& configJson)
 #include <QVariant>
 #include <QVariantList>
 
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -254,7 +306,6 @@ QString swapDeliveryConfigJson(const std::string& configJson)
 namespace {
 
 constexpr const char* kOffersTopic = "/atomic-swaps/1/offers/json";
-constexpr qsizetype kMaxEncodedOfferPayloadChars = 96 * 1024;
 constexpr qsizetype kMaxOfferPayloadBytes = 64 * 1024;
 constexpr qsizetype kMaxCachedOffers = 256;
 constexpr qsizetype kMaxCachedSwapEventsPerSwap = 32;
@@ -553,16 +604,38 @@ void wireEventsLocked(DeliveryState& s)
         if (data.size() < 4) return;
 
         const QString contentTopic = data.at(1).toString();
-        const QString encodedPayload = data.at(2).toString();
-        if (encodedPayload.size() > kMaxEncodedOfferPayloadChars) return;
-        const QByteArray decoded = QByteArray::fromBase64(encodedPayload.toUtf8());
-        if (decoded.size() > kMaxOfferPayloadBytes) return;
+        const bool isOffersTopic = contentTopic == QString::fromUtf8(kOffersTopic);
+        // v0.2.0 delivers the payload as raw bytes in a QByteArray; v0.1.x
+        // delivered a base64 QString. swapDeliveryDecodeEventPayload owns
+        // that (unit-tested) contract. Parsing the QByteArray shape with the
+        // old base64-QString code was the 2026-08-10 empty-offer-board bug.
+        const QByteArray decoded = swapDeliveryDecodeEventPayload(data.at(2));
+        if (decoded.isEmpty() || decoded.size() > kMaxOfferPayloadBytes) {
+            if (isOffersTopic) {
+                fprintf(stderr,
+                        "SwapDeliveryAdapter: dropped offers-topic payload "
+                        "(undecodable or oversized payload argument)\n");
+            }
+            return;
+        }
         const auto doc = QJsonDocument::fromJson(decoded);
-        if (!doc.isObject()) return;
+        if (!doc.isObject()) {
+            if (isOffersTopic) {
+                fprintf(stderr,
+                        "SwapDeliveryAdapter: dropped offers-topic payload "
+                        "(payload is not a JSON object)\n");
+            }
+            return;
+        }
 
-        if (contentTopic == QString::fromUtf8(kOffersTopic)) {
+        if (isOffersTopic) {
             QJsonObject offer = filteredOfferFields(doc.object());
-            if (!hasOfferCoreFields(offer)) return;
+            if (!hasOfferCoreFields(offer)) {
+                fprintf(stderr,
+                        "SwapDeliveryAdapter: dropped offers-topic payload "
+                        "(missing required offer fields)\n");
+                return;
+            }
             offer.insert(QStringLiteral("message_hash"), data.at(0).toString());
             offer.insert(QStringLiteral("timestamp_ms"), QDateTime::currentMSecsSinceEpoch());
 
@@ -572,6 +645,15 @@ void wireEventsLocked(DeliveryState& s)
                 st.offers.removeAt(0);
             }
             st.offers.append(offer);
+            // Stable end-to-end reception marker: the basecamp-ui-smoke CI
+            // lane greps the captured host log for this exact substring to
+            // prove a real fleet offer traveled delivery_module ->
+            // adapter -> offer cache (tests/basecamp-ui-smoke.mjs). Change
+            // the wording there too if it ever changes here.
+            fprintf(stderr,
+                    "SwapDeliveryAdapter: offer cached from delivery hash=%s\n",
+                    offer.value(QStringLiteral("message_hash"))
+                        .toString().toUtf8().constData());
             return;
         }
 
