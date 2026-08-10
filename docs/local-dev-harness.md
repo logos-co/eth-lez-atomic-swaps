@@ -140,15 +140,35 @@ This harness is a **thin composition** over scaffold, not a re-port of it.
 
 ---
 
+## Delivery messaging at startup
+
+`swap_ui` auto-starts Delivery when it loads, calling `delivery_module`'s
+`createNode` with the config built by `swapDeliveryConfigJson`
+(`swap-module/src/swap_delivery_adapter.cpp`). That config carries the
+logos.dev fleet's Waku cluster override as a **flat `clusterId`** and nothing
+else: the pinned `delivery_module` (v0.1.1) **rejects** any key it does not
+recognise — its README claims unknown keys are silently ignored, but they are
+not, and extra keys fail `createNode` with *"Unrecognized configuration
+option(s) found: …"* → *"Failed to create Delivery context"* at startup. The
+shard count is left to the preset (already 8 autoshards). `make
+basecamp-ui-smoke` now hard-fails if the host log shows a `createNode` failure,
+so this class can no longer pass CI silently.
+
 ## Limitations — what this does NOT exercise
 
 - **Not the distribution path.** The catalogue, the module manager, signing,
   and release packaging are all bypassed. This tests **module code**, not how a
   user *gets* the module. Use the canary channel / catalogue for that.
-- **Not the pinned basecamp by default.** For speed the harness launches the
-  installed `/Applications` app when it matches, or the scaffold pin when it is
-  already in the Nix store. Force the exact reproducible pin with
-  `--pinned-basecamp` (may trigger a long first-time macOS build).
+- **Provides the scaffold-pinned Basecamp itself.** Delivery is validated only
+  against the pinned bundle, so the harness resolves the launch target in this
+  order: **cached pinned bundle** (a prior run's gc-rooted nix out-link under
+  `~/.eth-lez-dev/cache/`) → **build the pinned bundle** (one-time cold macOS
+  build, ~5–15 min, then cached for instant reuse) → the installed
+  `/Applications` app **only as a last resort**, and only if it is already
+  `>=` the validated version; an older installed app is launched with a loud
+  warning banner. The launched Basecamp version is printed as part of the
+  output. `--installed-app` / `BASECAMP_APP` force the installed app;
+  `--pinned-basecamp` forces the reproducible pin.
 - **No localnet, Anvil, wallet funding, or LEZ sequencer.** This proves the
   modules *load and render*, not that a funded two-peer swap settles. Use
   `make basecamp-ui-smoke`, `make test`, or the two-profile

@@ -2,7 +2,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 const appBin = process.env.BASECAMP_BIN;
@@ -305,6 +305,46 @@ try {
       { timeout: 10000, interval: 300, description: `${tab} tab` },
     );
   }
+
+  // Delivery-context creation must not fail. swap_ui auto-starts messaging at
+  // load (SwapUiPlugin::startBackgroundServices), so a config the delivery
+  // module rejects surfaces here as a createNode failure in the captured host
+  // log. The delivery plugin reports it via qWarning ("Failed to create
+  // Delivery context") — shown by default — so a negative assertion on the log
+  // is reliable regardless of qDebug filtering. This closes the gap that let
+  // PR #120 go green while delivery_module v0.1.1 rejected our config with
+  // "Unrecognized configuration option(s) found: [numShardsInCluster,
+  // messagingOverrides]" and every startup delivery context creation failed.
+  const deliveryLog = join(artifactDir, "basecamp-process.log");
+  const deliveryFailureMarkers = [
+    "Failed to create Delivery context",
+    "Unrecognized configuration option",
+    "createNode callback error",
+  ];
+  const deliverySuccessMarker = "Delivery context created successfully";
+  const deliveryDeadline = Date.now() + 20000;
+  let deliveryLogText = "";
+  let deliveryFailure;
+  let deliverySucceeded = false;
+  while (Date.now() < deliveryDeadline) {
+    try { deliveryLogText = readFileSync(deliveryLog, "utf8"); } catch { deliveryLogText = ""; }
+    deliveryFailure = deliveryFailureMarkers.find((m) => deliveryLogText.includes(m));
+    deliverySucceeded = deliveryLogText.includes(deliverySuccessMarker);
+    if (deliveryFailure || deliverySucceeded) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (deliveryFailure) {
+    throw new Error(
+      `delivery_module createNode failed in the host log (marker: "${deliveryFailure}") — ` +
+      `the config handed to createNode was rejected. See ${deliveryLog}.`,
+    );
+  }
+  // Positive proof is best-effort: the success line is qDebug and may be
+  // filtered out of a release build's log, so its absence is only a soft signal
+  // (the hard gate above is the reliable one).
+  console.log(deliverySucceeded
+    ? "delivery_module createNode succeeded (host log)"
+    : "delivery_module createNode: no failure marker (success marker is qDebug, may be filtered)");
 
   await saveInspectorArtifacts(app, "success");
   console.log("Basecamp-native swap_ui smoke test passed");
