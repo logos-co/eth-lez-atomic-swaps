@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "name": "eth-lez-atomic-swaps-canary",
+  "displayName": "Atomic Swaps CANARY (unstable)",
+  "description": "UNSTABLE branch builds of swap + swap_ui, published by canary-channel.yml minutes after CI compiles them. No version bump, no official release. For internal testing only — never point public testers here.",
+  "homepage": "https://github.com/logos-co/eth-lez-atomic-swaps",
+  "indexUrl": "https://github.com/logos-co/eth-lez-atomic-swaps/releases/download/canary/canary-index.json",
+  "trustedSigners": []
+}
