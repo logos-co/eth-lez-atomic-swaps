@@ -23,8 +23,15 @@ pin = "202af6fa0f0f4493bc59c8a609dff9326f78a18d"
 build = "nix-flake"
 attr = "cli-portable"
 
+# >= v0.2.0 is REQUIRED for the migrated logos.dev fleet (Waku cluster 3):
+# v0.1.x parses a flat `clusterId` but its bundled logos-delivery (509c8755,
+# waku/factory/conf_builder/waku_conf_builder.nim:313-324) unconditionally
+# overwrites it with the preset's cluster 2 — the node lands on the dead
+# cluster and no offers arrive. v0.2.0's logos-delivery (f8b03659) flips the
+# merge order (checkSetPresetValueToField, waku_conf_builder.nim:355-389):
+# an explicit clusterId wins and only the gaps are preset-filled.
 [modules.delivery_module]
-flake = "github:logos-co/logos-delivery-module/v0.1.1#lgx"
+flake = "github:logos-co/logos-delivery-module/v0.2.0#lgx"
 role = "dependency"
 
 [modules.swap]
