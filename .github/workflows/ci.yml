@@ -132,3 +132,5 @@ jobs:
           path: artifacts/basecamp-ui-smoke/
           if-no-files-found: warn
           retention-days: 14
+            extra-substituters = ${{ vars.NIX_CACHE_URL }}
+            extra-trusted-public-keys = ${{ vars.NIX_CACHE_PUBLIC_KEY }}
