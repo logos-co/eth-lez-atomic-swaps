@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
+import SwapLinks
 
 ScrollView {
     id: takerRoot
@@ -9,16 +10,43 @@ ScrollView {
     contentWidth: availableWidth
     background: Rectangle { color: Theme.background }
 
+    // Each step carries a short `hint` — a calm expectation line the stepper
+    // shows under the active step. The multi-minute waits (steps 4/5) are
+    // NORMAL on the LEZ testnet, so the copy says so and reminds the user
+    // their locked ETH auto-refunds if the maker never completes.
     property var takerSteps: [
-        { name: "PreimageGenerated", label: "Generate Preimage" },
-        { name: "LockingEth",        label: "Lock ETH" },
-        { name: "EthLocked",         label: "ETH Locked" },
-        { name: "WaitingForLezLock", label: "Wait for LEZ Lock" },
-        { name: "LezLockDetected",   label: "LEZ Lock Detected" },
-        { name: "VerifyingLezEscrow", label: "Verify LEZ Escrow" },
-        { name: "LezEscrowVerified", label: "LEZ Escrow Verified" },
-        { name: "ClaimingLez",       label: "Claim LEZ" },
-        { name: "LezClaimed",        label: "LEZ Claimed" },
+        { name: "PreimageGenerated", label: "Generate Preimage",
+          hint: "Generating your secret. Nothing is on-chain yet." },
+        { name: "LockingEth",        label: "Lock ETH",
+          hint: "Locking your ETH in the HTLC on Sepolia — usually under a minute." },
+        { name: "EthLocked",         label: "ETH Locked",
+          hint: "Your ETH is locked. If the maker never locks LEZ, it auto-refunds "
+                + "after the timelock — a stalled swap cannot lose your funds." },
+        { name: "WaitingForLezLock", label: "Wait for LEZ Lock",
+          hint: "Waiting for the maker to detect your lock and lock LEZ. Typically "
+                + "1–5 min — LEZ blocks can be a minute or more apart, so a wait "
+                + "here is normal, not stuck. If the maker never locks, your ETH "
+                + "auto-refunds after the timelock." },
+        { name: "LezLockDetected",   label: "LEZ Lock Detected",
+          hint: "Maker locked LEZ. Verifying the escrow terms match your swap." },
+        { name: "VerifyingLezEscrow", label: "Verify LEZ Escrow",
+          hint: "Checking the maker's LEZ escrow (amount, hashlock, timelock). "
+                + "Usually seconds." },
+        { name: "LezEscrowVerified", label: "LEZ Escrow Verified",
+          hint: "Escrow verified. Claiming your LEZ next." },
+        { name: "ClaimingLez",       label: "Claim LEZ",
+          hint: "Claiming your LEZ by revealing the preimage — typically 1–5 min "
+                + "for the LEZ chain to confirm." },
+        { name: "LezClaimed",        label: "LEZ Claimed",
+          hint: "" },
+    ]
+
+    // Steps where the taker's ETH is locked and the maker's completion is
+    // still pending — the window where "am I stuck?" bites and where the
+    // auto-refund reassurance + on-chain lock proof are worth surfacing.
+    readonly property var ethLockedSteps: [
+        "EthLocked", "WaitingForLezLock", "LezLockDetected",
+        "VerifyingLezEscrow", "LezEscrowVerified", "ClaimingLez"
     ]
 
     property var completedSteps: {
@@ -524,6 +552,52 @@ ScrollView {
                         steps: takerSteps
                         currentStep: swapBackend.takerCurrentStep
                         completedSteps: takerRoot.completedSteps
+                    }
+
+                    // Auto-refund reassurance, with a live countdown to the
+                    // ETH timelock. The accepted offer carries the absolute
+                    // eth_timelock the taker adopts at lock time, so this is
+                    // the real deadline. Re-evaluated every second by reading
+                    // the stepper's ticking elapsed counter as a dependency —
+                    // no extra Timer (which, as a direct ScrollView child,
+                    // would break the layout, #113).
+                    Text {
+                        visible: takerRoot.acceptedOffer !== null
+                                 && takerRoot.ethLockedSteps.indexOf(swapBackend.takerCurrentStep) >= 0
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacingSmall
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontCaption
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
+                        text: {
+                            var _tick = takerStepper.activeElapsedSeconds // 1s refresh dep
+                            var remaining = takerRoot.acceptedOffer
+                                ? takerRoot.expiresIn(takerRoot.acceptedOffer.eth_timelock)
+                                : ""
+                            if (remaining === "" || remaining === "expired")
+                                return "Your ETH is safe: it auto-refunds once the ETH "
+                                       + "timelock passes if the maker never completes — "
+                                       + "a stuck swap cannot lose funds."
+                            return "Your ETH is safe: if this stalls, it auto-refunds in ~"
+                                   + remaining + " (ETH timelock) — a stuck swap cannot "
+                                   + "lose funds."
+                        }
+                    }
+
+                    // On-chain lock proof, surfaced mid-swap so a user can
+                    // check the tx on Sepolia themselves instead of wondering
+                    // whether their lock landed. Copy-only + explorer link
+                    // (the receipt-card idiom); only shown once the backend
+                    // has the hash from the EthLocked progress event.
+                    TrustRow {
+                        visible: swapBackend.takerEthLockTx !== ""
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacingSmall
+                        label: "Your ETH lock tx — verify it on-chain"
+                        value: swapBackend.takerEthLockTx
+                        link: Links.ethTx(swapBackend.takerEthLockTx,
+                                          swapBackend.takerEthChainId)
                     }
                 }
             }

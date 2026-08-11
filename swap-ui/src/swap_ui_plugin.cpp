@@ -260,6 +260,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setTakerCurrentStep(QString{});
     setTakerProgressSteps(QStringList{});
     setTakerResultJson(QString{});
+    setTakerEthLockTx(QString{});
+    setTakerEthChainId(0);
 
     setAutoAcceptRunning(false);
     setAutoAcceptJobId(QString{});
@@ -1264,6 +1266,8 @@ void SwapUiPlugin::clearTakerProgress()
     setTakerProgressSteps(QStringList{});
     setTakerCurrentStep(QString{});
     setTakerResultJson(QString{});
+    setTakerEthLockTx(QString{});
+    setTakerEthChainId(0);
 }
 
 void SwapUiPlugin::addMakerProgressStep(const QString& step)
@@ -2340,12 +2344,17 @@ void SwapUiPlugin::captureTakerProgressEvidence(const QString& step,
         m_takerEvidence.insert(QStringLiteral("hashlock"),
                                valueString(data, QStringLiteral("hashlock")));
     } else if (step == QStringLiteral("EthLocked")) {
+        const auto lockTx = valueString(data, QStringLiteral("tx_hash"));
+        const auto chainId = data.value(QStringLiteral("chain_id")).toInt(0);
         m_takerEvidence.insert(QStringLiteral("eth_swap_id"),
                                valueString(data, QStringLiteral("swap_id")));
-        m_takerEvidence.insert(QStringLiteral("eth_lock_tx"),
-                               valueString(data, QStringLiteral("tx_hash")));
+        m_takerEvidence.insert(QStringLiteral("eth_lock_tx"), lockTx);
         m_takerEvidence.insert(QStringLiteral("eth_chain_id"),
-                               data.value(QStringLiteral("chain_id")).toDouble(0));
+                               static_cast<double>(chainId));
+        // Publish the lock proof live so the in-progress stepper can show a
+        // copyable tx line while the maker's LEZ lock is still pending.
+        setTakerEthLockTx(lockTx);
+        setTakerEthChainId(chainId);
     } else if (step == QStringLiteral("LezClaimed")) {
         m_takerEvidence.insert(QStringLiteral("lez_claim_tx"),
                                valueString(data, QStringLiteral("tx_hash")));

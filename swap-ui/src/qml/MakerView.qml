@@ -9,15 +9,30 @@ ScrollView {
     contentWidth: availableWidth
     background: Rectangle { color: Theme.background }
 
+    // Hints render as one calm expectation line under the active step (shared
+    // ProgressStepper). The maker's waits (for the buyer's ETH lock, then for
+    // the buyer's preimage/claim) are the ones that look idle for minutes.
     property var makerSteps: [
-        { name: "WaitingForEthLock", label: "Wait for ETH Lock" },
-        { name: "EthLockDetected",   label: "ETH Lock Detected" },
-        { name: "LezLocking",        label: "Lock LEZ" },
-        { name: "LezLocked",         label: "LEZ Locked" },
-        { name: "WaitingForPreimage", label: "Wait for Preimage" },
-        { name: "PreimageRevealed",  label: "Preimage Revealed" },
-        { name: "ClaimingEth",       label: "Claim ETH" },
-        { name: "EthClaimed",        label: "ETH Claimed" },
+        { name: "WaitingForEthLock", label: "Wait for ETH Lock",
+          hint: "Listening for a buyer to lock ETH. Can sit idle until someone "
+                + "takes your offer — that is normal." },
+        { name: "EthLockDetected",   label: "ETH Lock Detected",
+          hint: "A buyer locked ETH. Preparing to lock your LEZ." },
+        { name: "LezLocking",        label: "Lock LEZ",
+          hint: "Locking your LEZ in escrow — LEZ blocks can be a minute or more "
+                + "apart, so a short wait here is normal." },
+        { name: "LezLocked",         label: "LEZ Locked",
+          hint: "LEZ locked. Waiting for the buyer to claim, which reveals the "
+                + "preimage." },
+        { name: "WaitingForPreimage", label: "Wait for Preimage",
+          hint: "Waiting for the buyer to claim LEZ and reveal the preimage. "
+                + "Typically 1–5 min on the LEZ testnet." },
+        { name: "PreimageRevealed",  label: "Preimage Revealed",
+          hint: "Got the preimage. Claiming the buyer's ETH." },
+        { name: "ClaimingEth",       label: "Claim ETH",
+          hint: "Claiming the buyer's ETH on Sepolia — usually under a minute." },
+        { name: "EthClaimed",        label: "ETH Claimed",
+          hint: "" },
     ]
 
     // Track completed steps based on progress events

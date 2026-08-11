@@ -80,6 +80,11 @@ Item {
         readonly property string takerCurrentStep: root.backend ? root.backend.takerCurrentStep : ""
         readonly property var takerProgressSteps: root.backend ? root.backend.takerProgressSteps : []
         readonly property string takerResultJson: root.backend ? root.backend.takerResultJson : ""
+        // Live ETH-lock proof surfaced mid-swap (see swap_ui.rep). Safe
+        // defaults per the facade contract: an unbridged property reads as
+        // undefined and `x !== ""` would be permanently true.
+        readonly property string takerEthLockTx: root.backend ? root.backend.takerEthLockTx : ""
+        readonly property int takerEthChainId: root.backend ? root.backend.takerEthChainId : 0
 
         readonly property bool autoAcceptRunning: root.backend ? root.backend.autoAcceptRunning : false
         readonly property string autoAcceptJobId: root.backend ? root.backend.autoAcceptJobId : ""
