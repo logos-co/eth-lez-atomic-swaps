@@ -26,8 +26,11 @@ swap-cli --env-file maker.env maker --loop
 The `--loop` heartbeat is served by a **headless Node.js daemon**,
 `offer-publisher/publish-offer.mjs`, that `swap-cli` spawns and supervises. It
 is **not** a website and has no browser/UI code — it connects once to the
-logos.dev delivery fleet over raw TCP (`@waku/sdk` + `@libp2p/tcp`) and
-lightpushes the offer JSON every heartbeat.
+logos.test delivery fleet over raw TCP (`@waku/sdk` + `@libp2p/tcp`) and
+lightpushes the offer JSON every heartbeat. (`logos.test` is the
+stability-guaranteed fleet upstream recommends; the app moved off `logos.dev`
+and its hand-maintained Waku cluster-3 override — see `offer-publisher/fleet.mjs`
+and `docs/local-dev-harness.md`.)
 
 **Why Node and not pure Rust?** The fleet runs `store=false`, so the offer has
 to be re-broadcast on an interval or late-joining subscribers never see it. The

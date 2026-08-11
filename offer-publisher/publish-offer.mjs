@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Heartbeat offer publisher — long-lived sidecar spawned by
-// `swap-cli maker --loop`. Connects once to the logos.dev fleet (TCP, Node.js)
+// `swap-cli maker --loop`. Connects once to the logos.test fleet (TCP, Node.js)
 // and republishes the maker's offer every OFFER_HEARTBEAT_SECS seconds with
 // fresh absolute timelocks. The fleet runs store=false, so republishing is
 // what makes the offer visible to late-joining board viewers.
@@ -70,7 +70,7 @@ const routingInfo = createRoutingInfo(NETWORK_CONFIG, {
 });
 const encoder = createEncoder({ contentTopic: OFFERS_CONTENT_TOPIC, routingInfo });
 
-log(`connecting to logos.dev fleet (heartbeat ${cfg.heartbeatSecs}s)...`);
+log(`connecting to logos.test fleet (heartbeat ${cfg.heartbeatSecs}s)...`);
 const node = await createFleetNode();
 const dialed = await dialFleet(node, log);
 if (dialed === 0) {

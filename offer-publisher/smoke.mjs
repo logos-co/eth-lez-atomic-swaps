@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Smoke test: prove Node.js @waku/sdk connectivity to the logos.dev fleet on
+// Smoke test: prove Node.js @waku/sdk connectivity to the logos.test fleet on
 // the offers channel. Connects over TCP (browser transport is WSS — see the
 // BLOCKED note in README.md), subscribes via filter, publishes a canary offer
 // via lightpush, and asserts the canary comes back through the filter

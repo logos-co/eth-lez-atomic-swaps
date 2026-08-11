@@ -144,9 +144,10 @@ This harness is a **thin composition** over scaffold, not a re-port of it.
 
 `swap_ui` auto-starts Delivery when it loads, calling `delivery_module`'s
 `createNode` with the config built by `swapDeliveryConfigJson`
-(`swap-module/src/swap_delivery_adapter.cpp`). That config carries the
-logos.dev fleet's Waku cluster override as a **flat `clusterId`** and nothing
-else: every shipped `delivery_module` **rejects** any key it does not
+(`swap-module/src/swap_delivery_adapter.cpp`). That config names the
+`logos.test` preset and **nothing else** — no cluster override, because
+logos.test's preset natively carries the right Waku cluster (2). This matters
+because every shipped `delivery_module` **rejects** any key it does not
 recognise — the README claims unknown keys are silently ignored, but they are
 not, and extra keys fail `createNode` with *"Unrecognized configuration
 option(s) found: …"* → *"Failed to create Delivery context"* at startup. The
@@ -154,22 +155,26 @@ shard count is left to the preset (already 8 autoshards). `make
 basecamp-ui-smoke` now hard-fails if the host log shows a `createNode` failure,
 so this class can no longer pass CI silently.
 
-**`delivery_module` >= 0.2.0 is required** (and is what `scaffold.toml` pins).
-The logos.dev fleet migrated to Waku cluster 3 during the 2026-08-07/08
-upgrade window, and only v0.2.0's bundled logos-delivery (`f8b03659`) lets the
-explicit flat `clusterId` win over the preset's cluster 2 — presets fill only
-unset fields (`checkSetPresetValueToField`,
-`logos_delivery/waku/factory/conf_builder/waku_conf_builder.nim:355-389`). On
-v0.1.x (bundled logos-delivery `509c8755`) the same key is parsed and then
-**unconditionally overwritten** by the preset
-(`waku/factory/conf_builder/waku_conf_builder.nim:313-324`, warn *"Cluster id
-was provided alongside a network conf"* `used=2 discarded=3`), so a v0.1.x
-node quietly stays on the dead cluster 2 — `createNode` succeeds, it
-subscribes on `/waku/2/rs/2/<shard>` instead of `/waku/2/rs/3/<shard>`, meshes
-with 0 fleet peers, and no offers ever arrive. Grep the node log for
-`/waku/2/rs/` to tell the two apart definitively (a healthy v0.2.0 node shows
-eight `/waku/2/rs/3/0..7` autoshard subscriptions plus the harmless
-`used=3 discarded=2` preset-conflict warn).
+### Why logos.test (and why the cluster-3 override is gone)
+
+The app targets the **logos.test** fleet on upstream guidance
+(logos-co/logos-delivery-module#84: *"Please use logos.test instead… logos.dev
+is subtle to change at any moment"*). We used to ride **logos.dev**, whose
+preset resolved to Waku cluster 2 — until an unannounced Aug-7/8 re-genesis
+migrated the live fleet to cluster 3. To survive that we forced a **flat
+`clusterId:3`** over the preset in `swapDeliveryConfigJson`, a fragile
+hand-maintained override that only delivery_module >= 0.2.0 honoured (v0.2.0's
+merge order lets an explicit clusterId win; v0.1.x stomped it back to the
+preset's value). logos.test is not moved out from under us, so on it there is
+nothing to override — the app emits the bare preset and the whole cluster-3
+override era, with its `used=3 discarded=2` conflict warnings, is deleted.
+
+**`delivery_module` >= 0.2.0 is still required** (and is what `scaffold.toml`
+pins): its bundled logos-delivery (`f8b03659`) is the version that ships the
+`logos.test` preset at all. A healthy node subscribes on the preset's own
+cluster — grep the node log for `/waku/2/rs/2/0..7` to confirm the eight
+autoshard subscriptions, and expect the offers content topic
+(`/atomic-swaps/1/offers/json`) to land on shard 7, pubsub `/waku/2/rs/2/7`.
 
 ## Limitations — what this does NOT exercise
 

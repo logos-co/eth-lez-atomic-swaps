@@ -1,10 +1,17 @@
 # Offer-publisher sidecar
 
 A **headless Node.js daemon** — not a website — spawned and supervised by the
-liquidity bot (`swap-cli maker --loop`). It connects once to the logos.dev
-delivery fleet (cluster 2, over raw TCP via `@libp2p/tcp`) and **republishes the
-maker's offer** every `OFFER_HEARTBEAT_SECS` seconds with fresh absolute
-timelocks.
+liquidity bot (`swap-cli maker --loop`). It connects once to the logos.test
+delivery fleet (Waku cluster 2, over raw TCP via `@libp2p/tcp`) and
+**republishes the maker's offer** every `OFFER_HEARTBEAT_SECS` seconds with
+fresh absolute timelocks.
+
+> **Fleet:** we target **logos.test**, the stability-guaranteed fleet, per
+> upstream guidance (logos-co/logos-delivery-module#84: *"Please use logos.test
+> instead… logos.dev is subtle to change at any moment"*). We previously used
+> `logos.dev` and had to force it onto Waku cluster 3 by hand after an
+> unannounced re-genesis migrated it there; `logos.test` runs on its own native
+> cluster 2 and is not moved out from under us, so that override is gone.
 
 ## Why a separate Node process (and not pure Rust)
 
@@ -53,5 +60,5 @@ npm run smoke
 ## Files
 
 - `publish-offer.mjs` — the heartbeat sidecar (spawned by `swap-cli maker --loop`).
-- `fleet.mjs` — logos.dev fleet constants + TCP node/dial helpers (Node.js only).
+- `fleet.mjs` — logos.test fleet constants + TCP node/dial helpers (Node.js only).
 - `smoke.mjs` — standalone fleet-connectivity check (`npm run smoke`).
