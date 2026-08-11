@@ -43,6 +43,31 @@ jobs:
           name: canary-status-catalog
           path: canary-status-catalog.json
 
+  # --- Supply-chain fence: no canary build in the OFFICIAL index ------------
+  # Fetches the LIVE official index.json and fails if a canary build ever
+  # appears in it (a 0.99.x sentinel version, or an entry URL on the `canary`
+  # release). The structural fence is the `.lgxc` asset extension in
+  # canary-channel.yml; this leg is the loud backstop that catches a
+  # regression (asset renamed back to `.lgx`, upstream enumerator broadened,
+  # etc.) before a trial user is offered an unstable build. Cheap, network-only.
+  index-fence:
+    name: index-fence (canary not in official index)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run index-fence leg
+        env:
+          CANARY_STATUS_JSON: ${{ github.workspace }}/canary-status-index-fence.json
+        run: bash canary/run-all.sh index-fence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-status-index-fence
+          path: canary-status-index-fence.json
+
   # --- Release content: the latest published .lgx carries the expected code --
   # Complements the catalog leg, which never downloads a byte and therefore
   # cannot see a release cut from a stale ref (it happened twice — see
@@ -192,7 +217,7 @@ jobs:
     # Include localnet-legs so its results are summarized when the opt-in
     # dispatch runs it. `if: always()` keeps the summary running even when that
     # job is skipped (default schedule) or a leg turns the job red.
-    needs: [catalog, release-content, modules, localnet-legs]
+    needs: [catalog, index-fence, release-content, modules, localnet-legs]
     if: always()
     steps:
       - uses: actions/checkout@v4

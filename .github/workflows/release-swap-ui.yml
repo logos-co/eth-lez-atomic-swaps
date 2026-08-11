@@ -21,7 +21,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # PROVENANCE GATE (supply-chain) — identical rationale to release-swap.yml.
+  # release-swap-ui.yml is workflow_dispatch on ANY ref and the reusable
+  # release.yml publishes whatever commit it is dispatched on, so refuse to cut
+  # an official `swap_ui-v<ver>` release unless the dispatched commit is
+  # reachable from origin/master. Proves history membership, not artifact
+  # authenticity — that needs module signing (see SECURITY.md and the PR body).
+  provenance-gate:
+    name: provenance gate (release commit ∈ origin/master)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so merge-base can resolve ancestry
+      - name: Assert dispatched commit is reachable from origin/master
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # Fetch master's tip into FETCH_HEAD (robust regardless of whether
+          # checkout configured an origin/master remote-tracking ref).
+          git fetch --no-tags --quiet origin master
+          if git merge-base --is-ancestor "$SHA" FETCH_HEAD; then
+            echo "OK: $SHA is reachable from origin/master — release may proceed."
+          else
+            echo "::error title=Release provenance::Refusing to release: dispatched commit $SHA (ref '$REF') is NOT reachable from origin/master. Official releases must be built from a commit that has landed on master. Merge it first, then dispatch from master."
+            exit 1
+          fi
+
   release:
+    needs: provenance-gate
     uses: logos-co/logos-modules-release-action/.github/workflows/release.yml@v1
     permissions:
       contents: write

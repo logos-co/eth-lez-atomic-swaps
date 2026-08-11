@@ -20,6 +20,12 @@ name: Canary channel
 #     assets in place, alongside a `canary-index.json` shaped exactly like the
 #     official index.json. Testers add logos-repo-canary.json as a SECOND
 #     Basecamp repository and update from it. Never point public testers here.
+#   * Assets are published with the `.lgxc` extension, NOT `.lgx` — a structural
+#     fence so the official rebuild-index (which slurps every `.lgx` asset off
+#     every non-draft release on this repo) cannot enumerate a canary build into
+#     the official index.json. See the "Package the canary asset" step and
+#     canary/README.md ("Fenced from the official catalogue"). The guard
+#     canary/leg-index-fence.sh fails loudly if a canary asset ever leaks in.
 #
 # VERSION SCHEME — SENTINEL, NOT SEMVER-PRERELEASE. The published version is
 # `0.99.<run-number>`. This is deliberately a plain dotted-integer string, not a
@@ -233,9 +239,22 @@ jobs:
             --module "${{ matrix.logical }}" \
             --manifest-name "${{ matrix.logical }}"
 
-      # Package like a release asset (a plain .lgx), but name it to carry
-      # module + platform + shortsha so the rolling release can hold many at
-      # once without collision.
+      # Package like a release asset, but name it to carry module + platform +
+      # shortsha so the rolling release can hold many at once without collision.
+      #
+      # SUPPLY-CHAIN FENCE — the extension is `.lgxc`, NOT `.lgx`, ON PURPOSE.
+      # The official catalogue's rebuild-index.yml delegates to
+      # logos-modules-release-action's reusable rebuild-index, which walks EVERY
+      # non-draft release on this repo (only the rolling `index` tag is skipped)
+      # and collects assets matching `.name | endswith(".lgx")`. The `canary`
+      # prerelease is neither a draft nor `index`, so a `.lgx` asset here would be
+      # slurped into the OFFICIAL index.json — exactly the 0.99.x leak this PR
+      # closes. Naming the asset `.lgxc` makes the official enumerator's
+      # `endswith(".lgx")` filter skip it structurally, while Basecamp still
+      # installs it fine: the canary-index.json entry carries the full download
+      # URL and Basecamp verifies the bytes by sha256/manifest, not by extension.
+      # DO NOT rename this back to `.lgx`. canary/leg-index-fence.sh is the loud
+      # backstop that fails CI if a canary asset ever reaches the official index.
       - name: Package the canary asset
         id: pkg
         shell: bash
@@ -243,7 +262,7 @@ jobs:
           set -euo pipefail
           stage="$RUNNER_TEMP/canary-out"
           mkdir -p "$stage"
-          asset="${{ matrix.logical }}-canary-${{ matrix.variant }}-${SHORTSHA}.lgx"
+          asset="${{ matrix.logical }}-canary-${{ matrix.variant }}-${SHORTSHA}.lgxc"
           cp "${{ steps.build.outputs.lgx }}" "$stage/$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
           echo "stage=$stage" >> "$GITHUB_OUTPUT"
@@ -325,15 +344,16 @@ jobs:
           echo "--- canary-index.json ---"
           python3 -m json.tool canary-index.json
 
-      - name: Upload .lgx assets + index to the `canary` release
+      - name: Upload .lgxc assets + index to the `canary` release
         shell: bash
         run: |
           set -euo pipefail
-          # Replace same-named assets in place (--clobber). The .lgx assets carry
-          # the shortsha, so distinct SHAs accumulate; canary-index.json is
-          # always overwritten to point at the newest set.
+          # Replace same-named assets in place (--clobber). The `.lgxc` assets
+          # (canary-fenced extension — see the packaging step) carry the shortsha,
+          # so distinct SHAs accumulate; canary-index.json is always overwritten
+          # to point at the newest set.
           shopt -s nullglob
-          assets=(dl/*.lgx canary-index.json)
+          assets=(dl/*.lgxc canary-index.json)
           echo "Uploading: ${assets[*]}"
           gh release upload canary "${assets[@]}" \
             --repo "${{ github.repository }}" --clobber
@@ -356,7 +376,7 @@ jobs:
             echo
             echo "### Assets published"
             echo '```'
-            (cd dl && ls -1 *.lgx 2>/dev/null || echo "(no .lgx — check the build job)")
+            (cd dl && ls -1 *.lgxc 2>/dev/null || echo "(no .lgxc — check the build job)")
             echo '```'
             echo
             echo "### Install in Basecamp"
