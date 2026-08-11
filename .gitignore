@@ -7,6 +7,12 @@ build-*/
 .env
 .env.taker
 deploy/.env
+# Per-maker env files hold LIVE private keys (ETH + LEZ). The docs claim these
+# are ignored — enforce it. Keep only the example committed.
+deploy/maker.env
+deploy/maker*.env
+deploy/taker.env
+!deploy/maker.env.example
 
 # Maker crash-recovery journal (src/cli/maker.rs MAKER_STATE_FILE) and any
 # status file the bot writes — CWD-relative by default, so a repo checkout
