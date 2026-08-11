@@ -13,7 +13,7 @@
 #include <vector>
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
-int swapDeliveryParsePeerCount(const std::string& raw);
+int swapDeliveryParsePeerCountFromMetrics(const std::string& metricsText);
 QString swapDeliveryConfigJson(const std::string& configJson);
 QByteArray swapDeliveryDecodeEventPayload(const QVariant& payloadArg);
 
@@ -135,49 +135,102 @@ LOGOS_TEST(messaging_status_uses_delivery_backend_shape) {
     LOGOS_ASSERT_CONTAINS(status, R"("peer_count_known":false)");
 }
 
-// getNodeInfo returns node-info items as strings of JSON-serializable data;
-// the peer-count parser must accept every plausible encoding and refuse to
-// invent a count from garbage (returning -1 = unknown, never a fake 0).
-LOGOS_TEST(delivery_peer_count_parses_bare_and_wrapped_numbers) {
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("3"), 3);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(" 12 \n"), 12);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("\"7\""), 7);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("0"), 0);
+// The fleet peer count is read from a delivery_module getNodeInfo("Metrics")
+// body — Prometheus /metrics text. The parser sums the relay-protocol series
+// of the source-verified logos_delivery_connected_peers gauge (In+Out =
+// distinct relay peers; relay/gossipsub carries offers in Core mode) and
+// refuses to invent a count from anything else (returning -1 = unknown, never
+// a fake 0). A realistic registry body carries # HELP/# TYPE comments,
+// unrelated metric families, and sibling families whose names share the
+// prefix — none of which may be mistaken for the relay peer count.
+namespace {
+const char* const kMetricsSample =
+    "# HELP logos_delivery_node_messages Number of messages\n"
+    "# TYPE logos_delivery_node_messages counter\n"
+    "logos_delivery_node_messages_total 41.0\n"
+    "# HELP logos_delivery_connected_peers Number of physical connections per direction and protocol\n"
+    "# TYPE logos_delivery_connected_peers gauge\n"
+    "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} 3.0\n"
+    "logos_delivery_connected_peers{direction=\"Out\",protocol=\"/vac/waku/relay/2.0.0\"} 5.0\n"
+    // Non-relay protocol series must NOT be counted as relay peers.
+    "logos_delivery_connected_peers{direction=\"Out\",protocol=\"/vac/waku/store/3.0.0\"} 9.0\n"
+    // Sibling families that share the prefix / a protocol label must NOT match.
+    "logos_delivery_connected_peers_per_shard{shard=\"5\"} 2.0\n"
+    "logos_delivery_streams_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} 7.0\n"
+    "# TYPE logos_delivery_peer_store_size gauge\n"
+    "logos_delivery_peer_store_size 40.0\n";
+} // namespace
+
+LOGOS_TEST(delivery_metrics_peer_count_sums_relay_connections) {
+    // 3 In + 5 Out relay connections = 8 distinct relay peers; the store-proto
+    // series, the _per_shard sibling, and streams_peers are all ignored.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(kMetricsSample), 8);
 }
 
-LOGOS_TEST(delivery_peer_count_counts_json_array_elements) {
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[]"), 0);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[ ]"), 0);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"(["16Uiu2HAm","16Uiu2HAn"])"), 2);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"([{"peerId":"a"},{"peerId":"b"},{"peerId":"c"}])"), 3);
-    // Nested structures and escaped/comma-bearing strings must not skew the
-    // top-level element count.
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"([["a","b"],["c"]])"), 2);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"(["with,comma","with\"quote"])"), 2);
+LOGOS_TEST(delivery_metrics_peer_count_handles_label_order_and_int_values) {
+    // protocol label may precede direction, and nim-metrics may render a bare
+    // integer (no ".0") — both must parse.
+    const std::string body =
+        "logos_delivery_connected_peers{protocol=\"/vac/waku/relay/2.0.0\",direction=\"In\"} 2\n"
+        "logos_delivery_connected_peers{protocol=\"/vac/waku/relay/2.0.0\",direction=\"Out\"} 4\n";
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(body), 6);
 }
 
-LOGOS_TEST(delivery_peer_count_rejects_garbage_as_unknown) {
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(""), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("   "), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("waku"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("-1"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("3 peers"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1,2"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"({"peerCount":3})"), -1);
+LOGOS_TEST(delivery_metrics_peer_count_zero_when_relay_series_present_but_empty) {
+    // A live node meshed with nobody publishes the relay series as 0 — a
+    // CONFIRMED zero (the fleet-isolation signal), not "unknown".
+    const std::string body =
+        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} 0.0\n"
+        "logos_delivery_connected_peers{direction=\"Out\",protocol=\"/vac/waku/relay/2.0.0\"} 0.0\n";
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(body), 0);
 }
 
-LOGOS_TEST(delivery_peer_count_rejects_malformed_arrays_and_out_of_range) {
-    // Trailing / empty-segment commas must not be counted as elements.
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1,]"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[,1]"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1,,2]"), -1);
-    // Mismatched delimiters are malformed, not countable.
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("[1}"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount(R"([{"a":1]])"), -1);
-    // int-range boundary: INT_MAX parses, anything above reads as unknown.
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("2147483647"), 2147483647);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("2147483648"), -1);
-    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCount("99999999999999999999"), -1);
+LOGOS_TEST(delivery_metrics_peer_count_unknown_when_relay_series_absent) {
+    // No relay connected-peers series at all (e.g. the metrics heartbeat has
+    // not run yet, or only non-relay protocols are connected) → unknown (-1),
+    // never a fabricated 0 that would trip the isolation alarm.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(""), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics("   \n\t\n"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics("not prometheus text at all"), -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_peer_store_size 40.0\n"), -1);
+    // Right family, but only non-relay protocols are connected.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/store/3.0.0\"} 9.0\n"),
+                    -1);
+    // Prefix-sibling families alone must not be read as the relay peer count.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers_per_shard{shard=\"5\"} 2.0\n"),
+                    -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_streams_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} 7.0\n"),
+                    -1);
+}
+
+LOGOS_TEST(delivery_metrics_peer_count_rejects_garbage_values) {
+    // A relay series whose value is not a clean finite non-negative number is
+    // not a countable reading — skipped, so a body with only garbage is
+    // unknown (-1), not 0.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} NaN\n"),
+                    -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} 3peers\n"),
+                    -1);
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} -2\n"),
+                    -1);
+    // A malformed (unterminated) label block yields no value → unknown.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\" 3.0\n"),
+                    -1);
+    // A good relay series alongside a garbage one still counts the good one
+    // (Prometheus bodies are line-oriented; one bad line must not poison the
+    // whole scrape), and an optional trailing timestamp is ignored.
+    LOGOS_ASSERT_EQ(swapDeliveryParsePeerCountFromMetrics(
+                        "logos_delivery_connected_peers{direction=\"In\",protocol=\"/vac/waku/relay/2.0.0\"} 4.0 1699999999000\n"
+                        "logos_delivery_connected_peers{direction=\"Out\",protocol=\"/vac/waku/relay/2.0.0\"} bogus\n"),
+                    4);
 }
 
 LOGOS_TEST(delivery_messaging_requires_runtime_before_init_or_publish) {
