@@ -19,13 +19,15 @@ std::string swapDeliveryPublishOffer(const std::string& configJson);
 std::string swapDeliveryFetchOffers();
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
 
-// Parse a delivery_module getNodeInfo peer-count result into a count.
-// liblogosdelivery returns node-info items as strings of JSON-serializable
-// data, so a count can arrive as a bare number ("3"), a JSON-encoded number
-// or numeric string ("\"3\""), or a JSON array of peer descriptors (counted).
-// Returns -1 when the payload is not a recognizable count. Pure — exposed
-// for unit tests (built in both the real and the header-less branch).
-int swapDeliveryParsePeerCount(const std::string& raw);
+// Sum the live relay-peer count out of a delivery_module
+// getNodeInfo("Metrics") body (Prometheus /metrics text). The count comes from
+// the logos_delivery_connected_peers gauge, restricted to the Waku relay
+// protocol series (relay/gossipsub carries offers in Core mode) — see the
+// source citation in swap_delivery_adapter.cpp. Returns the summed relay-peer
+// count (>= 0), or -1 when no relay connected-peers series is present (e.g. the
+// metrics heartbeat has not run yet) or the text is not parseable metrics.
+// Pure — exposed for unit tests (built in both the real and header-less branch).
+int swapDeliveryParsePeerCountFromMetrics(const std::string& metricsText);
 
 // Per-swap coordination on /atomic-swaps/1/swap-<hashlock>/json.
 // Used by the maker to subscribe upon learning the hashlock (via on-chain

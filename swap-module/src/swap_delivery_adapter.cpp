@@ -1,5 +1,6 @@
 #include "swap_delivery_adapter.h"
 
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -34,41 +35,88 @@ std::string jsonError(const std::string& message)
 
 } // namespace
 
-// Deliberately Qt-free (like swapDeliveryEthAmountToWei's fallback twin) so it
-// compiles identically in the header-less test build and stays a pure,
-// unit-testable function.
-int swapDeliveryParsePeerCount(const std::string& raw)
+// Sum the fleet's live relay-peer count out of a delivery_module
+// getNodeInfo("Metrics") body (a Prometheus /metrics text exposition).
+//
+// Source-verified metric choice (delivery_module v0.2.0's pinned lib,
+// logos_delivery/waku/node/peer_manager/peer_manager.nim):
+//
+//   declarePublicGauge logos_delivery_connected_peers,
+//     "Number of physical connections per direction and protocol",
+//     labels = ["direction", "protocol"]                              (:40-42)
+//
+// It is set every metrics heartbeat to the current physical connection count
+// per (direction, protocol) — logos_delivery_connected_peers.set(
+//   protoConnsIn.len, [In, proto]) / (protoConnsOut.len, [Out, proto]) at
+// :896-902. We sum only the series whose protocol label is the Waku relay
+// codec ("/vac/waku/relay/2.0.0", logos_delivery/waku/waku_core/codecs.nim:2)
+// because relay/gossipsub is what carries offers in Core mode; In and Out
+// partition the connected peers (a connection is inbound xor outbound), so the
+// In+Out sum is the distinct relay-peer count — and it is exactly 0 iff the
+// node is meshed with nobody, which is the fleet-isolation failure this probe
+// exists to surface. (We do NOT use libp2p's own connmanager gauge: libp2p is
+// not vendored in the pinned lib, so its metric name is not source-citable —
+// and waku_metrics.nim:30-31 notes "libp2p_pubsub_peers is not public".)
+//
+// Chosen over the alternatives in the same registry: total_unique_peers is a
+// monotonic inc() counter (never decremented, so useless as current state);
+// peer_store_size counts every known peer including disconnected ones (so it
+// would hide isolation); the base logos_delivery_connected_peers summed across
+// ALL protocols would count a peer once per protocol it speaks (an overcount
+// the UI would render as inflated "fleet peers").
+//
+// NodeInfoId.Metrics returns defaultRegistry.toText()
+// (logos_delivery/waku/factory/waku_state_info.nim) — standard Prometheus text:
+// `# HELP`/`# TYPE` comment lines, then `name{label="v",...} value [ts]` sample
+// lines. Returns the summed count (>= 0) when at least one relay
+// connected-peers series is present, or -1 (unknown) when the family is absent
+// (e.g. the very first heartbeat has not run yet) or the body is not parseable
+// metrics text. Deliberately Qt-free (like swapDeliveryEthAmountToWei's
+// fallback twin) so it compiles identically in the header-less test build and
+// stays a pure, unit-testable function.
+int swapDeliveryParsePeerCountFromMetrics(const std::string& metricsText)
 {
-    const auto first = raw.find_first_not_of(" \t\n\r");
-    if (first == std::string::npos) {
-        return -1;
-    }
-    const auto last = raw.find_last_not_of(" \t\n\r");
-    std::string s = raw.substr(first, last - first + 1);
+    static const std::string kMetric = "logos_delivery_connected_peers";
 
-    // getNodeInfo returns "a UTF-16 string containing UTF-8 serializable JSON
-    // data" — a bare count may arrive wrapped as a JSON string ("\"3\"").
-    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
-        s = s.substr(1, s.size() - 2);
-    }
-    if (s.empty()) {
-        return -1;
-    }
+    long long total = 0;
+    bool found = false;
 
-    // JSON array of peer descriptors: count its top-level elements. Strict
-    // enough to refuse malformed input (mismatched delimiters, trailing or
-    // empty-segment commas) rather than invent a count from it.
-    if (s.front() == '[') {
-        if (s.back() != ']') {
-            return -1;
+    std::size_t pos = 0;
+    const std::size_t n = metricsText.size();
+    while (pos < n) {
+        std::size_t eol = metricsText.find('\n', pos);
+        if (eol == std::string::npos) {
+            eol = n;
         }
-        std::string openers; // matching-delimiter stack ('[' / '{')
+        std::string line = metricsText.substr(pos, eol - pos);
+        pos = eol + 1;
+
+        // Trim leading blanks; skip empty and `#` HELP/TYPE comment lines.
+        const auto ls = line.find_first_not_of(" \t\r");
+        if (ls == std::string::npos || line[ls] == '#') {
+            continue;
+        }
+        line = line.substr(ls);
+
+        // Metric name = everything up to the label brace or a blank. Match the
+        // family name EXACTLY: "logos_delivery_connected_peers_per_shard" and
+        // "logos_delivery_streams_peers" (also protocol-labelled) must not be
+        // mistaken for it.
+        const auto nameEnd = line.find_first_of("{ \t");
+        if (nameEnd == std::string::npos || line[nameEnd] != '{') {
+            continue; // this gauge is always label-qualified
+        }
+        if (line.compare(0, nameEnd, kMetric) != 0) {
+            continue;
+        }
+
+        // Walk the label block, honouring quoted strings, to its closing `}`.
+        std::size_t i = nameEnd + 1;
         bool inString = false;
         bool escaped = false;
-        bool anyContent = false;        // any element content at all
-        bool segmentHasContent = false; // content since the last top-level comma
-        int commas = 0;
-        for (char c : s) {
+        std::size_t labelEnd = std::string::npos;
+        for (; i < line.size(); ++i) {
+            const char c = line[i];
             if (inString) {
                 if (escaped) {
                     escaped = false;
@@ -77,61 +125,65 @@ int swapDeliveryParsePeerCount(const std::string& raw)
                 } else if (c == '"') {
                     inString = false;
                 }
-                continue;
-            }
-            const std::size_t depth = openers.size();
-            if (c == '"') {
+            } else if (c == '"') {
                 inString = true;
-                anyContent = true;
-                segmentHasContent = true;
-            } else if (c == '[' || c == '{') {
-                if (depth >= 1) {
-                    anyContent = true;
-                    segmentHasContent = true;
-                }
-                openers.push_back(c);
-            } else if (c == ']' || c == '}') {
-                if (openers.empty()
-                    || (c == ']' && openers.back() != '[')
-                    || (c == '}' && openers.back() != '{')) {
-                    return -1; // mismatched delimiter, e.g. "[1}"
-                }
-                openers.pop_back();
-            } else if (depth == 1) {
-                if (c == ',') {
-                    if (!segmentHasContent) {
-                        return -1; // empty segment, e.g. "[,1]" or "[1,,2]"
-                    }
-                    ++commas;
-                    segmentHasContent = false;
-                } else if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
-                    anyContent = true;
-                    segmentHasContent = true;
-                }
+            } else if (c == '}') {
+                labelEnd = i;
+                break;
             }
         }
-        if (!openers.empty() || inString) {
-            return -1;
+        if (labelEnd == std::string::npos) {
+            continue;
         }
-        if (commas > 0 && !segmentHasContent) {
-            return -1; // trailing comma, e.g. "[1,]"
+        const std::string labels = line.substr(nameEnd + 1, labelEnd - (nameEnd + 1));
+
+        // Keep only the relay-protocol series (see the codec citation above).
+        const std::string protoKey = "protocol=\"";
+        const auto pk = labels.find(protoKey);
+        if (pk == std::string::npos) {
+            continue;
         }
-        return anyContent ? commas + 1 : 0;
+        const auto protoStart = pk + protoKey.size();
+        const auto protoEnd = labels.find('"', protoStart);
+        if (protoEnd == std::string::npos) {
+            continue;
+        }
+        if (labels.compare(protoStart, protoEnd - protoStart,
+                           "/vac/waku/relay/2.0.0")
+            != 0) {
+            continue;
+        }
+
+        // Value = the first whitespace-delimited token after `}` (an optional
+        // trailing timestamp, if any, is ignored).
+        const auto vs = line.find_first_not_of(" \t", labelEnd + 1);
+        if (vs == std::string::npos) {
+            continue;
+        }
+        const auto ve = line.find_first_of(" \t", vs);
+        const std::string valueStr =
+            line.substr(vs, ve == std::string::npos ? std::string::npos : ve - vs);
+
+        try {
+            std::size_t consumed = 0;
+            const double value = std::stod(valueStr, &consumed);
+            if (consumed != valueStr.size() || !std::isfinite(value) || value < 0) {
+                continue; // trailing junk / NaN / negative → not a clean gauge
+            }
+            total += static_cast<long long>(value + 0.5);
+            found = true;
+        } catch (...) {
+            continue;
+        }
     }
 
-    // Bare (or string-wrapped) non-negative integer; anything outside the
-    // int range is unrepresentable and reads as unknown.
-    std::size_t consumed = 0;
-    try {
-        const long long value = std::stoll(s, &consumed, 10);
-        if (consumed != s.size() || value < 0
-            || value > static_cast<long long>(std::numeric_limits<int>::max())) {
-            return -1;
-        }
-        return static_cast<int>(value);
-    } catch (...) {
+    if (!found) {
         return -1;
     }
+    if (total > static_cast<long long>(std::numeric_limits<int>::max())) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(total);
 }
 
 // logos.dev fleet Waku network parameters (2026-08 migration). The fleet was
@@ -312,20 +364,32 @@ constexpr qsizetype kMaxCachedSwapEventsPerSwap = 32;
 constexpr qsizetype kMaxTrackedSwaps = 64;
 
 // Fleet peer probing. messagingStatus() is polled every 2s by swap_ui; the
-// remote getNodeInfo round trip is throttled to this interval so status stays
-// cheap while the peer count stays fresh enough to notice isolation.
+// remote getNodeInfo("Metrics") round trip is throttled to this interval so
+// status stays cheap while the peer count stays fresh enough to notice
+// isolation.
 constexpr qint64 kPeerProbeIntervalMs = 5000;
 // After the probe is flagged unsupported (an out-of-date delivery_module
 // without the node-info API), retry only occasionally — every poll would just
 // burn a CALLBACK_TIMEOUT wait each time.
 constexpr qint64 kPeerProbeUnsupportedRetryMs = 60 * 1000;
-// Consecutive probe failures before concluding the installed delivery_module
-// simply lacks the API (as opposed to a transient hiccup).
+// Consecutive Metrics-call failures before concluding the installed
+// delivery_module simply lacks the node-info API (as opposed to a transient
+// hiccup). Only a FAILED getNodeInfo("Metrics") counts here — a call that
+// succeeds but has not published a relay-peer series yet is "unknown", not a
+// failure (see probeFleetPeers).
 constexpr int kPeerProbeFailureLimit = 3;
-// A confirmed zero-peer reading only raises the isolation hint after this
-// long since start(): dialing the fleet bootstrap takes a while, and "0
-// peers" in the first seconds of a healthy startup is normal, not isolation.
-constexpr qint64 kZeroPeerAlarmGraceMs = 45 * 1000;
+// The peer-count source, logos_delivery_connected_peers, is refreshed only
+// once per delivery-node metrics heartbeat — LogAndMetricsInterval = 5 minutes
+// (peer_manager.nim:83, verified in the pinned lib). So a freshly started node
+// that is still dialing when the first heartbeat samples it can read 0 relay
+// peers and stay frozen at 0 until the next heartbeat up to ~5 min later. To
+// avoid alarming a healthy-but-still-connecting node, the zero-peer isolation
+// hint only fires once a confirmed 0 has outlived one full refresh cycle plus
+// a dialing allowance. A genuinely isolated node (stale module pinned to the
+// dead cluster 2) reads 0 at every heartbeat, so it still alarms — just after
+// this grace rather than within seconds.
+constexpr qint64 kPeerMetricsRefreshMs = 5 * 60 * 1000;
+constexpr qint64 kZeroPeerAlarmGraceMs = kPeerMetricsRefreshMs + 45 * 1000;
 
 struct DeliveryState {
     std::mutex operationMutex;
@@ -704,13 +768,27 @@ std::string logosError(const QString& op, const LogosResult& result)
 //
 // Why this API: the module dependency schema has no version constraints
 // (liblogos DependencyResolver resolves plain names only), so an out-of-date
-// delivery_module cannot be rejected at load time. At runtime the module
-// exposes getNodeInfo IDs including relayPeerCount / peerCount (verified
-// against liblogosdelivery and delivery-module v0.1.1's Q_INVOKABLE surface;
-// the plugin's own version() is NOT remotely invokable). So:
-//  - a healthy module answers with a live count → zero-peer fleet isolation
-//    becomes visible instead of hiding behind "Delivery connected";
-//  - a months-old module fails the call entirely → flagged as out of date.
+// delivery_module cannot be rejected at load time. At runtime we read the
+// node's own Prometheus registry via getNodeInfo("Metrics") — a real
+// NodeInfoId in the pinned lib (logos_delivery/waku/factory/
+// waku_state_info.nim, which returns defaultRegistry.toText()) — and sum the
+// relay connected-peers gauge out of it (swapDeliveryParsePeerCountFromMetrics).
+// So:
+//  - a healthy module answers Metrics and the relay-peer sum > 0 → connected;
+//  - a healthy-but-isolated module answers Metrics but the relay-peer sum is 0
+//    → zero-peer fleet isolation becomes visible instead of hiding behind
+//    "Delivery connected";
+//  - a months-old module that predates the node-info API fails the Metrics
+//    call entirely → flagged as out of date.
+//
+// (History: this probe used to call getNodeInfo("relayPeerCount") with a
+// "peerCount" fallback. Those IDs never existed in ANY delivery_module — the
+// real NodeInfoId vocabulary is Version/Metrics/MyMultiaddresses/MyENR/
+// MyPeerId/MyBoundPorts/MyMixPubKey/MaxMessageSize — so parseEnum rejected them
+// and every probe failed. That tripped kPeerProbeFailureLimit on every healthy
+// node, pinning the UI to a permanent "Delivery degraded" banner even while
+// offers arrived. The getNodeInfo *method* was real; only the requested IDs
+// were fictional.)
 void probeFleetPeers()
 {
     DeliveryState& s = state();
@@ -748,25 +826,22 @@ void probeFleetPeers()
         return;
     }
 
-    // relayPeerCount = gossipsub mesh peers, i.e. what actually carries
-    // offers in Core mode; fall back to the total peerCount for
-    // liblogosdelivery builds that don't expose the relay item.
+    // Read the node's Prometheus registry and sum the relay connected-peers
+    // gauge out of it. A SUCCESSFUL Metrics call proves the module supports the
+    // node-info API (so it is not "out of date"), even before it has published
+    // a relay-peer series — that early window reads as count -1 (unknown), not
+    // as a probe failure.
+    bool metricsAnswered = false;
     int count = -1;
-    const LogosResult relay =
-        modules->delivery_module.getNodeInfo(QStringLiteral("relayPeerCount"));
-    if (relay.success) {
-        count = swapDeliveryParsePeerCount(relay.getString().toStdString());
-    }
-    if (count < 0) {
-        const LogosResult total =
-            modules->delivery_module.getNodeInfo(QStringLiteral("peerCount"));
-        if (total.success) {
-            count = swapDeliveryParsePeerCount(total.getString().toStdString());
-        }
+    const LogosResult metrics =
+        modules->delivery_module.getNodeInfo(QStringLiteral("Metrics"));
+    if (metrics.success) {
+        metricsAnswered = true;
+        count = swapDeliveryParsePeerCountFromMetrics(metrics.getString().toStdString());
     }
 
     QString version;
-    if (count >= 0 && needVersion) {
+    if (metricsAnswered && needVersion) {
         const LogosResult v = modules->delivery_module.getNodeInfo(QStringLiteral("Version"));
         if (v.success) {
             version = v.getString().trimmed();
@@ -774,7 +849,10 @@ void probeFleetPeers()
     }
 
     std::lock_guard<std::recursive_mutex> lock(s.mutex);
-    if (count >= 0) {
+    if (metricsAnswered) {
+        // The module answered — it has the node-info API. count may still be -1
+        // (relay-peer series not published yet), which surfaces as "peer count
+        // unknown", not as fleet isolation.
         s.fleetPeerCount = count;
         s.peerProbeFailures = 0;
         s.peerInfoUnsupported = false;
@@ -789,6 +867,8 @@ void probeFleetPeers()
             }
         }
     } else {
+        // getNodeInfo("Metrics") itself failed — treat as a module predating
+        // the node-info API once it has failed kPeerProbeFailureLimit times.
         s.fleetPeerCount = -1;
         if (++s.peerProbeFailures >= kPeerProbeFailureLimit) {
             s.peerInfoUnsupported = true;
@@ -976,8 +1056,8 @@ std::string swapDeliveryMessagingStatus()
             // logos.dev fleet needs delivery_module >= 0.2.0 (older builds are
             // preset-pinned to the dead cluster 2 — see swapDeliveryConfigJson).
             hint = QStringLiteral(
-                "delivery_module did not answer its peer-count check — offers "
-                "may not be arriving. The logos.dev fleet requires "
+                "delivery_module did not answer its node-info metrics query — "
+                "offers may not be arriving. The logos.dev fleet requires "
                 "delivery_module >= 0.2.0; install the update from the module "
                 "manager and restart Basecamp.");
         } else if (s.fleetPeerCount == 0
