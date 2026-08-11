@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // External liveness check: subscribes to /atomic-swaps/1/offers/json on the
-// logos.dev fleet and prints each offer as it arrives, with its age since
+// logos.test fleet and prints each offer as it arrives, with its age since
 // the offer's own `lez_timelock`/`eth_timelock` fields imply it was minted.
 //
 // Run this from OUTSIDE the machine hosting the maker (your laptop, not the

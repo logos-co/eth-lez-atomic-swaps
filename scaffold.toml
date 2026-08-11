@@ -23,13 +23,18 @@ pin = "202af6fa0f0f4493bc59c8a609dff9326f78a18d"
 build = "nix-flake"
 attr = "cli-portable"
 
-# >= v0.2.0 is REQUIRED for the migrated logos.dev fleet (Waku cluster 3):
-# v0.1.x parses a flat `clusterId` but its bundled logos-delivery (509c8755,
-# waku/factory/conf_builder/waku_conf_builder.nim:313-324) unconditionally
-# overwrites it with the preset's cluster 2 — the node lands on the dead
-# cluster and no offers arrive. v0.2.0's logos-delivery (f8b03659) flips the
-# merge order (checkSetPresetValueToField, waku_conf_builder.nim:355-389):
-# an explicit clusterId wins and only the gaps are preset-filled.
+# >= v0.2.0 is REQUIRED for the logos.test fleet: its bundled logos-delivery
+# (f8b03659) is the version that carries the `logos.test` preset, and that
+# preset natively resolves to logos.test's Waku cluster (2) with the fleet's
+# entry nodes and 8 autoshards — so the app injects no cluster override at all
+# (see swap-module/src/swap_delivery_adapter.cpp).
+#
+# We target logos.test on upstream guidance (logos-co/logos-delivery-module#84:
+# "Please use logos.test instead… logos.dev is subtle to change at any moment").
+# The previous logos.dev era needed this same >= 0.2.0 floor for a different
+# reason — a re-genesis had moved logos.dev to cluster 3 and only v0.2.0's
+# merge order (checkSetPresetValueToField, waku_conf_builder.nim:355-389) let
+# our forced flat clusterId win over the preset. That override is gone now.
 [modules.delivery_module]
 flake = "github:logos-co/logos-delivery-module/v0.2.0#lgx"
 role = "dependency"

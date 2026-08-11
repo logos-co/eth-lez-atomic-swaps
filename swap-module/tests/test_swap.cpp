@@ -192,41 +192,34 @@ LOGOS_TEST(delivery_eth_amount_decimal_normalizes_to_wei) {
     LOGOS_ASSERT_EQ(swapDeliveryEthAmountToWei("0.00000000000000001"), std::string("10"));
 }
 
-// The logos.dev fleet migrated Waku cluster 2 -> 3. deliveryConfig must force
-// cluster 3 over the still-cluster-2 preset with the flat `clusterId` key ONLY.
-// Source-verified against delivery_module v0.2.0 (bundled logos-delivery
-// f8b03659): the flat blob parses via parseFlatConf
-// (logos_delivery/api/conf/logos_delivery_conf_json.nim:58-100) and the
-// EXPLICIT clusterId beats the preset's cluster 2 — presets only fill unset
-// fields (checkSetPresetValueToField, logos_delivery/waku/factory/
-// conf_builder/waku_conf_builder.nim:355-389) — landing the node on
-// /waku/2/rs/3/<shard>. clusterId must NOT move into `messagingOverrides`
-// (that is the reliability-layer conf; a clusterId there is rejected, and the
-// layered parser also rejects mixing messagingOverrides with bare keys like
-// portsShift). createNode REJECTS unrecognised keys in every shipped version —
-// v0.1.1 fails createNode with "Unrecognized configuration option(s) found:
-// [numShardsInCluster, messagingOverrides]" -> "Failed to create Delivery
-// context" — so those keys must never be emitted; the preset already runs 8
-// autoshards. Note delivery_module v0.1.x is unsupportable on the migrated
-// fleet regardless of emission: its logos-delivery (509c8755) stomps the
-// explicit clusterId with the preset's cluster 2 (waku_conf_builder.nim:
-// 313-324). See PR #117 and the delivery-context-creation fix.
-LOGOS_TEST(delivery_config_forces_logos_dev_cluster_three) {
+// The app now targets the logos.test fleet, the stability-guaranteed fleet
+// upstream recommends (logos-co/logos-delivery-module#84). Unlike the logos.dev
+// era — where an unannounced re-genesis moved the live fleet to Waku cluster 3
+// and we had to force a flat `clusterId:3` over the still-cluster-2 preset —
+// logos.test's preset natively carries the correct cluster at delivery_module
+// v0.2.0, so deliveryConfig injects NO clusterId of its own. The default config
+// therefore names the logos.test preset and omits clusterId entirely (the
+// preset supplies it). createNode REJECTS unrecognised keys in every shipped
+// version (v0.1.1 fails createNode with "Unrecognized configuration option(s)
+// found: …" -> "Failed to create Delivery context"), so keys like
+// numShardsInCluster / messagingOverrides must never be emitted; the preset
+// already runs 8 autoshards.
+LOGOS_TEST(delivery_config_defaults_to_logos_test_preset_native_cluster) {
     const std::string cfg = swapDeliveryConfigJson("{}").toStdString();
-    LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"logos.dev")");
-    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":3)");
+    LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"logos.test")");
+    // Preset-native cluster: we emit NO clusterId key of our own (no override).
+    LOGOS_ASSERT(cfg.find("clusterId") == std::string::npos);
     // Source contract: the unrecognised keys that break createNode must never
     // appear in the emitted config.
     LOGOS_ASSERT(cfg.find("numShardsInCluster") == std::string::npos);
     LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
 
-// A caller that pins its own clusterId owns the network choice: no cluster-3
-// override is injected, and no unrecognised keys are added.
+// A caller that pins its own clusterId owns the network choice: it is passed
+// through untouched, and no unrecognised keys are added.
 LOGOS_TEST(delivery_config_respects_explicit_cluster) {
-    const std::string cfg = swapDeliveryConfigJson(R"({"clusterId":2})").toStdString();
-    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":2)");
-    LOGOS_ASSERT(cfg.find(R"("clusterId":3)") == std::string::npos);
+    const std::string cfg = swapDeliveryConfigJson(R"({"clusterId":5})").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":5)");
     LOGOS_ASSERT(cfg.find("numShardsInCluster") == std::string::npos);
     LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
@@ -235,18 +228,18 @@ LOGOS_TEST(delivery_config_respects_explicit_cluster) {
 // never be forwarded into the createNode config — createNode would reject it.
 LOGOS_TEST(delivery_config_drops_unrecognized_shard_key) {
     const std::string cfg =
-        swapDeliveryConfigJson(R"({"clusterId":2,"numShardsInCluster":8})").toStdString();
-    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":2)");
+        swapDeliveryConfigJson(R"({"clusterId":5,"numShardsInCluster":8})").toStdString();
+    LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":5)");
     LOGOS_ASSERT(cfg.find("numShardsInCluster") == std::string::npos);
     LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
 
-// A non-logos.dev preset (e.g. the RLN twn network) is never forced onto the
-// logos.dev fleet's cluster.
+// A non-logos preset (e.g. the RLN twn network) is passed through as-is with no
+// clusterId injected — deliveryConfig never forces a fleet cluster on anyone.
 LOGOS_TEST(delivery_config_non_logos_preset_untouched) {
     const std::string cfg = swapDeliveryConfigJson(R"({"preset":"twn"})").toStdString();
     LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"twn")");
-    LOGOS_ASSERT(cfg.find(R"("clusterId":3)") == std::string::npos);
+    LOGOS_ASSERT(cfg.find("clusterId") == std::string::npos);
     LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
 }
 
