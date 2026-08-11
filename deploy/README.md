@@ -154,8 +154,11 @@ npm ci
 node watch-offers.mjs
 ```
 
-Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 45s) showing
-the maker's LEZ/ETH amounts and `age=0s` on arrival.
+Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`) showing the maker's
+LEZ/ETH amounts and `age=0s` on arrival. `maker.env.example` sets this to `5`
+(the board's own scan cadence, so it fills near-instantly); see the
+heartbeat trade-off note under "Running multiple makers" before raising or
+lowering it.
 
 ## Health & status (issue #93)
 
@@ -231,6 +234,25 @@ alongside the original. A suggested spread (the original `maker` sits at
 `ETH_AMOUNT` is a decimal-ETH string (see `config::eth_to_wei`); the rate is
 `LEZ_AMOUNT / ETH_AMOUNT`. A LOWER ETH per LEZ (a keener maker) is a HIGHER
 "LEZ per ETH" number — that is the better deal for a taker.
+
+### Heartbeat: how fast the board fills
+
+`OFFER_HEARTBEAT_SECS` is how often each maker republishes. The fleet runs
+`store=false`, so an offer only exists for subscribers between heartbeats —
+this interval is effectively the board's refresh rate per maker. The template
+(`maker.env.example`) sets **5s**: the board fills near-instantly and 5s is the
+OfferBoard's own scan cadence (its natural floor — going lower buys nothing).
+The cost is fleet load: at 5s every maker lightpushes ~9x more often than at
+45s, and that multiplies across all makers. Pick per situation:
+
+- **5s** — demos / "make the board pop": instant, heaviest load.
+- **~15s** — recommended for a long-running public trial: still snappy, far
+  lighter on the fleet.
+- **45s** — the old low-traffic default (still the `src/cli/maker.rs` default
+  for single-shot use).
+
+Set it per instance in each `maker-*.env`; it is read at container start, so
+change it and recreate (`docker compose … up -d --force-recreate`) to apply.
 
 ### Why separate instances (not one process, many offers)
 
