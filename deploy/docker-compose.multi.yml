@@ -1,0 +1,128 @@
+# Additional market-maker instances (maker-2 … maker-5) that publish MORE
+# concurrent offers to the SAME fleet — turning the board from a single quote
+# into a real market with a visible size + rate spread. See README.md,
+# section "Running multiple makers", for the full runbook and the offer table.
+#
+# SELF-CONTAINED + SAFE BY DESIGN. This file defines ONLY the additional
+# makers. It deliberately does NOT reference the base `maker` service or its
+# `maker-state` volume (both live in docker-compose.yml), so bringing this file
+# up or down can never recreate, restart, or otherwise touch the original
+# `eth-lez-maker` container — which may be mid-swap. Run it on its own:
+#
+#   docker compose -f docker-compose.multi.yml up -d
+#
+# NOT `-f docker-compose.yml -f docker-compose.multi.yml` — merging the two
+# would fold the original maker into the same up/down lifecycle, exactly what
+# we must avoid. The default compose project name (the `deploy/` directory)
+# is shared, so the new state volumes land beside the original's as
+# `deploy_maker-2-state` … `deploy_maker-5-state`, distinct from
+# `deploy_maker-state`.
+#
+# HARD INVARIANT — pairwise-distinct ETH_RECIPIENT_ADDRESS across the WHOLE
+# fleet (this file AND the base maker AND anyone else's makers). The maker
+# matches an incoming ETH lock purely by `recipient == ETH_RECIPIENT_ADDRESS`
+# (src/swap/maker.rs). If two makers share a recipient, a SINGLE taker ETH
+# lock matches BOTH: each locks its own LEZ bound to that taker, the taker
+# claims every LEZ escrow with the one preimage, but only ONE maker can claim
+# the single on-chain ETH escrow (first-writer-wins) — every other maker loses
+# its LEZ for nothing. This is real fund loss the instant ≥2 makers collide.
+# Each maker's freshly generated ETH key is therefore BOTH its gas payer
+# (ETH_PRIVATE_KEY) and its ETH_RECIPIENT_ADDRESS, and no two makers may ever
+# reuse one. (Same for LEZ: each maker has its own account.)
+#
+# Per-instance requirements (see README.md + maker.env.example):
+#   - own env file maker-2.env … maker-5.env, each a COMPLETE copy of
+#     maker.env.example with a DISTINCT LEZ_SIGNING_KEY, a DISTINCT ETH key
+#     pair (ETH_PRIVATE_KEY + ETH_RECIPIENT_ADDRESS — see the HARD INVARIANT
+#     above and the HARD RULE in maker.env.example), and its own offer terms
+#     (LEZ_AMOUNT / ETH_AMOUNT);
+#   - own state volume (declared at the bottom of this file);
+#   - the SAME image as the base maker for the swap-cli binary, with the repo's
+#     current offer-publisher/fleet.mjs bind-mounted OVER the image's baked
+#     copy (see the fleet.mjs note below);
+#
+# fleet.mjs is bind-mounted, NOT taken from the image. The image bakes
+# offer-publisher/fleet.mjs at BUILD time, so the fleet's cluster/peers are
+# frozen at whatever they were when the image was last published. When the
+# fleet migrated cluster 2 -> cluster 3 (Aug 2026) the published image was
+# never rebuilt: the live base `eth-lez-maker` only kept working because its
+# in-container fleet.mjs was hot-patched to cluster 3 by hand. Mounting the
+# repo's fleet.mjs makes that the single source of truth — a fleet migration
+# that lands in fleet.mjs (e.g. logos.test, PR #125) is picked up by every
+# maker on a plain `restart`, no image rebuild and no per-container hand-patch.
+# Only fleet.mjs is overlaid (node_modules + publish-offer.mjs stay from the
+# image); publish-offer.mjs imports "./fleet.mjs", which resolves to the mount.
+#
+# No ports are published: the maker and its offer-publisher sidecar make only
+# OUTBOUND connections (Sepolia RPC, the LEZ sequencer, the fleet over TCP),
+# so there is nothing to listen on and nothing to port-shift per instance.
+
+# Current fleet config overlaid on the image's stale baked copy (see header).
+# Path is relative to this compose file (deploy/), i.e. the repo's own
+# offer-publisher/fleet.mjs.
+x-fleet-mount: &fleet-mount ../offer-publisher/fleet.mjs:/app/offer-publisher/fleet.mjs:ro
+
+x-maker-common: &maker-common
+  image: ghcr.io/logos-co/eth-lez-atomic-swaps-maker:latest
+  restart: unless-stopped
+  healthcheck:
+    # Same status-file assertion as the base maker (see docker-compose.yml /
+    # issue #93): fails when the loop wedges, the publisher sidecar dies, or
+    # the last confirmed offer publish goes stale.
+    test: ["CMD-SHELL", "swap-cli maker --status"]
+    interval: 60s
+    timeout: 10s
+    start_period: 180s
+    retries: 3
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  # 5 LEZ -> 0.0000045 ETH — starter size, keen rate (~1:1.11M).
+  maker-2:
+    <<: *maker-common
+    container_name: eth-lez-maker-2
+    env_file:
+      - maker-2.env
+    volumes:
+      - maker-2-state:/app/state
+      - *fleet-mount
+
+  # 25 LEZ -> 0.000025 ETH — mid size, par rate (1:1M, matches the original).
+  maker-3:
+    <<: *maker-common
+    container_name: eth-lez-maker-3
+    env_file:
+      - maker-3.env
+    volumes:
+      - maker-3-state:/app/state
+      - *fleet-mount
+
+  # 50 LEZ -> 0.000045 ETH — larger size, keen rate (~1:1.11M).
+  maker-4:
+    <<: *maker-common
+    container_name: eth-lez-maker-4
+    env_file:
+      - maker-4.env
+    volumes:
+      - maker-4-state:/app/state
+      - *fleet-mount
+
+  # 100 LEZ -> 0.00012 ETH — whale size, worse rate (~1:0.83M, a realistic ask).
+  maker-5:
+    <<: *maker-common
+    container_name: eth-lez-maker-5
+    env_file:
+      - maker-5.env
+    volumes:
+      - maker-5-state:/app/state
+      - *fleet-mount
+
+volumes:
+  maker-2-state:
+  maker-3-state:
+  maker-4-state:
+  maker-5-state:

@@ -208,3 +208,140 @@ fast, that's the public sequencer having a bad day, not the bot.
   the running loop already tops up automatically in the background whenever
   the LEZ balance drops below `FUND_LOW_WATER` (default 3x `LEZ_AMOUNT`),
   checked every `FUND_CHECK_SECS` (default 300s).
+
+## Running multiple makers (a real market, not one quote)
+
+One maker publishes one offer. To make the board read like an actual market —
+several concurrent offers with a visible spread of sizes AND rates — run
+several maker instances. Each is a full copy of the same image with its OWN
+LEZ account, ETH key, state volume, and offer terms; only the config differs.
+
+`docker-compose.multi.yml` adds four more makers (`maker-2` … `maker-5`)
+alongside the original. A suggested spread (the original `maker` sits at
+10 LEZ ↔ 0.00001 ETH, 1:1M):
+
+| instance  | container         | LEZ_AMOUNT | ETH_AMOUNT  | rate (LEZ per ETH) | flavour              |
+| --------- | ----------------- | ---------- | ----------- | ------------------ | -------------------- |
+| maker     | eth-lez-maker     | 10         | 0.00001     | 1,000,000 (1:1M)   | original / par       |
+| maker-2   | eth-lez-maker-2   | 5          | 0.0000045   | 1,111,111          | starter, keen        |
+| maker-3   | eth-lez-maker-3   | 25         | 0.000025    | 1,000,000 (1:1M)   | mid, par             |
+| maker-4   | eth-lez-maker-4   | 50         | 0.000045    | 1,111,111          | larger, keen         |
+| maker-5   | eth-lez-maker-5   | 100        | 0.00012     | 833,333            | whale, worse ask     |
+
+`ETH_AMOUNT` is a decimal-ETH string (see `config::eth_to_wei`); the rate is
+`LEZ_AMOUNT / ETH_AMOUNT`. A LOWER ETH per LEZ (a keener maker) is a HIGHER
+"LEZ per ETH" number — that is the better deal for a taker.
+
+### Why separate instances (not one process, many offers)
+
+The maker binary runs exactly one offer per loop, and each offer must be
+backed by a distinct escrow account: a distinct `ETH_RECIPIENT_ADDRESS` and
+its own LEZ signing account holding that offer's inventory. So N offers = N
+instances. They share only the immutable bits — the image, the fleet config
+baked into `offer-publisher/fleet.mjs`, and the public testnet endpoints.
+
+> **HARD INVARIANT — distinct `ETH_RECIPIENT_ADDRESS` per maker, fleet-wide.**
+> The maker matches an incoming ETH lock purely by `recipient ==
+> ETH_RECIPIENT_ADDRESS` (`src/swap/maker.rs`). If two makers share a
+> recipient, a *single* taker ETH lock matches BOTH: each locks its own LEZ
+> bound to the taker, the taker claims every LEZ escrow with the one preimage,
+> but only ONE maker can claim the single on-chain ETH escrow
+> (first-writer-wins) — every other maker loses its LEZ for nothing. That is
+> real fund loss the instant ≥2 makers collide, so each maker's freshly
+> generated ETH key is BOTH its gas payer (`ETH_PRIVATE_KEY`) and its
+> `ETH_RECIPIENT_ADDRESS`, and no two makers (including the original) may ever
+> reuse one. Before starting a new maker, confirm its recipient is absent from
+> every other running maker:
+>
+> ```bash
+> grep -h '^ETH_RECIPIENT_ADDRESS=' maker.env maker-*.env | sort | uniq -d
+> # ^ must print NOTHING (no duplicates). Same idea for LEZ_SIGNING_KEY.
+> ```
+
+No ports are published (every instance is outbound-only), so there is nothing
+to port-shift between instances.
+
+> **fleet.mjs is bind-mounted, not baked.** The published maker image freezes
+> `offer-publisher/fleet.mjs` (the fleet's cluster + peer list) at build time,
+> so when the fleet migrated cluster 2 → 3 the published image went stale — the
+> live `eth-lez-maker` only survived because its in-container `fleet.mjs` was
+> hand-patched. `docker-compose.multi.yml` therefore bind-mounts the repo's
+> `../offer-publisher/fleet.mjs` over the image copy, making the checked-out
+> file the single source of truth: a fleet change (e.g. logos.test, PR #125) is
+> picked up by a plain `restart`, no image rebuild or hand-patch. **Make sure
+> your checkout's `offer-publisher/fleet.mjs` is current before starting** (an
+> up-to-date `master` clone already is).
+
+### 1. Provision each instance's accounts
+
+Do this once per new maker, on a machine with CPU to spare — the pinata
+proof-of-work is CPU-bound (difficulty 3), so the VPS, not a constrained
+sandbox. All the tooling already exists:
+
+```bash
+# Fresh ETH key pair (address + private key) — one per maker, never reused:
+cast wallet new
+
+# Fresh LEZ account, initialized + pinata-funded to a target balance. The
+# rust builder stage doubles as the provisioning tool (it builds the example;
+# the shipped runtime image does not include it):
+docker build --target rust-builder -t eth-lez-maker-builder ..
+docker run --rm --network host eth-lez-maker-builder \
+  cargo run --release --example onboard_maker_account -- \
+  --sequencer-url https://testnet.lez.logos.co --target 150
+```
+
+`onboard_maker_account` prints the new LEZ account's base58 id and hex signing
+key (the signing key is shown only once). Fund each account to at least its
+`LEZ_AMOUNT` plus margin — one 150-LEZ pinata claim covers every instance
+above except `maker-5` (100 LEZ, whose 3x low-water is 300), which wants two
+claims (`--target 300`). The running loop then keeps each topped up
+automatically (`FUND_LOW_WATER`, default 3x `LEZ_AMOUNT`).
+
+The startup guard refuses to run a maker whose LEZ balance is below its
+`LEZ_AMOUNT`, so LEZ funding is mandatory to go live. ETH is NOT checked at
+startup — it is only spent on the profitable claim (~42k gas) when a swap
+actually completes — so an instance publishes its offer fine with a thinly
+funded (or even briefly empty) ETH key, but it needs enough ETH to claim
+before a real taker completes a swap against it. Fund each ETH address thinly
+(a handful of claims' worth is plenty on Sepolia).
+
+### 2. Write each env file
+
+Each instance reads a COMPLETE env file (compose loads one per service), so
+copy the template and edit the four things that differ — the two keys, the
+recipient address, and the offer terms:
+
+```bash
+for n in 2 3 4 5; do cp maker.env.example maker-$n.env; done
+# then in each maker-$n.env set:
+#   LEZ_SIGNING_KEY        = that instance's onboard signing key
+#   ETH_PRIVATE_KEY        = that instance's `cast wallet new` private key
+#   ETH_RECIPIENT_ADDRESS  = that instance's `cast wallet new` address (UNIQUE)
+#   LEZ_AMOUNT / ETH_AMOUNT = the row from the table above
+```
+
+`maker-*.env` are gitignored (as is `maker.env`) — never commit them. Leave
+`RESTRICT_COUNTERPARTY=false` and `LEZ_TAKER_ACCOUNT_ID` unset for public mode.
+
+### 3. Start them (without touching the original)
+
+```bash
+docker compose -f docker-compose.multi.yml up -d
+docker compose -f docker-compose.multi.yml logs -f
+```
+
+Use the `-f docker-compose.multi.yml` file ON ITS OWN — do NOT combine it with
+`docker-compose.yml`. The multi file defines only `maker-2` … `maker-5` and
+their volumes, so this brings the new makers up (and lets you `restart` / `down`
+them) without ever recreating the live `eth-lez-maker`. Each logs
+`offer published (N peer(s))` once the fleet accepts its heartbeat.
+
+### 4. Verify the market from outside
+
+From your own machine (not the VPS), watch the fleet relay every maker's
+offer — you should see all five distinct `maker_lez_account`s cycle through:
+
+```bash
+cd ../offer-publisher && npm ci && node watch-offers.mjs
+```
