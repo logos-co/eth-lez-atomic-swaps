@@ -106,8 +106,18 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
         with:
+          # Pull unchanged deps (risc0, Qt, the liblogos chains) from the shared
+          # binary cache instead of rebuilding them, mirroring canary.yml's
+          # `modules` job. Reads are public — no token. The URL + key are repo
+          # variables (docs/nix-cache.md); when they are unset the two lines
+          # expand empty and nix-installer ignores them, so this is safe on forks
+          # that lack the vars. (Previously these two lines were mis-indented
+          # under the failure-diagnostics upload step's `retention-days`, so they
+          # were folded into that scalar and the cache pull never applied.)
           extra-conf: |
             experimental-features = nix-command flakes
+            extra-substituters = ${{ vars.NIX_CACHE_URL }}
+            extra-trusted-public-keys = ${{ vars.NIX_CACHE_PUBLIC_KEY }}
 
       - uses: actions/setup-node@v4
         with:
@@ -132,5 +142,3 @@ jobs:
           path: artifacts/basecamp-ui-smoke/
           if-no-files-found: warn
           retention-days: 14
-            extra-substituters = ${{ vars.NIX_CACHE_URL }}
-            extra-trusted-public-keys = ${{ vars.NIX_CACHE_PUBLIC_KEY }}

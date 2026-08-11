@@ -35,13 +35,14 @@ CANARY_RESULT {"leg":"chain","status":"red","evidence":"…","duration_s":42}
 | **modules** | `leg-modules.sh` | Both Basecamp modules still build to a portable `.lgx`: `nix build .#lgx-portable` for `swap-module` and `swap-ui`. | **darwin-arm64, linux-amd64, linux-arm64** (see below) |
 | **catalog** | `leg-catalog.sh` | The **live** release catalog chain is intact: `logos-repo.json → index.json →` each `.lgx` asset URL, with names/versions cross-checked against each module's `metadata.json`. | cheap, network-only, any OS |
 | **release-content** | `leg-release-content.sh` | A **published release artifact actually contains the code its version claims**: downloads the released `.lgx`, extracts it, and asserts committed content markers (`release-content-expectations.json`) in **every shipped variant**, plus the release tag's **ancestry**. Catches a release dispatched on a **stale ref** — it happened twice (swap_ui 0.3.0 without the History tab, 0.3.3 without PR #94's trial-feedback flow) and the catalog leg structurally cannot see it (it never downloads a byte). Also runs synchronously on each `release: published` via `verify-release.yml`. | cheap, network-only, any OS |
+| **index-fence** | `leg-index-fence.sh` | The **canary channel has not leaked into the OFFICIAL index**: fetches the live `index.json` and fails if any `0.99.x` canary **sentinel version** or any `canary`-release **URL** appears in it. The loud backstop behind the structural `.lgxc` fence (see [Fenced from the official catalogue](#fenced-from-the-official-catalogue)). | cheap, network-only, any OS |
 
 Run them all (or a subset) with the orchestrator, which prints a summary table
 and writes a status JSON:
 
 ```sh
-canary/run-all.sh                          # all legs
-canary/run-all.sh catalog release-content  # the cheap+fast subset
+canary/run-all.sh                              # all legs
+canary/run-all.sh catalog index-fence          # the cheap+fast subset
 ```
 
 ## Red-light policy — a failing leg is a *signal*, not a canary bug
@@ -157,6 +158,40 @@ each, an index rebuild, and a human version bump).
 
 **Never point public testers at this channel.** It ships unstable, unsigned,
 in-place-replaced branch builds.
+
+### Fenced from the official catalogue
+
+The canary channel and the OFFICIAL catalogue live in the **same repo**, and the
+official index is rebuilt by `rebuild-index.yml`, which delegates to
+`logos-modules-release-action`'s reusable rebuild-index. That tool walks **every
+non-draft release** on this repo (only the rolling `index` tag is skipped) and
+collects assets matching `.name | endswith(".lgx")` — it has **no exclude input
+and no tag-pattern selection**. The `canary` prerelease is neither a draft nor
+`index`, so a `.lgx` asset published there is slurped straight into the official
+`index.json`. That is exactly how canary `0.99.x` builds once leaked into the
+catalogue trial users install from.
+
+Two layers keep it from recurring:
+
+1. **Structural fence (primary).** `canary-channel.yml` publishes canary assets
+   with the extension **`.lgxc`, not `.lgx`**. The official enumerator's
+   `endswith(".lgx")` filter skips them, so a canary build is *structurally*
+   invisible to the official index rebuild. Basecamp still installs them
+   normally: the `canary-index.json` entry carries the full download URL and
+   Basecamp verifies the bytes by `sha256`/manifest, **not** by file extension.
+   **Do not rename canary assets back to `.lgx`.**
+2. **Loud backstop (defence-in-depth).** `canary/leg-index-fence.sh` fetches the
+   **live official `index.json`** and fails if any `0.99.x` sentinel version or
+   any `canary`-release URL ever appears in it — catching a regression (asset
+   renamed back to `.lgx`, upstream enumerator broadened, a manual mistake)
+   before a trial user is offered an unstable build. It runs as the always-on
+   `index-fence` job in `canary.yml` and in `run-all.sh`'s default leg set.
+
+Why not simply lower the `0.99.x` sentinel so it sorts below real releases?
+Because that only defeats the leak's *impact* — the canary asset would still be
+**listed** in the official catalogue. The `.lgxc` fence prevents the asset from
+ entering the index at all, which is why the sentinel can stay high (so the
+canary is still always offered as newest *within its own channel*).
 
 **Version scheme (deliberate):** the canary publishes as the sentinel
 `0.99.<run-number>`, a plain dotted-integer string — *not* a semver prerelease

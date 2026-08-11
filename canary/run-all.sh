@@ -4,8 +4,8 @@
 # and write a status JSON artifact.
 #
 # Usage:  canary/run-all.sh [leg ...]
-#           # default: catalog release-content modules chain swap
-#   e.g.  canary/run-all.sh catalog release-content  # the cheap+fast subset
+#           # default: catalog index-fence release-content modules chain swap
+#   e.g.  canary/run-all.sh catalog index-fence  # the cheap+fast subset
 #
 # Env:
 #   CANARY_STATUS_JSON   where to write the status artifact (default /tmp/canary-status.json)
@@ -19,7 +19,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/common.sh"
 
 LEGS=("$@")
-[ ${#LEGS[@]} -eq 0 ] && LEGS=(catalog release-content modules chain swap)
+[ ${#LEGS[@]} -eq 0 ] && LEGS=(catalog index-fence release-content modules chain swap)
 
 # BSD/macOS mktemp requires the X's to be TRAILING (a suffix after them is taken
 # literally, breaking a second/concurrent run). Use a trailing-X template and a
