@@ -92,4 +92,40 @@ if (referenced === 0) {
   process.exit(1);
 }
 
-console.log(`qml backend facade contract: OK (${referenced} references across ${files.length - 1} views, ${declared.size} facade members)`);
+// --- Reverse contract: every `root.backend.<name>` the facade forwards must
+// be a real member of the swap_ui.rep replica interface. The forward check
+// above catches a VIEW referencing an unbridged facade member; this catches
+// the other half — a FACADE that forwards a name the backend replica does not
+// expose (a rep/facade typo, or a rep PROP renamed without updating Main.qml).
+// Such a mismatch reads as `undefined` at runtime with no console error — the
+// exact silent-failure class the #124-era live-progress bridge had to avoid.
+const repPath = join(qmlDir, "..", "swap_ui.rep");
+const repSrc = readFileSync(repPath, "utf8");
+const repMembers = new Set();
+for (const m of repSrc.matchAll(/PROP\(\s*\w[\w:<>]*\s+(\w+)/g)) repMembers.add(m[1]);
+for (const m of repSrc.matchAll(/SLOT\(\s*\w[\w:<>]*\s+(\w+)\s*\(/g)) repMembers.add(m[1]);
+for (const m of repSrc.matchAll(/SIGNAL\(\s*(\w+)/g)) repMembers.add(m[1]);
+
+const facadeFailures = [];
+let forwarded = 0;
+for (const m of mainSrc.matchAll(/root\.backend\.(\w+)/g)) {
+  forwarded += 1;
+  if (!repMembers.has(m[1])) {
+    facadeFailures.push(`Main.qml forwards root.backend.${m[1]}, which is not a PROP/SLOT/SIGNAL in swap_ui.rep`);
+  }
+}
+if (facadeFailures.length > 0) {
+  console.error("FAIL: Main.qml facade forwards backend members missing from swap_ui.rep:");
+  for (const f of facadeFailures) console.error("  " + f);
+  console.error(
+    "\nDeclare each one in swap_ui.rep (PROP/SLOT/SIGNAL) or fix the name in\n" +
+    "Main.qml — an unknown replica member reads as `undefined` in every view."
+  );
+  process.exit(1);
+}
+if (forwarded === 0) {
+  console.error("FAIL: no root.backend.* forwards found — the reverse checker is miswired");
+  process.exit(1);
+}
+
+console.log(`qml backend facade contract: OK (${referenced} references across ${files.length - 1} views, ${declared.size} facade members; ${forwarded} facade forwards all in swap_ui.rep)`);

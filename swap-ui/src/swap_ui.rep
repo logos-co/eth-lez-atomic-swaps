@@ -50,6 +50,15 @@ class SwapUi
     PROP(QString takerCurrentStep READWRITE)
     PROP(QStringList takerProgressSteps READWRITE)
     PROP(QString takerResultJson READWRITE)
+    // Live ETH-lock proof, surfaced mid-swap (not only at completion). Set at
+    // the taker's EthLocked progress step from the same tx_hash/chain_id the
+    // receipt reads at the end, so the in-progress stepper can show a
+    // copyable lock-tx line (and Sepolia explorer link) while the maker's LEZ
+    // lock is still pending — a user can verify their own ETH is on-chain
+    // rather than wonder if the swap is stuck. Cleared at the start of each
+    // taker run. Additive-only surface (see receiptsJson note above).
+    PROP(QString takerEthLockTx READWRITE)
+    PROP(int takerEthChainId READWRITE)
 
     // Maker auto-accept state
     PROP(bool autoAcceptRunning READWRITE)
