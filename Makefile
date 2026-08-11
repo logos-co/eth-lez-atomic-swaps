@@ -132,6 +132,9 @@ swap-ui-unit:
 	@timelock_bin=$$(mktemp /tmp/atomic-swaps-timelock.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/timelock_math_test.cpp -o "$$timelock_bin"; \
 		"$$timelock_bin"
+	@offer_venue_bin=$$(mktemp /tmp/atomic-swaps-offer-venue.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/offer_venue_test.cpp -o "$$offer_venue_bin"; \
+		"$$offer_venue_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
