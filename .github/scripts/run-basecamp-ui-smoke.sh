@@ -5,6 +5,15 @@ set -euo pipefail
 # bundle pinned by scaffold.toml. Basecamp's inspector build differs from the
 # shipping bundle only by enabling logos-qt-mcp; package loading, ui-host,
 # logos_host, and the application shell are the production code paths.
+#
+# The smoke includes a true end-to-end offer-reception assertion: it waits
+# (up to BASECAMP_UI_RECEPTION_TIMEOUT_MS, default 150s) for the swap
+# adapter's "offer cached from delivery" host-log marker, which only fires
+# once a REAL offer from the logos.dev fleet's maker (publishing every 45s)
+# has crossed cluster-3 relay -> delivery_module -> adapter -> offer cache.
+# It therefore needs outbound TCP reachability to the fleet's entry nodes;
+# on a network that blocks that, the run fails at the reception step with
+# per-leg diagnostics (see tests/basecamp-ui-smoke.mjs).
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 cd "$repo_root"

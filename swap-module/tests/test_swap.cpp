@@ -1,8 +1,10 @@
 #include <logos_test.h>
 #include "../src/swap_impl.h"
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QString>
+#include <QVariant>
 
 #include <chrono>
 #include <mutex>
@@ -13,6 +15,7 @@
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
 int swapDeliveryParsePeerCount(const std::string& raw);
 QString swapDeliveryConfigJson(const std::string& configJson);
+QByteArray swapDeliveryDecodeEventPayload(const QVariant& payloadArg);
 
 extern "C" {
 void mock_swap_ffi_reset();
@@ -255,6 +258,46 @@ LOGOS_TEST(delivery_config_explicit_delivery_passthrough) {
     LOGOS_ASSERT_CONTAINS(cfg, R"("preset":"custom")");
     LOGOS_ASSERT_CONTAINS(cfg, R"("clusterId":9)");
     LOGOS_ASSERT(cfg.find("messagingOverrides") == std::string::npos);
+}
+
+// ── messageReceived payload decoding (delivery_module event contract) ──────
+//
+// delivery_module v0.2.0 declares `messageReceived(messageHash tstr,
+// contentTopic tstr, payload bstr, timestamp int)` via the typed
+// `logos_events:` codegen. `bstr` crosses every hop as the canonical tagged
+// bytes form ({"_bytes": base64url}, logos_codec.h) and each Qt-side decode
+// (logos_json_convert.cpp nlohmannToQVariant) turns it back into a QByteArray
+// of RAW payload bytes. v0.1.x hand-marshalled the same event with the
+// payload as a base64 QString. The 2026-08-10 live incident: the node
+// received and re-relayed real fleet offers, but the adapter parsed the
+// v0.2.0 QByteArray with the v0.1.x contract (toString() -> fromBase64())
+// and silently dropped every offer — an empty board with a green
+// "Delivery connected". These tests pin the verified real shapes.
+
+LOGOS_TEST(delivery_event_payload_bytearray_is_raw_passthrough) {
+    // The verified v0.2.0 shape: raw JSON bytes in a QByteArray — no base64
+    // layer to strip.
+    const QByteArray raw = R"({"hashlock":"ab","lez_amount":"1"})";
+    LOGOS_ASSERT_EQ(swapDeliveryDecodeEventPayload(QVariant(raw)).toStdString(),
+                    raw.toStdString());
+}
+
+LOGOS_TEST(delivery_event_payload_string_is_strict_base64) {
+    // The v0.1.x legacy shape: base64 text.
+    const QByteArray raw = R"({"hashlock":"ab"})";
+    const QVariant encoded(QString::fromLatin1(raw.toBase64()));
+    LOGOS_ASSERT_EQ(swapDeliveryDecodeEventPayload(encoded).toStdString(),
+                    raw.toStdString());
+}
+
+LOGOS_TEST(delivery_event_payload_rejects_unrecognized_shapes) {
+    // Raw JSON text inside a QString is NOT valid base64 and must be
+    // rejected, not garbage-decoded (Qt's lenient default would happily
+    // "decode" it — exactly how the incident stayed silent).
+    LOGOS_ASSERT(swapDeliveryDecodeEventPayload(
+        QVariant(QStringLiteral(R"({"not":"base64"})"))).isEmpty());
+    LOGOS_ASSERT(swapDeliveryDecodeEventPayload(QVariant(42)).isEmpty());
+    LOGOS_ASSERT(swapDeliveryDecodeEventPayload(QVariant()).isEmpty());
 }
 
 LOGOS_TEST(fetch_offers_preserves_empty_offers_shape_without_runtime) {

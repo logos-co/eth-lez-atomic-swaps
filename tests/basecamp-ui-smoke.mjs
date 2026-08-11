@@ -2,7 +2,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 const appBin = process.env.BASECAMP_BIN;
@@ -345,6 +345,69 @@ try {
   console.log(deliverySucceeded
     ? "delivery_module createNode succeeded (host log)"
     : "delivery_module createNode: no failure marker (success marker is qDebug, may be filtered)");
+
+  // ── End-to-end offer RECEPTION ─────────────────────────────────────────────
+  // A created delivery context is necessary but nowhere near sufficient: the
+  // 2026-08-10 incident had the node subscribed on cluster-3 shard-7,
+  // receiving and re-relaying the real maker's offers, while the swap
+  // adapter silently dropped every one of them (it parsed delivery_module
+  // v0.2.0's raw-QByteArray messageReceived payload with the v0.1.x
+  // base64-QString contract). This assertion closes that entire bug class:
+  // the swap adapter prints the exact marker below (fprintf(stderr), so it is
+  // immune to Qt log filtering) only after a fleet offer survived the full
+  // path — cluster-3 mesh -> delivery_module v0.2.0 typed messageReceived
+  // event -> adapter payload decode -> offer-field validation -> offer cache
+  // (the store fetchOffers serves the UI from). The real VPS maker publishes
+  // an offer on /atomic-swaps/1/offers/json every 45s, so the budget below
+  // covers two heartbeats plus cold gossipsub mesh formation.
+  const receptionMarker = "offer cached from delivery";
+  const receptionDropMarker = "SwapDeliveryAdapter: dropped offers-topic payload";
+  const receptionTimeoutMs = Number(process.env.BASECAMP_UI_RECEPTION_TIMEOUT_MS || 150000);
+  const readHostLogs = () => {
+    let text = "";
+    try { text += readFileSync(deliveryLog, "utf8"); } catch {}
+    // Module hosts inherit Basecamp's stderr (that is how the delivery
+    // markers above land in basecamp-process.log), but also sweep any
+    // per-module log files Basecamp writes under the user dir, defensively.
+    const logsDir = join(userDir, "logs");
+    try {
+      for (const entry of readdirSync(logsDir, { recursive: true })) {
+        const file = join(logsDir, String(entry));
+        try {
+          if (statSync(file).isFile()) text += readFileSync(file, "utf8");
+        } catch {}
+      }
+    } catch {}
+    return text;
+  };
+  const receptionDeadline = Date.now() + receptionTimeoutMs;
+  let receptionLogText = "";
+  let offerReceived = false;
+  while (Date.now() < receptionDeadline) {
+    receptionLogText = readHostLogs();
+    if (receptionLogText.includes(receptionMarker)) { offerReceived = true; break; }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  if (!offerReceived) {
+    // Fail loudly, and say which leg of the path broke so the log dump is
+    // not the starting point of the investigation.
+    const saw = (needle) => receptionLogText.includes(needle);
+    const diagnostics = [
+      `delivery context created: ${saw("Delivery context created successfully")}`,
+      `subscribe completed (delivery log): ${saw("Subscribe completed for topic: /atomic-swaps/1/offers/json")}`,
+      `relay message received (node log): ${saw("received relay message")}`,
+      `messageReceived event reached module (delivery log): ${saw('"eventType":"message_received"')}`,
+      `adapter dropped an offers-topic payload: ${saw(receptionDropMarker)}`,
+    ];
+    throw new Error(
+      `no offer was received end-to-end within ${receptionTimeoutMs}ms — ` +
+      `the marker "${receptionMarker}" never appeared in the host logs. ` +
+      `The real fleet maker publishes every 45s, so this means the ` +
+      `fleet mesh, the delivery_module event path, or the swap adapter is broken.\n` +
+      `Diagnostics:\n  ${diagnostics.join("\n  ")}\nSee ${deliveryLog}.`,
+    );
+  }
+  console.log("end-to-end offer reception verified (offer cached from delivery, host log)");
 
   await saveInspectorArtifacts(app, "success");
   console.log("Basecamp-native swap_ui smoke test passed");
