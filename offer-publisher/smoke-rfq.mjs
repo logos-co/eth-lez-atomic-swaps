@@ -39,7 +39,11 @@ const timeout = (ms, label) =>
     setTimeout(() => reject(new Error(`timeout after ${ms}ms: ${label}`)), ms)
   );
 
-const COOLDOWN_MS = 3000;
+// Production default cooldown (RESPONSE_COOLDOWN_SECS=8). Chosen large enough
+// that a whole concurrent burst reliably arrives at the maker inside ONE window
+// even under live-fleet jitter — otherwise the gate legitimately reopens
+// mid-burst and coalescing "fails" for a reason that is not a bug.
+const COOLDOWN_MS = 8000;
 const NONCE = `rfq-smoke-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const offersRouting = createRoutingInfo(NETWORK_CONFIG, { contentTopic: OFFERS_CONTENT_TOPIC });
@@ -144,16 +148,27 @@ log(`round-trip OK: maker responded in ${latencyMs}ms`);
 
 // --- 2) coalescing: a burst inside the cooldown -> exactly one publish -------
 // Wait out the window armed by the round-trip response, then fire a burst.
+// Fire the burst CONCURRENTLY (not serial-with-sleeps): each lightpush.send
+// awaits a network round-trip, so 12 serial sends would span several seconds
+// and could straddle the cooldown boundary — reopening the gate for a reason
+// that is not a coalescing bug. Concurrent dispatch makes all 12 land inside
+// one window, which is what the anti-amplification guarantee is actually about.
 await sleep(COOLDOWN_MS + 500);
+const requestsSeenBeforeBurst = requestsSeen;
 const publishesBeforeBurst = offersPublished;
-log("coalescing: firing a burst of 12 requests inside one cooldown window...");
-for (let i = 0; i < 12; i++) {
-  await publishRequest();
-  await sleep(50);
-}
-await sleep(2000); // let the responses (if any) settle
+log("coalescing: firing a concurrent burst of 12 requests inside one cooldown window...");
+await Promise.all(Array.from({ length: 12 }, () => publishRequest()));
+await sleep(3000); // let the maker receive the burst and (maybe) respond
+const burstRequestsSeen = requestsSeen - requestsSeenBeforeBurst;
 const burstPublishes = offersPublished - publishesBeforeBurst;
-log(`coalescing: 12 requests -> ${burstPublishes} maker publish(es) (requestsSeen=${requestsSeen})`);
+log(
+  `coalescing: 12 requests -> maker saw ${burstRequestsSeen}, published ${burstPublishes} offer(s)`
+);
+// The maker must actually have RECEIVED multiple requests (else we'd be
+// "coalescing" message loss, not a real burst), and collapsed them to one.
+if (burstRequestsSeen < 2) {
+  fail(`burst not delivered to maker (saw only ${burstRequestsSeen}); cannot assess coalescing`);
+}
 if (burstPublishes !== 1) {
   fail(`expected exactly 1 coalesced response to the burst, got ${burstPublishes}`);
 }
