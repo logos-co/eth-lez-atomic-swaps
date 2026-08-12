@@ -50,17 +50,26 @@
 # repo's fleet.mjs makes that the single source of truth — a fleet migration
 # that lands in fleet.mjs (e.g. logos.test, PR #125) is picked up by every
 # maker on a plain `restart`, no image rebuild and no per-container hand-patch.
-# Only fleet.mjs is overlaid (node_modules + publish-offer.mjs stay from the
-# image); publish-offer.mjs imports "./fleet.mjs", which resolves to the mount.
+# The offer-publisher SOURCE is overlaid (node_modules stays from the image);
+# publish-offer.mjs imports "./fleet.mjs" and "./rfq.mjs", which resolve to the
+# mounts. Overlaying publish-offer.mjs + rfq.mjs (not just fleet.mjs) is what
+# ships the RFQ on-demand responder (feat/rfq-on-demand-offers) to the fleet
+# without an image rebuild — the published image bakes an older publish-offer.mjs
+# with no responder and no rfq.mjs at all, so a fleet.mjs-only mount would run
+# the stale heartbeat-only publisher.
 #
 # No ports are published: the maker and its offer-publisher sidecar make only
 # OUTBOUND connections (Sepolia RPC, the LEZ sequencer, the fleet over TCP),
 # so there is nothing to listen on and nothing to port-shift per instance.
 
-# Current fleet config overlaid on the image's stale baked copy (see header).
-# Path is relative to this compose file (deploy/), i.e. the repo's own
-# offer-publisher/fleet.mjs.
+# Repo offer-publisher source overlaid on the image's stale baked copies (see
+# header). Paths are relative to this compose file (deploy/). fleet.mjs pins the
+# current fleet cluster/peers; publish-offer.mjs + rfq.mjs ship the RFQ responder.
+# Three scalar anchors (YAML cannot splice a list anchor into a list, and Docker
+# Compose does not merge sequence anchors), referenced together per maker.
 x-fleet-mount: &fleet-mount ../offer-publisher/fleet.mjs:/app/offer-publisher/fleet.mjs:ro
+x-publish-mount: &publish-mount ../offer-publisher/publish-offer.mjs:/app/offer-publisher/publish-offer.mjs:ro
+x-rfq-mount: &rfq-mount ../offer-publisher/rfq.mjs:/app/offer-publisher/rfq.mjs:ro
 
 x-maker-common: &maker-common
   image: ghcr.io/logos-co/eth-lez-atomic-swaps-maker:latest
@@ -90,6 +99,8 @@ services:
     volumes:
       - maker-2-state:/app/state
       - *fleet-mount
+      - *publish-mount
+      - *rfq-mount
 
   # 25 LEZ -> 0.000025 ETH — mid size, par rate (1:1M, matches the original).
   maker-3:
@@ -100,6 +111,8 @@ services:
     volumes:
       - maker-3-state:/app/state
       - *fleet-mount
+      - *publish-mount
+      - *rfq-mount
 
   # 50 LEZ -> 0.000045 ETH — larger size, keen rate (~1:1.11M).
   maker-4:
@@ -110,6 +123,8 @@ services:
     volumes:
       - maker-4-state:/app/state
       - *fleet-mount
+      - *publish-mount
+      - *rfq-mount
 
   # 100 LEZ -> 0.00012 ETH — whale size, worse rate (~1:0.83M, a realistic ask).
   maker-5:
@@ -120,6 +135,8 @@ services:
     volumes:
       - maker-5-state:/app/state
       - *fleet-mount
+      - *publish-mount
+      - *rfq-mount
 
 volumes:
   maker-2-state:

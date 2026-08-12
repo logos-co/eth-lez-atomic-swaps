@@ -2773,6 +2773,22 @@ void SwapUiPlugin::publishOffer()
     });
 }
 
+void SwapUiPlugin::publishOfferRequest()
+{
+    // Anonymous RFQ ping (see swap_delivery_adapter). Cheap and best-effort:
+    // it needs no config/credentials, only a live delivery node. The board
+    // fires it on Market activation and every ~20s while the tab is open. The
+    // maker's fallback heartbeat still delivers offers if a ping is missed, so
+    // a failure here is deliberately swallowed rather than surfaced as an
+    // error (RFQ is the accelerator, the heartbeat is the reliable baseline).
+    if (!m_swap) {
+        return;
+    }
+    ensureMessagingReady([this]() {
+        m_swap->publishOfferRequestAsync([](QString) {});
+    });
+}
+
 void SwapUiPlugin::fetchOffers()
 {
     if (offersLoading() || makerRunning() || takerRunning() || autoAcceptRunning()) {

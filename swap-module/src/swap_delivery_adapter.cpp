@@ -35,6 +35,20 @@ std::string jsonError(const std::string& message)
 
 } // namespace
 
+// Build the anonymous RFQ offer-request payload. Deliberately Qt-free and hand
+// rolled (like swapDeliveryEthAmountToWei's fallback twin) so it compiles
+// identically in the header-less test build and stays a pure, unit-testable
+// function that pins the exact wire shape the maker's rfq.mjs parser expects:
+//   {"v":1,"kind":"offer_request","ts":<unix seconds>}
+// No taker identity/account travels in it — that anonymity is the privacy
+// property the RFQ model rests on, so this function must never grow an
+// identifying field.
+std::string swapDeliveryBuildOfferRequest(long long unixTimeSecs)
+{
+    return "{\"v\":1,\"kind\":\"offer_request\",\"ts\":"
+        + std::to_string(unixTimeSecs) + "}";
+}
+
 // Sum the fleet's live relay-peer count out of a delivery_module
 // getNodeInfo("Metrics") body (a Prometheus /metrics text exposition).
 //
@@ -422,6 +436,10 @@ bool swapDeliveryOfferIsWellFormed(const QJsonObject& offer)
 namespace {
 
 constexpr const char* kOffersTopic = "/atomic-swaps/1/offers/json";
+// RFQ request topic on the SAME cluster-3 fleet (see swap_delivery_adapter.h).
+// The taker publishes anonymous offer-requests here; makers filter-subscribe
+// and respond (rate-limited) on kOffersTopic above.
+constexpr const char* kOfferRequestsTopic = "/atomic-swaps/1/offer-requests/json";
 constexpr qsizetype kMaxOfferPayloadBytes = 64 * 1024;
 constexpr qsizetype kMaxCachedOffers = 256;
 // Per-maker fairness cap on the offer cache. A spammer rotating hashlocks
@@ -1237,6 +1255,41 @@ std::string swapDeliveryPublishOffer(const std::string& configJson)
     return compactJson(result);
 }
 
+std::string swapDeliveryPublishOfferRequest()
+{
+    DeliveryState& s = state();
+    std::lock_guard<std::mutex> opLock(s.operationMutex);
+    std::shared_ptr<LogosModules> modules;
+    {
+        std::lock_guard<std::recursive_mutex> lock(s.mutex);
+        // Only the node needs to be up — publishing an offer-request is
+        // lightpush-only and does NOT require a subscription (the taker never
+        // subscribes to the requests topic; makers do).
+        if (!s.modules || !s.started) {
+            return jsonError("messaging not initialized - call messagingInit first");
+        }
+        modules = s.modules;
+    }
+
+    const std::string payloadStr =
+        swapDeliveryBuildOfferRequest(QDateTime::currentSecsSinceEpoch());
+    const QString payload = QString::fromStdString(payloadStr);
+    LogosResult sent = modules->delivery_module.send(
+        QString::fromUtf8(kOfferRequestsTopic), payload);
+    if (!sent.success) {
+        return logosError(QStringLiteral("send"), sent);
+    }
+
+    QJsonObject result{
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("method"), QStringLiteral("publishOfferRequest")},
+        {QStringLiteral("backend"), QStringLiteral("delivery_module")},
+        {QStringLiteral("topic"), QString::fromUtf8(kOfferRequestsTopic)},
+        {QStringLiteral("request_id"), sent.getString()}
+    };
+    return compactJson(result);
+}
+
 std::string swapDeliveryFetchOffers()
 {
     DeliveryState& s = state();
@@ -1468,6 +1521,11 @@ std::string swapDeliveryMessagingStatus()
 }
 
 std::string swapDeliveryPublishOffer(const std::string&)
+{
+    return jsonError("messaging not initialized - call messagingInit first");
+}
+
+std::string swapDeliveryPublishOfferRequest()
 {
     return jsonError("messaging not initialized - call messagingInit first");
 }

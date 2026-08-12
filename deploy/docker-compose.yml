@@ -24,6 +24,16 @@ services:
       # upgrades / container recreation, which is the whole point of not
       # running this as a bare `cargo run` on the host.
       - maker-state:/app/state
+      # Overlay the repo's offer-publisher source on the image's baked copies
+      # (node_modules stays from the image). fleet.mjs pins the current fleet
+      # cluster/peers (was previously hot-patched by hand in-container — see
+      # docker-compose.multi.yml header); publish-offer.mjs + rfq.mjs ship the
+      # RFQ on-demand responder (feat/rfq-on-demand-offers) without an image
+      # rebuild. publish-offer.mjs imports "./fleet.mjs" and "./rfq.mjs", both
+      # resolved by these mounts.
+      - ../offer-publisher/fleet.mjs:/app/offer-publisher/fleet.mjs:ro
+      - ../offer-publisher/publish-offer.mjs:/app/offer-publisher/publish-offer.mjs:ro
+      - ../offer-publisher/rfq.mjs:/app/offer-publisher/rfq.mjs:ro
     # No ports published: the maker only makes outbound connections (Sepolia
     # RPC, LEZ sequencer RPC, the waku fleet over TCP) — nothing listens.
     healthcheck:

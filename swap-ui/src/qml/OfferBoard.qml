@@ -122,8 +122,40 @@ Item {
         && !accepting
 
     onMarketLiveChanged: {
-        if (marketLive)
+        if (marketLive) {
             swapBackend.fetchOffers()
+            requestOffersNow()
+        }
+    }
+
+    // --- RFQ: on-demand offer requests (feat/rfq-on-demand-offers) ---------
+    // Publish an anonymous offer-request whenever the Market tab is live, so a
+    // maker responds with its current offer immediately instead of the board
+    // waiting for the maker's slow fallback heartbeat. Re-published every
+    // requestIntervalMs while the tab stays open (covers a maker that comes
+    // online after us) and stops when the tab closes. The maker heartbeat is
+    // still the reliable baseline — this only accelerates the first fill. The
+    // request carries no taker identity (privacy); see offer-publisher/rfq.mjs.
+    readonly property int requestIntervalMs: 20000
+
+    function requestOffersNow() {
+        if (board.marketLive)
+            swapBackend.publishOfferRequest()
+    }
+
+    // Re-ping when the tab is re-opened while the market was already live (the
+    // marketLive transition above won't fire in that case).
+    onVisibleChanged: {
+        if (visible)
+            requestOffersNow()
+    }
+
+    Timer {
+        id: requestTimer
+        interval: board.requestIntervalMs
+        running: board.marketLive && board.visible
+        repeat: true
+        onTriggered: board.requestOffersNow()
     }
 
     // --- Model ---------------------------------------------------------

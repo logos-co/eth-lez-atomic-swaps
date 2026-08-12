@@ -97,6 +97,13 @@ public:
     std::string publishOffer(const std::string& configJson);
     std::string fetchOffers();
 
+    // RFQ (request-for-quote): publish an anonymous offer-request so live makers
+    // respond with their current offer immediately. The maker's fallback
+    // heartbeat remains the reliable baseline; this just accelerates the first
+    // fill. Takes no arguments and carries no identity — see
+    // swap_delivery_adapter.h.
+    std::string publishOfferRequest();
+
     // Per-swap coordination over Delivery on /atomic-swaps/1/swap-<hashlock>/json.
     // Layered on top of the existing on-chain ETH/LEZ flow: the maker
     // subscribes after detecting the on-chain ETH lock, the taker publishes

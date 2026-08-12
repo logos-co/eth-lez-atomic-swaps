@@ -56,6 +56,7 @@ public:
     void initMessaging() override;
     void publishOffer() override;
     void fetchOffers() override;
+    void publishOfferRequest() override;
     void startAutoAccept() override;
     void stopAutoAccept() override;
 
