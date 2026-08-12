@@ -1086,13 +1086,30 @@ bool SwapUiPlugin::offerNamesCanonicalVenue(const QJsonObject& offer, QString* r
         defaultEthHtlcAddress().toStdString(),
         valueString(offer, QStringLiteral("lez_htlc_program_id")).toStdString(),
         canonicalLezHtlcProgramId().toStdString());
-    if (!check.ok) {
-        if (reason) {
-            *reason = QString::fromStdString(check.reason);
-        }
-        return false;
+    if (check.ok) {
+        return true;
     }
-    return true;
+    // The raw offered-vs-expected hex goes ONLY to the trace log — never into
+    // the user-facing message. A 64-char program id / 0x… address in a status
+    // line reads as a crash, not the protection it actually is.
+    swapUiTrace(QStringLiteral("offer rejected: non-canonical %1 (offered=%2 expected=%3)")
+                    .arg(check.mismatch == swap_ui::VenueField::EthContract
+                             ? QStringLiteral("eth_htlc_address")
+                             : QStringLiteral("lez_htlc_program_id"),
+                         QString::fromStdString(check.offered),
+                         QString::fromStdString(check.expected)));
+    if (reason) {
+        // Plain, short, reassuring — framed as protection, no hex. The status
+        // bar mirrors errorMessage, so keeping this short fixes it too.
+        *reason = (check.mismatch == swap_ui::VenueField::EthContract)
+            ? QStringLiteral("Blocked for your safety — this offer uses a swap contract this "
+                             "app doesn't recognize, so no funds were locked. Only accept "
+                             "offers using the standard contract.")
+            : QStringLiteral("Blocked for your safety — this offer routes through a swap "
+                             "program this app doesn't recognize, so no funds were locked. "
+                             "Only accept offers using the standard program.");
+    }
+    return false;
 }
 
 bool SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
@@ -1274,13 +1291,13 @@ bool SwapUiPlugin::validateConfigForAction(const QString& action,
         if (!swap_ui::hexEquals(ethHtlcAddress().toStdString(),
                                 defaultEthHtlcAddress().toStdString())) {
             addValidationError(errors, QStringLiteral("eth_htlc_address"),
-                               QStringLiteral("Must be the app's canonical ETH HTLC contract"));
+                               QStringLiteral("This app only trades on its built-in swap contract."));
             ok = false;
         }
         if (!swap_ui::hexEquals(lezHtlcProgramId().toStdString(),
                                 canonicalLezHtlcProgramId().toStdString())) {
             addValidationError(errors, QStringLiteral("lez_htlc_program_id"),
-                               QStringLiteral("Must be the app's canonical LEZ HTLC program"));
+                               QStringLiteral("This app only trades on its built-in swap program."));
             ok = false;
         }
     }

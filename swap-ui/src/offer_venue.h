@@ -60,11 +60,24 @@ inline bool hexEquals(const std::string& a, const std::string& b)
     return normalizeHex(a) == normalizeHex(b);
 }
 
+// Which venue field (if any) failed the canonical check.
+enum class VenueField {
+    None,        // matched — no mismatch
+    EthContract, // eth_htlc_address differs from canonical
+    LezProgram,  // lez_htlc_program_id differs from canonical
+};
+
 // Result of checking whether an offer names the canonical, pinned venue.
-// `ok == false` carries a human-readable `reason` suitable for the UI.
+// On a mismatch, `mismatch` names the offending field and `offered`/`expected`
+// carry the raw hex values — for DEBUG LOGGING ONLY. The user-facing message is
+// built by the caller (SwapUiPlugin) and deliberately contains no hex: a raw
+// 64-char program id or 0x… address in a status line reads as a crash, not the
+// "you were just protected" it actually is.
 struct VenueCheck {
     bool ok;
-    std::string reason;
+    VenueField mismatch;
+    std::string offered;
+    std::string expected;
 };
 
 // Verify that the offer's advertised venue matches the app's canonical values.
@@ -79,21 +92,13 @@ inline VenueCheck checkOfferVenue(const std::string& offerEthHtlc,
 {
     if (!normalizeHex(offerEthHtlc).empty()
         && !hexEquals(offerEthHtlc, canonicalEthHtlc)) {
-        return VenueCheck{
-            false,
-            "Offer names a non-canonical ETH HTLC contract (" + offerEthHtlc
-                + ") — refusing. The taker only trades on the app's pinned "
-                  "contract (" + canonicalEthHtlc + ")."};
+        return VenueCheck{false, VenueField::EthContract, offerEthHtlc, canonicalEthHtlc};
     }
     if (!normalizeHex(offerLezProgram).empty()
         && !hexEquals(offerLezProgram, canonicalLezProgram)) {
-        return VenueCheck{
-            false,
-            "Offer names a non-canonical LEZ HTLC program (" + offerLezProgram
-                + ") — refusing. The taker only trades on the app's pinned "
-                  "program (" + canonicalLezProgram + ")."};
+        return VenueCheck{false, VenueField::LezProgram, offerLezProgram, canonicalLezProgram};
     }
-    return VenueCheck{true, std::string{}};
+    return VenueCheck{true, VenueField::None, std::string{}, std::string{}};
 }
 
 } // namespace swap_ui

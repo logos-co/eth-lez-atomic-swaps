@@ -45,17 +45,23 @@ int main()
     expect("whitespace trimmed", hexEquals("  " + kEth + "  ", kEth));
     expect("different values not equal", !hexEquals(kEth, "0x0000000000000000000000000000000000000000"));
 
+    using swap_ui::VenueField;
+
     // Honest offer: both venue fields match the canonical values → accepted.
     {
         auto r = checkOfferVenue(kEth, kEth, kLez, kLez);
-        expect("honest offer accepted", r.ok && r.reason.empty());
+        expect("honest offer accepted", r.ok && r.mismatch == VenueField::None);
     }
 
-    // THE attack: offer names the attacker's OWN ETH HTLC contract → rejected.
+    // THE attack: offer names the attacker's OWN ETH HTLC contract → rejected,
+    // and the offending field is identified (offered/expected carried for logs).
     {
-        auto r = checkOfferVenue("0xdeadBEEFdeadBEEFdeadBEEFdeadBEEFdeadBEEF", kEth, kLez, kLez);
+        const std::string attacker = "0xdeadBEEFdeadBEEFdeadBEEFdeadBEEFdeadBEEF";
+        auto r = checkOfferVenue(attacker, kEth, kLez, kLez);
         expect("non-canonical eth contract rejected", !r.ok);
-        expect("eth rejection has a reason", !r.reason.empty());
+        expect("eth rejection identifies field", r.mismatch == VenueField::EthContract);
+        expect("eth rejection carries offered/expected for logs",
+               r.offered == attacker && r.expected == kEth);
     }
 
     // The attack via the LEZ program the maker controls → rejected.
@@ -64,6 +70,7 @@ int main()
             kEth, kEth,
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", kLez);
         expect("non-canonical lez program rejected", !r.ok);
+        expect("lez rejection identifies field", r.mismatch == VenueField::LezProgram);
     }
 
     // Case/0x variations of the canonical values still pass (no honest-path
