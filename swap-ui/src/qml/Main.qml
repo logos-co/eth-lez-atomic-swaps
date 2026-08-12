@@ -46,6 +46,12 @@ Item {
         readonly property string ethRpcUrl: root.backend ? root.backend.ethRpcUrl : ""
         readonly property string ethPrivateKey: root.backend ? root.backend.ethPrivateKey : ""
         readonly property string ethHtlcAddress: root.backend ? root.backend.ethHtlcAddress : ""
+        // Canonical pinned venue (offer-board ghost guard). Bridged per the
+        // facade contract (#124): a view reading an unbridged backend prop gets
+        // undefined. Empty until resolved → the board reads that as "unknown"
+        // (no ghosting), not a mismatch.
+        readonly property string canonicalEthHtlcAddress: root.backend ? root.backend.canonicalEthHtlcAddress : ""
+        readonly property string canonicalLezHtlcProgramId: root.backend ? root.backend.canonicalLezHtlcProgramId : ""
         readonly property string lezSequencerUrl: root.backend ? root.backend.lezSequencerUrl : ""
         readonly property string lezSigningKey: root.backend ? root.backend.lezSigningKey : ""
         readonly property string lezWalletHome: root.backend ? root.backend.lezWalletHome : ""

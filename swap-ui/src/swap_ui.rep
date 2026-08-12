@@ -18,6 +18,17 @@ class SwapUi
     PROP(QString ethRpcUrl READWRITE)
     PROP(QString ethPrivateKey READWRITE)
     PROP(QString ethHtlcAddress READWRITE)
+    // Canonical, PINNED swap venue (defense-in-depth for the offer board). These
+    // are the app's built-in values — the ETH HTLC contract (defaultEthHtlcAddress)
+    // and the LEZ HTLC program (defaultLezHtlcProgramId) — NOT the user-editable
+    // config fields above. The offer board ghosts (renders a disabled
+    // "blocked — unsafe" row for) any offer whose eth_htlc_address /
+    // lez_htlc_program_id differs from these, mirroring the accept-time venue
+    // check. Set once at startup (ETH synchronously; LEZ via the async default
+    // fill) and never overwritten by an offer. Empty until resolved, which the
+    // board treats as "not yet known" (no ghosting) rather than a mismatch.
+    PROP(QString canonicalEthHtlcAddress READWRITE)
+    PROP(QString canonicalLezHtlcProgramId READWRITE)
     PROP(QString lezSequencerUrl READWRITE)
     PROP(QString lezSigningKey READWRITE)
     PROP(QString lezWalletHome READWRITE)

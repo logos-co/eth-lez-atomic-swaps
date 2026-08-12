@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
+import "OfferFilter.js" as OfferFilter
 
 // Live offer board — the app's home screen.
 //
@@ -21,6 +22,13 @@ Item {
     readonly property int tabConfig: 1
     readonly property int tabMaker: 2
     readonly property int tabTaker: 3
+    // Spam caps (defense-in-depth on top of the backend cache's own caps).
+    // maxOffers bounds the total rendered set so a spammer can't grow the
+    // board unbounded; maxGhostRows bounds the "blocked — unsafe" ghost rows
+    // so a flood of non-canonical offers can't bury honest ones (beyond the
+    // cap, venue-mismatch offers are silently dropped, not ghosted).
+    readonly property int maxOffers: 200
+    readonly property int maxGhostRows: 4
 
     // --- Live state ----------------------------------------------------
     property int tick: 0                // 1 Hz clock driving countdowns/fades
@@ -37,6 +45,10 @@ Item {
     // fetchOffers during the round-trip window on a fresh install.
     property bool validationSettled: false
     property real bestRate: 0           // best LEZ-per-ETH on the board
+    // How many "blocked — unsafe" ghost rows are currently on the board
+    // (recomputed on every model change). Drives the subtle header counter —
+    // the calm "the app is protecting you" signal — no addresses, no styling.
+    property int blockedCount: 0
 
     readonly property var validationErrors: {
         try { return JSON.parse(swapBackend.validationErrorsJson || "{}") }
@@ -81,6 +93,9 @@ Item {
     }
 
     readonly property bool canAccept: sel !== null
+        // A ghosted (venue-mismatch) offer is never acceptable — the accept
+        // path stays disabled; the accept-time venue check is the true gate.
+        && !sel.blocked
         && !selExpired
         && swapBackend.ready
         && swapBackend.messagingConnected
@@ -107,30 +122,51 @@ Item {
         return o.maker_eth_address + ":" + o.lez_amount + ":" + o.eth_amount
     }
 
+    function ghostRowCount() {
+        var n = 0
+        for (var i = 0; i < offersModel.count; i++)
+            if (offersModel.get(i).blocked) n++
+        return n
+    }
+
+    // Merge a freshly-fetched batch. All safety classification (malformed drop,
+    // venue-mismatch ghosting, ghost + spam caps) lives in the pure, unit-tested
+    // OfferFilter.classifyOffers; this only applies its verdict to the model.
     function mergeOffers(offersJson) {
         var obj = {}
         try { obj = JSON.parse(offersJson || "{}") } catch (e) { return }
         if (!obj.offers || obj.offers.length === 0)
             return
-        var changed = false
-        var nowSec = Math.floor(Date.now() / 1000)
-        for (var j = 0; j < obj.offers.length; j++) {
-            var o = obj.offers[j]
-            // Never surface offers that are already expired on arrival, nor
-            // malformed ones without a positive timelock — those would render
-            // permanently "expired" yet never satisfy sweep()'s prune guard.
-            var expiry = Math.min(Number(o.lez_timelock || 0), Number(o.eth_timelock || 0))
-            if (expiry <= 0 || nowSec >= expiry)
-                continue
-            var key = offerKey(o)
-            var exists = false
-            for (var i = 0; i < offersModel.count; i++) {
-                if (offersModel.get(i).key === key) { exists = true; break }
-            }
-            if (exists)
-                continue
+
+        var existingKeys = []
+        for (var i = 0; i < offersModel.count; i++)
+            existingKeys.push(offersModel.get(i).key)
+        var ghosts = ghostRowCount()
+
+        var admit = OfferFilter.classifyOffers(obj.offers, {
+            nowSec: Math.floor(Date.now() / 1000),
+            canonicalEth: swapBackend.canonicalEthHtlcAddress,
+            canonicalLez: swapBackend.canonicalLezHtlcProgramId,
+            existingKeys: existingKeys,
+            ghostCount: ghosts,
+            honestCount: offersModel.count - ghosts,
+            maxOffers: board.maxOffers,
+            maxGhostRows: board.maxGhostRows,
+            keyOf: board.offerKey
+        })
+        if (admit.length === 0)
+            return
+
+        for (var a = 0; a < admit.length; a++) {
+            var o = admit[a].offer
+            // Honest overflow is capped in classifyOffers, but evict the oldest
+            // honest row here too so a long-lived board stays bounded as fresh
+            // honest offers arrive.
+            if (!admit[a].blocked
+                    && offersModel.count - ghostRowCount() >= board.maxOffers)
+                evictOldestHonest()
             offersModel.insert(0, {
-                key: key,
+                key: admit[a].key,
                 hashlock: String(o.hashlock || ""),
                 lezAmount: String(o.lez_amount),
                 ethAmountWei: String(o.eth_amount),
@@ -141,12 +177,21 @@ Item {
                 lezProgramId: String(o.lez_htlc_program_id || ""),
                 ethHtlcAddr: String(o.eth_htlc_address || ""),
                 receivedMs: Number(o.timestamp_ms || Date.now()),
-                isNew: true
+                isNew: true,
+                blocked: admit[a].blocked
             })
-            changed = true
         }
-        if (changed)
-            afterModelChange()
+        afterModelChange()
+    }
+
+    // Remove the oldest honest (non-blocked) row — the bottom-most non-ghost.
+    function evictOldestHonest() {
+        for (var i = offersModel.count - 1; i >= 0; i--) {
+            if (!offersModel.get(i).blocked) {
+                offersModel.remove(i)
+                return
+            }
+        }
     }
 
     // 1 Hz sweep: expire the NEW flag, prune long-expired offers.
@@ -171,13 +216,19 @@ Item {
     }
 
     function afterModelChange() {
-        // Best rate (only meaningful with competition)
+        // Best rate (only meaningful with competition). Ghosted (blocked)
+        // rows are excluded — a non-canonical offer must never set the market
+        // rate or win the ★ best-deal badge.
         var best = 0
+        var blocked = 0
         for (var i = 0; i < offersModel.count; i++) {
-            var r = rateOf(offersModel.get(i))
+            var row = offersModel.get(i)
+            if (row.blocked) { blocked++; continue }
+            var r = rateOf(row)
             if (r > best) best = r
         }
         board.bestRate = best
+        board.blockedCount = blocked
         // Keep selection stable by key. Auto-select the freshest offer only
         // when nothing was selected; if the selected offer was pruned, clear
         // instead — silently swapping the detail pane (and an enabled Accept)
@@ -202,7 +253,8 @@ Item {
                     makerEth: o.makerEth, makerLez: o.makerLez,
                     lezTimelock: o.lezTimelock, ethTimelock: o.ethTimelock,
                     lezProgramId: o.lezProgramId, ethHtlcAddr: o.ethHtlcAddr,
-                    receivedMs: o.receivedMs, isNew: o.isNew
+                    receivedMs: o.receivedMs, isNew: o.isNew,
+                    blocked: o.blocked
                 }
             }
         }
@@ -448,11 +500,24 @@ Item {
                 }
 
                 Text {
-                    text: offersModel.count === 1
-                          ? "1 offer"
-                          : offersModel.count + " offers"
+                    // Count only the tradable (non-ghost) offers here; the
+                    // blocked ones get their own calm counter below.
+                    readonly property int liveCount: offersModel.count - board.blockedCount
+                    text: liveCount === 1 ? "1 offer" : liveCount + " offers"
                     color: Theme.textMuted
                     font.pixelSize: Theme.fontSmall
+                }
+
+                // Subtle "the app is protecting you" signal: how many offers
+                // were flagged unsafe (non-canonical venue) and rendered as
+                // disabled ghost rows. No addresses, no scary styling — just a
+                // muted count so the board is transparent, never tempting.
+                Text {
+                    visible: board.blockedCount > 0
+                    text: "· " + board.blockedCount + " blocked"
+                    color: Theme.textMuted
+                    font.pixelSize: Theme.fontSmall
+                    textFormat: Text.PlainText
                 }
 
                 Item { Layout.fillWidth: true }
@@ -873,6 +938,10 @@ Item {
                                 // ListView add/remove transitions.
                                 opacity: {
                                     void board.tick
+                                    // Ghosted (venue-blocked) rows read as
+                                    // clearly de-emphasised — present, but not
+                                    // a live trade.
+                                    if (model.blocked) return 0.5
                                     return offerRow.remain <= 0
                                            ? 0.35
                                            : board.ageOpacity(model.receivedMs)
@@ -925,6 +994,7 @@ Item {
                                     spacing: 6
 
                                     Text {
+                                        textFormat: Text.PlainText
                                         text: model.lezAmount + " LEZ"
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
@@ -938,6 +1008,7 @@ Item {
                                     }
                                     Text {
                                         Layout.fillWidth: true
+                                        textFormat: Text.PlainText
                                         text: board.weiToEth(model.ethAmountWei)
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
@@ -946,20 +1017,30 @@ Item {
                                     }
                                 }
 
-                                // Rate (best deal highlighted; graft: ticker)
+                                // Rate (best deal highlighted; graft: ticker).
+                                // For a ghosted row the rate/★ is replaced by a
+                                // calm "blocked — unsafe" badge: the offer's
+                                // economics are irrelevant, the point is that
+                                // the app refused it.
                                 Text {
                                     Layout.preferredWidth: 96
-                                    text: board.fmtRate(offerRow.rowRate)
-                                          + (offerRow.bestDeal ? " ★" : "")
-                                    color: offerRow.bestDeal ? Theme.success : Theme.textSecondary
+                                    textFormat: Text.PlainText
+                                    text: model.blocked
+                                          ? "⚠ blocked"
+                                          : board.fmtRate(offerRow.rowRate)
+                                            + (offerRow.bestDeal ? " ★" : "")
+                                    color: model.blocked
+                                           ? Theme.warning
+                                           : (offerRow.bestDeal ? Theme.success : Theme.textSecondary)
                                     font.pixelSize: Theme.fontSmall
                                     font.family: Theme.monoFont
-                                    font.bold: offerRow.bestDeal
+                                    font.bold: offerRow.bestDeal || model.blocked
                                 }
 
                                 // Maker
                                 Text {
                                     Layout.fillWidth: true
+                                    textFormat: Text.PlainText
                                     text: board.shortHex(model.makerEth, 8, 4)
                                     color: Theme.textMuted
                                     font.pixelSize: 12
@@ -1061,7 +1142,7 @@ Item {
                                     font.letterSpacing: 2
                                 }
                                 Rectangle {
-                                    visible: board.sel !== null && board.sel.isNew
+                                    visible: board.sel !== null && board.sel.isNew && !board.sel.blocked
                                     implicitWidth: newChipText.implicitWidth + 12
                                     implicitHeight: 16
                                     radius: 8
@@ -1205,12 +1286,64 @@ Item {
                                 value: board.sel !== null ? board.sel.ethHtlcAddr : ""
                             }
 
+                            // Venue-blocked (ghost) banner: the calm block
+                            // explanation shown in place of the accept controls
+                            // for a non-canonical offer. The Accept button below
+                            // is hidden for these; the accept-time venue check
+                            // is the true gate regardless.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.topMargin: Theme.spacingSmall
+                                visible: board.sel !== null && board.sel.blocked
+                                implicitHeight: blockedCol.implicitHeight + Theme.spacingNormal * 2
+                                radius: Theme.radiusNormal
+                                color: Theme.surfaceLight
+                                border.color: Theme.warning
+                                border.width: 1
+
+                                ColumnLayout {
+                                    id: blockedCol
+                                    anchors {
+                                        left: parent.left
+                                        right: parent.right
+                                        verticalCenter: parent.verticalCenter
+                                        margins: Theme.spacingNormal
+                                    }
+                                    spacing: 6
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 6
+                                        Text {
+                                            text: "🛡"
+                                            font.pixelSize: Theme.fontNormal
+                                        }
+                                        Text {
+                                            text: "Blocked — unsafe"
+                                            color: Theme.warning
+                                            font.pixelSize: Theme.fontNormal
+                                            font.bold: true
+                                            textFormat: Text.PlainText
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        textFormat: Text.PlainText
+                                        text: "Blocked for your safety — this offer routes through a swap program this app doesn't recognize, so no funds were locked."
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSmall
+                                        wrapMode: Text.Wrap
+                                    }
+                                }
+                            }
+
                             // Blocked reasons
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 Layout.topMargin: Theme.spacingSmall
                                 spacing: 4
                                 visible: !board.canAccept && !board.accepting
+                                    && !(board.sel !== null && board.sel.blocked)
 
                                 BlockedReason {
                                     reason: "Backend is starting…"
@@ -1245,11 +1378,13 @@ Item {
                                 wrapMode: Text.Wrap
                             }
 
-                            // ACCEPT
+                            // ACCEPT — hidden entirely for a ghosted offer (the
+                            // block banner above stands in its place).
                             Button {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 48
                                 Layout.topMargin: Theme.spacingSmall
+                                visible: !(board.sel !== null && board.sel.blocked)
                                 enabled: board.canAccept
                                 text: board.accepting
                                       ? "Starting swap…"
@@ -1278,6 +1413,7 @@ Item {
 
                             Text {
                                 Layout.fillWidth: true
+                                visible: !(board.sel !== null && board.sel.blocked)
                                 text: "Accepting locks your ETH in the HTLC; the maker then locks LEZ and the swap completes automatically. Progress appears in the Taker tab."
                                 color: Theme.textMuted
                                 font.pixelSize: 11
@@ -1305,6 +1441,10 @@ Item {
         }
         Text {
             Layout.fillWidth: true
+            // Offer-derived, attacker-controlled strings render as plain text
+            // only — never let a maker inject rich text through an address or
+            // program-id field.
+            textFormat: Text.PlainText
             text: parent.value !== "" ? parent.value : "—"
             color: Theme.textSecondary
             font.pixelSize: 11
