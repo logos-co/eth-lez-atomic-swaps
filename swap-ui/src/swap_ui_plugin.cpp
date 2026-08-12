@@ -289,6 +289,19 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setCoordinationEventsJson(QStringLiteral("[]"));
     setCoordinationLastResultJson(QString{});
 
+    // Canonical pinned swap venue exposed to the offer board (facade contract,
+    // #124) for the receive-side ghost guard. These replica props mirror the
+    // app's built-in pin — the ETH HTLC contract (defaultEthHtlcAddress, known
+    // synchronously) and the LEZ HTLC program (filled from the async library
+    // default in initLogos below). They are independent of the user-editable
+    // config fields, so a hand-edited ethHtlcAddress never widens what the
+    // board trusts. #132's accept-time venue check remains the true gate and is
+    // untouched; this only feeds the board's visible "blocked — unsafe" ghost
+    // rows. Empty LEZ until resolved → the board reads that as "unknown" (no
+    // ghosting on LEZ), never a mismatch.
+    setCanonicalEthHtlcAddress(defaultEthHtlcAddress());
+    setCanonicalLezHtlcProgramId(QString{});
+
     setReceiptsJson(QStringLiteral("[]"));
 
     setSetupRunning(false);
@@ -384,6 +397,10 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
             // independently of whether we also fill the (possibly user-set)
             // config field below.
             m_canonicalLezHtlcProgramId = programId;
+            // Mirror the same pin onto the board-facing replica prop (facade
+            // boundary): the C++ gate reads m_canonicalLezHtlcProgramId; the
+            // QML board reads the replica prop. Set from the identical source.
+            setCanonicalLezHtlcProgramId(programId);
         }
         if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
             setLezHtlcProgramId(programId);
@@ -932,10 +949,14 @@ void SwapUiPlugin::resetConfig()
     }
     applyDefaultConfig();
     validateConfig();
+    // Reset re-pins the board-facing canonical ETH venue (config was just
+    // cleared to defaults); the canonical LEZ program is re-filled below.
+    setCanonicalEthHtlcAddress(defaultEthHtlcAddress());
     if (m_swap) {
         m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
             if (!programId.isEmpty()) {
                 m_canonicalLezHtlcProgramId = programId;
+                setCanonicalLezHtlcProgramId(programId);
             }
             if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
                 setLezHtlcProgramId(programId);
