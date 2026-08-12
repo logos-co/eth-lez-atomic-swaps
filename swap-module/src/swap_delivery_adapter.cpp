@@ -205,6 +205,7 @@ constexpr int kLogosDevClusterId = 3;
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonValue>
 #include <QtCore/QMetaType>
+#include <QtCore/QRegularExpression>
 #include <QtCore/QString>
 #include <QtCore/QVariant>
 
@@ -330,6 +331,69 @@ QByteArray swapDeliveryDecodeEventPayload(const QVariant& payloadArg)
     }
     return {};
 }
+
+// Strict well-formedness check for a received offer, BEYOND mere field
+// presence (hasOfferCoreFields). A malformed offer is dropped on ARRIVAL so it
+// never reaches the offer cache or the board:
+//
+//  * maker_eth_address / eth_htlc_address must be a 20-byte hex address
+//    (0x-optional, 40 hex chars);
+//  * lez_htlc_program_id must be a 32-byte hex program id (64 hex chars);
+//  * lez_amount / eth_amount must parse as a positive, finite number;
+//  * lez_timelock / eth_timelock must parse as a positive integer (absolute
+//    unix seconds).
+//
+// The timelock rule is also the NaN/zero-timelock guard: an offer whose
+// timelock never resolves to a real future second would render permanently
+// "expired" on the board yet never satisfy its prune guard — un-prunable spam.
+// Rejecting it at the source closes that at the earliest point. This does NOT
+// check the swap VENUE (eth_htlc_address / lez_htlc_program_id equality to the
+// app's canonical pin): a well-formed but non-canonical offer is deliberately
+// left to travel to the UI, which ghosts it (visible "blocked — unsafe" row)
+// while the accept-time venue check remains the true gate. Exposed (external
+// linkage, QtCore-only) so the swap-module unit tests exercise the exact
+// contract the messageReceived handler relies on.
+bool swapDeliveryOfferIsWellFormed(const QJsonObject& offer)
+{
+    static const QRegularExpression kAddr(
+        QStringLiteral("\\A(0x)?[0-9a-fA-F]{40}\\z"));
+    static const QRegularExpression kProgram(
+        QStringLiteral("\\A(0x)?[0-9a-fA-F]{64}\\z"));
+
+    const auto strOf = [&](const char* key) {
+        return offer.value(QLatin1String(key)).toVariant().toString().trimmed();
+    };
+
+    if (!kAddr.match(strOf("maker_eth_address")).hasMatch()) {
+        return false;
+    }
+    if (!kAddr.match(strOf("eth_htlc_address")).hasMatch()) {
+        return false;
+    }
+    if (!kProgram.match(strOf("lez_htlc_program_id")).hasMatch()) {
+        return false;
+    }
+
+    const auto positiveNumber = [&](const char* key) {
+        bool ok = false;
+        const double v = strOf(key).toDouble(&ok);
+        return ok && std::isfinite(v) && v > 0.0;
+    };
+    if (!positiveNumber("lez_amount") || !positiveNumber("eth_amount")) {
+        return false;
+    }
+
+    const auto positiveInteger = [&](const char* key) {
+        bool ok = false;
+        const long long v = strOf(key).toLongLong(&ok);
+        return ok && v > 0;
+    };
+    if (!positiveInteger("lez_timelock") || !positiveInteger("eth_timelock")) {
+        return false;
+    }
+
+    return true;
+}
 #endif // __has_include(<QtCore/QJsonDocument>)
 
 #if __has_include("logos_api.h") && __has_include("logos_sdk.h") && __has_include("logos_types.h")
@@ -360,6 +424,12 @@ namespace {
 constexpr const char* kOffersTopic = "/atomic-swaps/1/offers/json";
 constexpr qsizetype kMaxOfferPayloadBytes = 64 * 1024;
 constexpr qsizetype kMaxCachedOffers = 256;
+// Per-maker fairness cap on the offer cache. A spammer rotating hashlocks
+// under a single maker address cannot grow the cache unbounded nor bury
+// honest makers past this many live offers; the oldest offer from that maker
+// is evicted once the cap is reached. Well below kMaxCachedOffers so many
+// distinct honest makers still fit.
+constexpr int kMaxCachedOffersPerMaker = 8;
 constexpr qsizetype kMaxCachedSwapEventsPerSwap = 32;
 constexpr qsizetype kMaxTrackedSwaps = 64;
 
@@ -700,6 +770,19 @@ void wireEventsLocked(DeliveryState& s)
                         "(missing required offer fields)\n");
                 return;
             }
+            // Receive-side malformed filter (defense-in-depth, review P1s:
+            // offer type-validation + NaN-timelock). A bad-hex address, a
+            // non-numeric/non-positive amount, or a NaN/negative/zero timelock
+            // is dropped here so it never reaches the cache or the board.
+            // Venue (canonical eth_htlc_address / lez_htlc_program_id) is NOT
+            // checked here — a well-formed but non-canonical offer travels on
+            // to the UI, which ghosts it; the accept-time check is the gate.
+            if (!swapDeliveryOfferIsWellFormed(offer)) {
+                fprintf(stderr,
+                        "SwapDeliveryAdapter: dropped offers-topic payload "
+                        "(malformed offer fields)\n");
+                return;
+            }
             offer.insert(QStringLiteral("message_hash"), data.at(0).toString());
             offer.insert(QStringLiteral("timestamp_ms"), QDateTime::currentMSecsSinceEpoch());
 
@@ -707,6 +790,39 @@ void wireEventsLocked(DeliveryState& s)
             std::lock_guard<std::recursive_mutex> lock(st.mutex);
             while (st.offers.size() >= kMaxCachedOffers) {
                 st.offers.removeAt(0);
+            }
+            // Per-maker fairness cap (review P1: spam-cap). Evict this maker's
+            // oldest cached offer once it already holds kMaxCachedOffersPerMaker
+            // — a spammer rotating hashlocks under one address cannot bury
+            // honest makers.
+            const QString makerKey = offer.value(QStringLiteral("maker_eth_address"))
+                                         .toString().trimmed().toLower();
+            if (!makerKey.isEmpty()) {
+                const auto makerCount = [&]() {
+                    int c = 0;
+                    for (const QJsonValue& v : st.offers) {
+                        if (v.toObject().value(QStringLiteral("maker_eth_address"))
+                                .toString().trimmed().toLower() == makerKey) {
+                            ++c;
+                        }
+                    }
+                    return c;
+                };
+                while (makerCount() >= kMaxCachedOffersPerMaker) {
+                    bool removed = false;
+                    for (int i = 0; i < st.offers.size(); ++i) {
+                        if (st.offers.at(i).toObject()
+                                .value(QStringLiteral("maker_eth_address"))
+                                .toString().trimmed().toLower() == makerKey) {
+                            st.offers.removeAt(i);
+                            removed = true;
+                            break;
+                        }
+                    }
+                    if (!removed) {
+                        break;
+                    }
+                }
             }
             st.offers.append(offer);
             // Stable end-to-end reception marker: the basecamp-ui-smoke CI

@@ -3,6 +3,8 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QString>
 #include <QVariant>
 
@@ -16,6 +18,7 @@ std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
 int swapDeliveryParsePeerCountFromMetrics(const std::string& metricsText);
 QString swapDeliveryConfigJson(const std::string& configJson);
 QByteArray swapDeliveryDecodeEventPayload(const QVariant& payloadArg);
+bool swapDeliveryOfferIsWellFormed(const QJsonObject& offer);
 
 extern "C" {
 void mock_swap_ffi_reset();
@@ -358,6 +361,94 @@ LOGOS_TEST(fetch_offers_preserves_empty_offers_shape_without_runtime) {
     const auto offers = impl.fetchOffers();
     LOGOS_ASSERT_CONTAINS(offers, R"("offers":[])");
     LOGOS_ASSERT_CONTAINS(offers, R"("backend":"delivery_module")");
+}
+
+// ── receive-side offer well-formedness (feat/safe-offer-board) ─────────────
+//
+// swapDeliveryOfferIsWellFormed is the malformed-offer drop that runs in the
+// messageReceived handler BEFORE an offer is cached. It closes three
+// messaging-review P1s at the source: offer type-validation, NaN-timelock
+// (un-prunable "expired forever" spam), and non-numeric amounts. It does NOT
+// check the swap VENUE — a well-formed but non-canonical offer is deliberately
+// left to travel to the UI (which ghosts it); these tests pin that boundary.
+
+namespace {
+QJsonObject offerObj(const char* json) {
+    return QJsonDocument::fromJson(QByteArray(json)).object();
+}
+// A canonical, fully well-formed offer as it arrives on the wire: hex
+// addresses/program, integer wei eth_amount, decimal lez_amount, absolute
+// unix-second timelocks.
+const char* kGoodOffer = R"({
+    "hashlock":"aa",
+    "lez_amount":"150",
+    "eth_amount":"200000000000000",
+    "maker_eth_address":"0x351B0EA07739FA9F6769213927D7836a790A5FAF",
+    "maker_lez_account":"lez1abc",
+    "lez_timelock":2000000000,
+    "eth_timelock":2000000600,
+    "lez_htlc_program_id":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "eth_htlc_address":"0x351B0EA07739FA9F6769213927D7836a790A5FAF"
+})";
+} // namespace
+
+LOGOS_TEST(offer_wellformed_accepts_canonical_and_non_canonical_venue) {
+    // Honest, well-formed offer → accepted.
+    LOGOS_ASSERT(swapDeliveryOfferIsWellFormed(offerObj(kGoodOffer)));
+
+    // A DIFFERENT (attacker) but structurally VALID venue is still well-formed
+    // — the malformed filter must pass it through so the UI can ghost it.
+    QJsonObject nonCanonical = offerObj(kGoodOffer);
+    nonCanonical.insert(QStringLiteral("eth_htlc_address"),
+                        QStringLiteral("0xdeadBEEFdeadBEEFdeadBEEFdeadBEEFdeadBEEF"));
+    LOGOS_ASSERT(swapDeliveryOfferIsWellFormed(nonCanonical));
+}
+
+LOGOS_TEST(offer_wellformed_rejects_bad_hex_and_missing_fields) {
+    // Non-hex maker address.
+    QJsonObject badMaker = offerObj(kGoodOffer);
+    badMaker.insert(QStringLiteral("maker_eth_address"), QStringLiteral("not-an-address"));
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(badMaker));
+
+    // Truncated program id (too short).
+    QJsonObject badProgram = offerObj(kGoodOffer);
+    badProgram.insert(QStringLiteral("lez_htlc_program_id"), QStringLiteral("0102"));
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(badProgram));
+
+    // Missing eth_htlc_address entirely.
+    QJsonObject missing = offerObj(kGoodOffer);
+    missing.remove(QStringLiteral("eth_htlc_address"));
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(missing));
+}
+
+LOGOS_TEST(offer_wellformed_rejects_nan_negative_and_zero_timelocks) {
+    // NaN timelock (a string that never parses to a real second) — the
+    // un-prunable-spam bug this filter closes.
+    QJsonObject nan = offerObj(kGoodOffer);
+    nan.insert(QStringLiteral("lez_timelock"), QStringLiteral("NaN"));
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(nan));
+
+    // Zero timelock.
+    QJsonObject zero = offerObj(kGoodOffer);
+    zero.insert(QStringLiteral("eth_timelock"), 0);
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(zero));
+
+    // Negative timelock.
+    QJsonObject neg = offerObj(kGoodOffer);
+    neg.insert(QStringLiteral("lez_timelock"), -5);
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(neg));
+}
+
+LOGOS_TEST(offer_wellformed_rejects_bad_amounts) {
+    // Non-numeric amount.
+    QJsonObject junk = offerObj(kGoodOffer);
+    junk.insert(QStringLiteral("eth_amount"), QStringLiteral("free-money"));
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(junk));
+
+    // Zero amount.
+    QJsonObject zero = offerObj(kGoodOffer);
+    zero.insert(QStringLiteral("lez_amount"), QStringLiteral("0"));
+    LOGOS_ASSERT(!swapDeliveryOfferIsWellFormed(zero));
 }
 
 LOGOS_TEST(run_maker_forwards_progress_events) {
