@@ -321,6 +321,16 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     connect(&m_coordinationPollTimer, &QTimer::timeout,
             this, &SwapUiPlugin::coordinationPollSwapEvents);
 
+    // Post-swap settle-poll: a LEZ claim confirms ~1 min after a swap finishes,
+    // so the balance refresh fired at completion reads the stale pre-claim
+    // amount. This single-shot timer re-refreshes on a delay; the coordinator
+    // decides (in completeBalanceRefresh) whether the balance has settled yet
+    // or another tick is warranted, up to a bounded cap.
+    m_balanceSettleTimer.setInterval(15000);
+    m_balanceSettleTimer.setSingleShot(true);
+    connect(&m_balanceSettleTimer, &QTimer::timeout,
+            this, &SwapUiPlugin::requestAutomaticBalanceRefresh);
+
     // Config-file save is now synchronous (see scheduleConfigSave()) — no
     // debounce timer to wire up here any more. installSignalHandlers() below
     // covers the out-of-process teardown case where even a synchronous write
@@ -1601,6 +1611,20 @@ void SwapUiPlugin::requestAutomaticBalanceRefresh()
     }
 }
 
+std::string SwapUiPlugin::balanceSnapshotKey() const
+{
+    return (ethBalance() + QLatin1Char('|') + lezBalance()).toStdString();
+}
+
+void SwapUiPlugin::beginBalanceSettle()
+{
+    // Poll every 15s (m_balanceSettleTimer) for up to ~2 min after a swap
+    // finishes, stopping early the moment the balance changes vs this snapshot.
+    m_balanceSettleTimer.stop();
+    m_balanceRefreshCoordinator.beginSettle(balanceSnapshotKey(), 8);
+    requestAutomaticBalanceRefresh();
+}
+
 void SwapUiPlugin::completeBalanceRefresh(const QString& resultJson)
 {
     applyBalancesResult(resultJson);
@@ -1616,6 +1640,13 @@ void SwapUiPlugin::completeBalanceRefresh(const QString& resultJson)
         return;
     }
     setBalancesLoading(false);
+
+    // If a post-swap settle-poll is active, decide whether the balance has
+    // moved yet. While it hasn't (and we're under the attempt cap), schedule
+    // another delayed refresh so the header catches the claim once it confirms.
+    if (m_balanceRefreshCoordinator.observeSettle(balanceSnapshotKey())) {
+        m_balanceSettleTimer.start();
+    }
 }
 
 void SwapUiPlugin::applyBalancesResult(const QString& resultJson)
@@ -1693,7 +1724,7 @@ void SwapUiPlugin::handleMakerFinished(const QString& resultJson)
     setResultStatus(resultJson,
                     QStringLiteral("Maker swap finished"),
                     QStringLiteral("Maker swap failed"));
-    requestAutomaticBalanceRefresh();
+    beginBalanceSettle();
 }
 
 void SwapUiPlugin::handleTakerFinished(const QString& resultJson)
@@ -1717,7 +1748,7 @@ void SwapUiPlugin::handleTakerFinished(const QString& resultJson)
     setResultStatus(resultJson,
                     QStringLiteral("Taker swap finished"),
                     QStringLiteral("Taker swap failed"));
-    requestAutomaticBalanceRefresh();
+    beginBalanceSettle();
 }
 
 void SwapUiPlugin::handleAutoAcceptFinished(const QString& resultJson)
@@ -1741,7 +1772,7 @@ void SwapUiPlugin::handleAutoAcceptFinished(const QString& resultJson)
     setResultStatus(resultJson,
                     QStringLiteral("Auto-accept stopped"),
                     QStringLiteral("Auto-accept failed"));
-    requestAutomaticBalanceRefresh();
+    beginBalanceSettle();
 }
 
 void SwapUiPlugin::handleSetupFundingFinished(const QString& resultJson)
@@ -2301,7 +2332,7 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         }
         clearMakerProgress();
         setMakerCurrentStep(QStringLiteral("WaitingForEthLock"));
-        requestAutomaticBalanceRefresh();
+        beginBalanceSettle();
     } else if (step == QStringLiteral("AutoAcceptSwapFailed")) {
         setAutoAcceptFailed(autoAcceptFailed() + 1);
         QJsonObject entry;

@@ -164,6 +164,12 @@ private:
     static void unixSignalHandler(int sig);
 
     void setBusyState();
+    // Start a bounded post-swap settle-poll (see BalanceRefreshCoordinator):
+    // snapshot the current balance and keep refreshing until it changes or the
+    // attempt cap is hit, so the header reflects a claim that confirms shortly
+    // after the swap "finishes" without a manual Refresh.
+    void beginBalanceSettle();
+    std::string balanceSnapshotKey() const;
     void updateRunning();
     void clearMakerProgress();
     void clearTakerProgress();
@@ -241,6 +247,7 @@ private:
     LogosObject* m_eventObject = nullptr;
     QTimer m_messagingPollTimer;
     QTimer m_coordinationPollTimer;
+    QTimer m_balanceSettleTimer;
     QSocketNotifier* m_signalNotifier = nullptr;
     bool m_messagingInitInFlight = false;
     bool m_autoMessagingEnabled = false;
