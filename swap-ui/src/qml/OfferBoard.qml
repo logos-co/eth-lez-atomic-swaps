@@ -22,6 +22,21 @@ Item {
     readonly property int tabMaker: 2
     readonly property int tabTaker: 3
 
+    // Offer table column model — single source of truth shared by the
+    // header row and every delegate row so they can never drift apart.
+    // Each cell additionally pins Layout.minimumWidth to 0 (and
+    // maximumWidth to the same value): QtQuick.Layouts otherwise defaults
+    // an unset minimumWidth to the item's *implicit content width*, which
+    // silently grows a cell past its preferredWidth whenever the content is
+    // wider than the column (the bold, letter-spaced header labels vs. the
+    // variable-length live amounts) — pushing every following column out of
+    // sync between the two rows even though both declare the same number.
+    readonly property int colSpacerW: 12
+    readonly property int colOfferW: 150
+    readonly property int colRateW: 96
+    readonly property int colAgeW: 44
+    readonly property int colExpiresW: 72
+
     // --- Live state ----------------------------------------------------
     property int tick: 0                // 1 Hz clock driving countdowns/fades
     property int modelRev: 0            // bumped on any model change (sel dep)
@@ -737,16 +752,24 @@ Item {
                             }
                             spacing: Theme.spacingNormal
 
-                            Item { width: 12 }
+                            Item { width: board.colSpacerW }
                             Text {
-                                Layout.preferredWidth: 150
+                                Layout.preferredWidth: board.colOfferW
+                                Layout.minimumWidth: 0
+                                Layout.maximumWidth: board.colOfferW
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignLeft
                                 text: "OFFER"
                                 color: Theme.textMuted
                                 font.pixelSize: 11; font.bold: true
                                 font.letterSpacing: 1
                             }
                             Text {
-                                Layout.preferredWidth: 96
+                                Layout.preferredWidth: board.colRateW
+                                Layout.minimumWidth: 0
+                                Layout.maximumWidth: board.colRateW
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignRight
                                 text: "RATE LEZ/ETH"
                                 color: Theme.textMuted
                                 font.pixelSize: 11; font.bold: true
@@ -754,13 +777,19 @@ Item {
                             }
                             Text {
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignLeft
                                 text: "MAKER"
                                 color: Theme.textMuted
                                 font.pixelSize: 11; font.bold: true
                                 font.letterSpacing: 1
                             }
                             Text {
-                                Layout.preferredWidth: 44
+                                Layout.preferredWidth: board.colAgeW
+                                Layout.minimumWidth: 0
+                                Layout.maximumWidth: board.colAgeW
+                                elide: Text.ElideRight
                                 horizontalAlignment: Text.AlignRight
                                 text: "AGE"
                                 color: Theme.textMuted
@@ -768,7 +797,10 @@ Item {
                                 font.letterSpacing: 1
                             }
                             Text {
-                                Layout.preferredWidth: 72
+                                Layout.preferredWidth: board.colExpiresW
+                                Layout.minimumWidth: 0
+                                Layout.maximumWidth: board.colExpiresW
+                                elide: Text.ElideRight
                                 horizontalAlignment: Text.AlignRight
                                 text: "EXPIRES"
                                 color: Theme.textMuted
@@ -883,7 +915,7 @@ Item {
 
                                 // Freshness ping (graft: card spec)
                                 Item {
-                                    width: 12; height: 12
+                                    width: board.colSpacerW; height: 12
 
                                     Rectangle {
                                         id: pingRing
@@ -921,10 +953,14 @@ Item {
 
                                 // Pair amounts
                                 RowLayout {
-                                    Layout.preferredWidth: 150
+                                    Layout.preferredWidth: board.colOfferW
+                                    Layout.minimumWidth: 0
+                                    Layout.maximumWidth: board.colOfferW
                                     spacing: 6
 
                                     Text {
+                                        Layout.minimumWidth: 0
+                                        elide: Text.ElideRight
                                         text: model.lezAmount + " LEZ"
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
@@ -938,6 +974,7 @@ Item {
                                     }
                                     Text {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
                                         text: board.weiToEth(model.ethAmountWei)
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
@@ -948,7 +985,11 @@ Item {
 
                                 // Rate (best deal highlighted; graft: ticker)
                                 Text {
-                                    Layout.preferredWidth: 96
+                                    Layout.preferredWidth: board.colRateW
+                                    Layout.minimumWidth: 0
+                                    Layout.maximumWidth: board.colRateW
+                                    elide: Text.ElideRight
+                                    horizontalAlignment: Text.AlignRight
                                     text: board.fmtRate(offerRow.rowRate)
                                           + (offerRow.bestDeal ? " ★" : "")
                                     color: offerRow.bestDeal ? Theme.success : Theme.textSecondary
@@ -960,6 +1001,8 @@ Item {
                                 // Maker
                                 Text {
                                     Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    horizontalAlignment: Text.AlignLeft
                                     text: board.shortHex(model.makerEth, 8, 4)
                                     color: Theme.textMuted
                                     font.pixelSize: 12
@@ -969,7 +1012,10 @@ Item {
 
                                 // Age
                                 Text {
-                                    Layout.preferredWidth: 44
+                                    Layout.preferredWidth: board.colAgeW
+                                    Layout.minimumWidth: 0
+                                    Layout.maximumWidth: board.colAgeW
+                                    elide: Text.ElideRight
                                     horizontalAlignment: Text.AlignRight
                                     text: {
                                         void board.tick
@@ -982,7 +1028,10 @@ Item {
 
                                 // Expiry countdown
                                 Text {
-                                    Layout.preferredWidth: 72
+                                    Layout.preferredWidth: board.colExpiresW
+                                    Layout.minimumWidth: 0
+                                    Layout.maximumWidth: board.colExpiresW
+                                    elide: Text.ElideRight
                                     horizontalAlignment: Text.AlignRight
                                     text: board.fmtRemaining(offerRow.remain)
                                     color: board.rampColor(offerRow.remain)
