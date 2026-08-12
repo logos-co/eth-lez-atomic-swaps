@@ -12,6 +12,12 @@
 
 export const OFFERS_CONTENT_TOPIC = "/atomic-swaps/1/offers/json";
 
+// RFQ (request-for-quote) request topic on the SAME cluster-3 fleet. Takers
+// publish anonymous offer-requests here; makers filter-subscribe to it and
+// respond (rate-limited) on OFFERS_CONTENT_TOPIC. See offer-publisher/rfq.mjs
+// and swap-module/src/swap_delivery_adapter.cpp.
+export const OFFER_REQUESTS_CONTENT_TOPIC = "/atomic-swaps/1/offer-requests/json";
+
 // logos.dev preset: cluster 3, autosharding with 8 shards.
 // NOTE (2026-08-08): the fleet migrated cluster 2 -> cluster 3 during the
 // Aug-7/8 LEZ/delivery upgrade. Peers still speak filter+lightpush and still

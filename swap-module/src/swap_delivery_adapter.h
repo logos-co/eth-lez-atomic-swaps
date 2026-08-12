@@ -19,6 +19,23 @@ std::string swapDeliveryPublishOffer(const std::string& configJson);
 std::string swapDeliveryFetchOffers();
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
 
+// RFQ (request-for-quote) — taker side. Publishes an ANONYMOUS offer-request on
+// /atomic-swaps/1/offer-requests/json so that live makers respond with their
+// current offer immediately, instead of the board only filling on the maker's
+// slow fallback heartbeat. The payload carries NO taker identity or account —
+// {"v":1,"kind":"offer_request","ts":<unix>} — so it leaks nothing about who is
+// looking (privacy). Publishing is lightpush-only (no subscription needed), so
+// this requires the delivery node to be started but not subscribed to the
+// requests topic. Makers coalesce/rate-limit their responses to stop this
+// unauthenticated topic being used for amplification (see offer-publisher/
+// rfq.mjs). Returns the same {"ok":...} JSON shape as swapDeliveryPublishOffer.
+std::string swapDeliveryPublishOfferRequest();
+
+// Pure builder for the offer-request payload (compact JSON, no Qt). Exposed for
+// unit tests and compiled in both the real and header-less build branches so
+// the wire shape is pinned by a test.
+std::string swapDeliveryBuildOfferRequest(long long unixTimeSecs);
+
 // Sum the live relay-peer count out of a delivery_module
 // getNodeInfo("Metrics") body (Prometheus /metrics text). The count comes from
 // the logos_delivery_connected_peers gauge, restricted to the Waku relay

@@ -363,6 +363,10 @@ std::string SwapImpl::fetchOffers() {
     return swapDeliveryFetchOffers();
 }
 
+std::string SwapImpl::publishOfferRequest() {
+    return swapDeliveryPublishOfferRequest();
+}
+
 std::string SwapImpl::subscribeSwap(const std::string& hashlockHex) {
     return swapDeliverySubscribeSwap(hashlockHex);
 }

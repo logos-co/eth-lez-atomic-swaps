@@ -195,6 +195,14 @@ Item {
             root.watch(root.backend.fetchOffers())
         }
 
+        // RFQ: publish an anonymous offer-request (feat/rfq-on-demand-offers).
+        // Carries no identity; makers coalesce their responses. Best-effort —
+        // the maker heartbeat is the reliable baseline.
+        function publishOfferRequest() {
+            if (!root.ready) return
+            root.watch(root.backend.publishOfferRequest())
+        }
+
         function startAutoAccept() {
             if (!root.ready) return
             root.watch(root.backend.startAutoAccept())

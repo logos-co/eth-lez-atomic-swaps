@@ -147,6 +147,10 @@ class SwapUi
     SLOT(void initMessaging())
     SLOT(void publishOffer())
     SLOT(void fetchOffers())
+    // RFQ: taker publishes an anonymous offer-request so live makers respond
+    // immediately (feat/rfq-on-demand-offers). Fired by OfferBoard on Market
+    // activation and re-fired periodically while the tab is open.
+    SLOT(void publishOfferRequest())
     SLOT(void startAutoAccept())
     SLOT(void stopAutoAccept())
 

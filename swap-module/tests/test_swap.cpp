@@ -15,6 +15,7 @@
 #include <vector>
 
 std::string swapDeliveryEthAmountToWei(const std::string& ethAmount);
+std::string swapDeliveryBuildOfferRequest(long long unixTimeSecs);
 int swapDeliveryParsePeerCountFromMetrics(const std::string& metricsText);
 QString swapDeliveryConfigJson(const std::string& configJson);
 QByteArray swapDeliveryDecodeEventPayload(const QVariant& payloadArg);
@@ -242,6 +243,23 @@ LOGOS_TEST(delivery_messaging_requires_runtime_before_init_or_publish) {
     LOGOS_ASSERT_CONTAINS(impl.messagingInit("{}"), "delivery_module runtime");
     LOGOS_ASSERT_CONTAINS(impl.publishOffer("{}"), R"("ok":false)");
     LOGOS_ASSERT_CONTAINS(impl.publishOffer("{}"), "messaging not initialized");
+}
+
+// RFQ: the taker's offer-request payload must be exactly the shape the maker's
+// rfq.mjs parser expects, and must carry NO taker identity (privacy).
+LOGOS_TEST(offer_request_payload_is_anonymous_and_well_formed) {
+    LOGOS_ASSERT_EQ(swapDeliveryBuildOfferRequest(1700000000LL),
+                    std::string(R"({"v":1,"kind":"offer_request","ts":1700000000})"));
+    const auto payload = swapDeliveryBuildOfferRequest(42LL);
+    LOGOS_ASSERT(payload.find("account") == std::string::npos);
+    LOGOS_ASSERT(payload.find("address") == std::string::npos);
+    LOGOS_ASSERT(payload.find("taker") == std::string::npos);
+}
+
+LOGOS_TEST(publish_offer_request_requires_runtime) {
+    SwapImpl impl;
+    LOGOS_ASSERT_CONTAINS(impl.publishOfferRequest(), R"("ok":false)");
+    LOGOS_ASSERT_CONTAINS(impl.publishOfferRequest(), "messaging not initialized");
 }
 
 LOGOS_TEST(delivery_eth_amount_decimal_normalizes_to_wei) {
