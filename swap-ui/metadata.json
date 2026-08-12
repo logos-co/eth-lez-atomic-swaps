@@ -1,7 +1,7 @@
 {
   "name": "swap_ui",
   "display_name": "ETH \u2194 LEZ Atomic Swap",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "LEZ <> ETH atomic swap UI (Basecamp)",
   "author": "Logos",
   "type": "ui_qml",
