@@ -72,8 +72,24 @@ private:
     QString configJson() const;
     QString messagingConfigJson() const;
     void applyConfigObject(const QJsonObject& obj);
-    void applyOfferObject(const QJsonObject& offer);
+    // Adopt an accepted offer's ECONOMIC terms into the taker config. Returns
+    // false (and surfaces a UI error) WITHOUT mutating config if the offer
+    // names a non-canonical swap venue (P0 fund-theft guard) — see
+    // offerNamesCanonicalVenue. Never copies the offer's eth_htlc_address /
+    // lez_htlc_program_id: those stay pinned to the app's canonical values.
+    bool applyOfferObject(const QJsonObject& offer);
     void applyDefaultConfig();
+
+    // The canonical LEZ HTLC program ID: the value baked into the Rust library
+    // (resolved async via defaultLezHtlcProgramIdAsync and cached below). Falls
+    // back to the current config field when the async value has not arrived yet
+    // — on the honest path both are the pinned default. This is the trusted
+    // value an offer's advertised lez_htlc_program_id must match.
+    QString canonicalLezHtlcProgramId() const;
+    // P0: true iff the offer's advertised swap venue (eth_htlc_address,
+    // lez_htlc_program_id) matches the app's canonical/pinned values. On a
+    // mismatch, `reason` (if non-null) is filled with a UI-ready explanation.
+    bool offerNamesCanonicalVenue(const QJsonObject& offer, QString* reason) const;
     bool validateConfigForAction(const QString& action,
                                  const QString& hexValue = {},
                                  const QString& hexKey = {});
@@ -254,6 +270,11 @@ private:
     QJsonObject m_takerEvidence;
     QJsonObject m_makerEvidence;
     QJsonObject m_pendingOfferContext;
+
+    // Cached canonical LEZ HTLC program ID, populated from the Rust library via
+    // defaultLezHtlcProgramIdAsync (see initLogos). Used to reject offers that
+    // advertise a non-canonical LEZ program (P0 fund-theft guard).
+    QString m_canonicalLezHtlcProgramId;
 };
 
 #endif // SWAP_UI_PLUGIN_H

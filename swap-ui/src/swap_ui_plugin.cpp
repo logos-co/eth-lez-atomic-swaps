@@ -2,6 +2,7 @@
 
 #include "logos_api.h"
 #include "logos_api_client.h"
+#include "offer_venue.h"
 #include "swap_api.h"
 #include "timelock_math.h"
 
@@ -378,6 +379,12 @@ void SwapUiPlugin::initLogos(LogosAPI* api)
     // kept as a defensive no-op should the library ever ship without a
     // baked-in ID.
     m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
+        if (!programId.isEmpty()) {
+            // Cache the canonical program ID for the offer-venue guard (P0),
+            // independently of whether we also fill the (possibly user-set)
+            // config field below.
+            m_canonicalLezHtlcProgramId = programId;
+        }
         if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
             setLezHtlcProgramId(programId);
         }
@@ -927,6 +934,9 @@ void SwapUiPlugin::resetConfig()
     validateConfig();
     if (m_swap) {
         m_swap->defaultLezHtlcProgramIdAsync([this](QString programId) {
+            if (!programId.isEmpty()) {
+                m_canonicalLezHtlcProgramId = programId;
+            }
             if (!programId.isEmpty() && lezHtlcProgramId().isEmpty()) {
                 setLezHtlcProgramId(programId);
             }
@@ -1060,13 +1070,74 @@ void SwapUiPlugin::setupStartFunding()
     });
 }
 
-void SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
+QString SwapUiPlugin::canonicalLezHtlcProgramId() const
 {
+    // The library-baked value cached from defaultLezHtlcProgramIdAsync. Before
+    // it arrives (rare — it is resolved at initLogos, long before any offer can
+    // be accepted), fall back to the current config field, which
+    // applyDefaultConfig / the async fill pinned to the same canonical value
+    // and which applyOfferObject deliberately never overwrites from an offer.
+    return m_canonicalLezHtlcProgramId.isEmpty() ? lezHtlcProgramId()
+                                                 : m_canonicalLezHtlcProgramId;
+}
+
+bool SwapUiPlugin::offerNamesCanonicalVenue(const QJsonObject& offer, QString* reason) const
+{
+    const swap_ui::VenueCheck check = swap_ui::checkOfferVenue(
+        valueString(offer, QStringLiteral("eth_htlc_address")).toStdString(),
+        defaultEthHtlcAddress().toStdString(),
+        valueString(offer, QStringLiteral("lez_htlc_program_id")).toStdString(),
+        canonicalLezHtlcProgramId().toStdString());
+    if (check.ok) {
+        return true;
+    }
+    // The raw offered-vs-expected hex goes ONLY to the trace log — never into
+    // the user-facing message. A 64-char program id / 0x… address in a status
+    // line reads as a crash, not the protection it actually is.
+    swapUiTrace(QStringLiteral("offer rejected: non-canonical %1 (offered=%2 expected=%3)")
+                    .arg(check.mismatch == swap_ui::VenueField::EthContract
+                             ? QStringLiteral("eth_htlc_address")
+                             : QStringLiteral("lez_htlc_program_id"),
+                         QString::fromStdString(check.offered),
+                         QString::fromStdString(check.expected)));
+    if (reason) {
+        // Plain, short, reassuring — framed as protection, no hex. The status
+        // bar mirrors errorMessage, so keeping this short fixes it too.
+        *reason = (check.mismatch == swap_ui::VenueField::EthContract)
+            ? QStringLiteral("Blocked for your safety — this offer uses a swap contract this "
+                             "app doesn't recognize, so no funds were locked. Only accept "
+                             "offers using the standard contract.")
+            : QStringLiteral("Blocked for your safety — this offer routes through a swap "
+                             "program this app doesn't recognize, so no funds were locked. "
+                             "Only accept offers using the standard program.");
+    }
+    return false;
+}
+
+bool SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
+{
+    // P0 (fund-theft): the swap venue an offer names — the ETH HTLC contract and
+    // the LEZ HTLC program — is NOT taker-configurable per offer. It must equal
+    // the app's canonical/pinned deployment. A malicious maker who advertised
+    // its OWN contract/program could steer this taker onto a venue it controls,
+    // learn the preimage the taker reveals there, and sweep the taker's real
+    // ETH. Refuse such an offer outright and mutate NOTHING.
+    QString reason;
+    if (!offerNamesCanonicalVenue(offer, &reason)) {
+        setErrorMessage(reason);
+        setStatus(errorMessage());
+        return false;
+    }
+
+    // Only the economic terms and the maker's recipient address are adopted from
+    // the offer. The recipient (maker_eth_address) legitimately varies per maker
+    // and is bound into the ETH swapId anyway. The venue fields (eth_htlc_address,
+    // lez_htlc_program_id) are deliberately NOT copied — they stay pinned to the
+    // app's canonical values (validated above and re-asserted in
+    // validateConfigForAction("taker")). The hashlock is taker-generated.
     setEthRecipientAddress(valueString(offer, QStringLiteral("maker_eth_address")));
     setLezAmount(valueString(offer, QStringLiteral("lez_amount")));
     setEthAmount(weiToEthValue(valueString(offer, QStringLiteral("eth_amount"))));
-    setEthHtlcAddress(valueString(offer, QStringLiteral("eth_htlc_address")));
-    setLezHtlcProgramId(valueString(offer, QStringLiteral("lez_htlc_program_id")));
 
     // Adopt the offer's own timelocks instead of leaving this taker profile's
     // (possibly stale/default) minutes in place. The offer carries absolute
@@ -1092,6 +1163,7 @@ void SwapUiPlugin::applyOfferObject(const QJsonObject& offer)
         setLezTimelockMinutes(
             QString::number(swap_ui::minutesUntilExpiry(lezExpirySecs, nowSecs)));
     }
+    return true;
 }
 
 void SwapUiPlugin::addValidationError(QJsonObject& errors,
@@ -1207,6 +1279,27 @@ bool SwapUiPlugin::validateConfigForAction(const QString& action,
             ok = false;
         } else if (!hexValue.trimmed().isEmpty() && !isHexBytes(hexValue, 32)) {
             addValidationError(errors, hexKey, QStringLiteral("Must be 32 bytes of hex"));
+            ok = false;
+        }
+    }
+
+    // P0 (fund-theft): the taker only ever trades on the app's canonical, pinned
+    // venue. Re-assert it here as a config-level invariant — independent of any
+    // single offer — so a config whose eth_htlc_address / lez_htlc_program_id was
+    // tampered with (e.g. an offer path that somehow bypassed applyOfferObject,
+    // or a hand-edited config) can never start a taker swap on an attacker's
+    // contract/program.
+    if (action == QStringLiteral("taker")) {
+        if (!swap_ui::hexEquals(ethHtlcAddress().toStdString(),
+                                defaultEthHtlcAddress().toStdString())) {
+            addValidationError(errors, QStringLiteral("eth_htlc_address"),
+                               QStringLiteral("This app only trades on its built-in swap contract."));
+            ok = false;
+        }
+        if (!swap_ui::hexEquals(lezHtlcProgramId().toStdString(),
+                                canonicalLezHtlcProgramId().toStdString())) {
+            addValidationError(errors, QStringLiteral("lez_htlc_program_id"),
+                               QStringLiteral("This app only trades on its built-in swap program."));
             ok = false;
         }
     }
@@ -1781,7 +1874,12 @@ void SwapUiPlugin::acceptOfferAndStartTaker(const QString& offerJson)
         setStatus(errorMessage());
         return;
     }
-    applyOfferObject(offer);
+    // P0: applyOfferObject refuses (and mutates nothing) if the offer names a
+    // non-canonical swap venue. Never start the taker in that case — do not
+    // clear the pending context, do not touch config.
+    if (!applyOfferObject(offer)) {
+        return;
+    }
     // Hand the full offer to startTaker's evidence capture: it carries the
     // exact wei amount, the maker's LEZ account and the absolute timelocks,
     // none of which survive applyOfferObject's config-field mapping.

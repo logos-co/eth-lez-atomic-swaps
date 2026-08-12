@@ -211,9 +211,19 @@ pub struct MakerPolicy<'a> {
     pub designated_taker: Option<&'a [u8; 32]>,
     /// The FRESH absolute LEZ expiry the maker would lock with (P1-1).
     pub lez_expiry_secs: u64,
-    /// `None` for the single-shot maker (no loop-mode timelock gate).
+    /// The margin the loop-mode maker configured (`TIMELOCK_MARGIN_MINUTES`).
+    /// `None` for the single-shot maker — which now falls back to
+    /// [`DEFAULT_TIMELOCK_MARGIN_SECS`] rather than skipping the gate. The
+    /// ETH-covers-LEZ ordering check (P0-3) is UNCONDITIONAL: a single-shot
+    /// maker used to accept a taker's `eth_timelock < lez_timelock`, letting a
+    /// malicious taker refund ETH after its expiry and still claim LEZ.
     pub margin: Option<u64>,
 }
+
+/// Default ordering margin (seconds) applied when no loop-mode margin is
+/// configured (the single-shot maker). Matches the loop's own
+/// `TIMELOCK_MARGIN_MINUTES` default of 5 minutes (see `src/cli/maker.rs`).
+pub const DEFAULT_TIMELOCK_MARGIN_SECS: u64 = 5 * 60;
 
 /// Pure decision for one matched candidate. Kept side-effect-free so the P1-A
 /// journal-skip belt, the P1-E rejected-set / timelock gate AND the
@@ -258,13 +268,13 @@ pub fn classify_candidate(
     {
         return CandidateDisposition::Reject(RejectReason::NotDesignatedTaker);
     }
-    if let Some(margin_secs) = policy.margin
-        && !eth_timelock_covers_lez(
-            candidate.eth_timelock_secs,
-            policy.lez_expiry_secs,
-            margin_secs,
-        )
-    {
+    // P0-3: the ETH-covers-LEZ ordering gate is UNCONDITIONAL. A single-shot
+    // maker (`margin: None`) used to skip it entirely, so a malicious taker
+    // could lock ETH with `eth_timelock < lez_timelock`, refund it after its
+    // (earlier) expiry, and still claim the maker's LEZ. Fall back to the same
+    // default margin the loop uses instead of leaving the gate open.
+    let margin_secs = policy.margin.unwrap_or(DEFAULT_TIMELOCK_MARGIN_SECS);
+    if !eth_timelock_covers_lez(candidate.eth_timelock_secs, policy.lez_expiry_secs, margin_secs) {
         return CandidateDisposition::Reject(RejectReason::TimelockTooTight);
     }
     CandidateDisposition::Accept
@@ -482,7 +492,9 @@ pub async fn run_maker(
                                             swap_id: format!("{swap_id}"),
                                             eth_expiry_secs: eth_timelock_secs,
                                             required_expiry_secs: lez_expiry_secs.saturating_add(
-                                                guards.map(|g| g.timelock_margin_secs).unwrap_or(0),
+                                                guards
+                                                    .map(|g| g.timelock_margin_secs)
+                                                    .unwrap_or(DEFAULT_TIMELOCK_MARGIN_SECS),
                                             ),
                                         });
                                     }
@@ -1152,17 +1164,34 @@ mod tests {
         );
     }
 
-    // The single-shot maker (no guards ⇒ margin None) applies no loop-mode gate:
-    // any matched, non-journaled, non-rejected candidate is Accepted.
+    // P0-3: the single-shot maker (no guards ⇒ margin None) now applies the
+    // ordering gate UNCONDITIONALLY, using `DEFAULT_TIMELOCK_MARGIN_SECS`. A
+    // tight/inverted timelock that used to be silently Accepted — the hole a
+    // malicious taker exploited to refund ETH early and still claim LEZ — is
+    // now Rejected, exactly like the loop-mode maker.
     #[test]
-    fn single_shot_maker_has_no_timelock_gate() {
+    fn single_shot_maker_applies_default_timelock_gate() {
         let hl = [0x33u8; 32];
         let rejected: HashSet<[u8; 32]> = HashSet::new();
-        // Even a "tight" timelock is Accepted when margin is None.
+        // A "tight" ETH timelock (well under the LEZ expiry) is REJECTED even
+        // when margin is None — the whole point of the P0-3 fix.
         assert_eq!(
             classify_candidate(
                 &candidate(&hl, &TAKER, 1),
                 &policy(1_000_000, None),
+                &rejected,
+                false
+            ),
+            CandidateDisposition::Reject(RejectReason::TimelockTooTight)
+        );
+        // And an honest single-shot candidate — ETH expiry beyond LEZ expiry by
+        // more than the default margin — is still Accepted (no honest-path
+        // regression). lez_expiry small so `lez + DEFAULT_TIMELOCK_MARGIN_SECS`
+        // is comfortably cleared.
+        assert_eq!(
+            classify_candidate(
+                &candidate(&hl, &TAKER, DEFAULT_TIMELOCK_MARGIN_SECS + 1_000),
+                &policy(100, None),
                 &rejected,
                 false
             ),
