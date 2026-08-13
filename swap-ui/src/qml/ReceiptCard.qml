@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import SwapTheme
+import SwapFormat
 import SwapLinks
 
 // Receipt card — the full evidence surface for the just-completed swap.
@@ -131,13 +132,6 @@ Rectangle {
                                       : Number(ethAmountEth)
         if (!(lez > 0) || !(eth > 0)) return 0
         return lez / eth
-    }
-
-    function fmtRate(r) {
-        if (!(r > 0)) return "—"
-        if (r >= 100) return r.toFixed(0)
-        if (r >= 1) return r.toFixed(2)
-        return r.toFixed(6)
     }
 
     function fmtClock(ms) {
@@ -294,7 +288,7 @@ Rectangle {
         }
         Text {
             visible: !card.isError && card.hasAmounts && card.rate() > 0
-            text: "1 ETH ≈ " + card.fmtRate(card.rate()) + " LEZ"
+            text: "1 ETH ≈ " + Format.fmtRate(card.rate()) + " LEZ"
             color: Theme.textMuted
             font.pixelSize: Theme.fontSmall
             font.family: Theme.monoFont

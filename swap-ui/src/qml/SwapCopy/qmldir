@@ -1,0 +1,2 @@
+module SwapCopy
+singleton Copy 1.0 Copy.qml
