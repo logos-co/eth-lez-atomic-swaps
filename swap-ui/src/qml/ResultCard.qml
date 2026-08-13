@@ -87,7 +87,7 @@ Rectangle {
                   value: card.parsed.lez_tx || "" },
             ] : []
 
-            TrustRow {
+            EvidenceRow {
                 label: modelData.label
                 value: modelData.value
             }
@@ -100,10 +100,17 @@ Rectangle {
                 { label: "LEZ Refund", value: card.parsed.lez_refund_tx || "n/a" },
             ] : []
 
-            TrustRow {
+            EvidenceRow {
                 label: modelData.label
                 value: modelData.value
             }
         }
+    }
+
+    // One evidence row. reserveLinkSlot holds the link column open on
+    // rows that have no explorer link, so the copy buttons stay in one
+    // column down a stack where only some values are linkable.
+    component EvidenceRow: HexValue {
+        reserveLinkSlot: true
     }
 }

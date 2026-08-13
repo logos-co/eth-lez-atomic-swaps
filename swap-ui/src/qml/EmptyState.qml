@@ -14,7 +14,15 @@ ColumnLayout {
     property string subtitle
     // Drive the ping only while on screen; defaults to visibility.
     property bool running: empty.visible
-    // Call-to-action slot, rendered centred beneath the subtitle.
+    // Call-to-action slot, stacked beneath the subtitle.
+    //
+    // Children must set `Layout.alignment: Qt.AlignHCenter` themselves. QML
+    // layouts have no default child alignment, and there is no arrangement of
+    // this slot that centres children automatically: sized to its content it
+    // starves a wrapping Text of any width to wrap against, and filling the
+    // width leaves fixed-size children on the left. Filling is the lesser
+    // evil, because a missing alignment is visible immediately whereas
+    // unwrapped text silently overflows the empty state.
     default property alias actionData: actions.data
 
     spacing: Theme.spacingNormal

@@ -182,6 +182,7 @@ PageScaffold {
                       + "and runs step by step."
 
             PrimaryButton {
+                Layout.alignment: Qt.AlignHCenter
                 text: "Browse the market"
                 Layout.preferredWidth: 220
                 Layout.preferredHeight: 42

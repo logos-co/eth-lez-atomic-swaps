@@ -210,8 +210,15 @@ Window {
     }
 
     HistoryView {
+        id: history
         anchors.fill: parent
         visible: win.view === "history"
+        // -expand=1 opens the newest receipt, which is the only way to get the
+        // full ReceiptCard evidence surface on screen.
+        Component.onCompleted: {
+            if (win.arg("expand", "0") === "1" && history.receipts.length > 0)
+                history.expandedKey = history.receiptKey(history.receipts[0], 0)
+        }
     }
 
     // Second delivery of the SAME batch plus one new offer. The board merges

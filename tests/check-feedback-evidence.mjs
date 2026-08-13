@@ -31,7 +31,7 @@ function functionBody(text, name) {
 }
 
 const receipt = source("swap-ui/src/qml/ReceiptCard.qml")
-const trustRow = source("swap-ui/src/qml/TrustRow.qml")
+const hexValue = source("swap-ui/src/qml/HexValue.qml")
 const taker = source("swap-ui/src/qml/TakerView.qml")
 const evidence = functionBody(receipt, "safeEvidenceJson")
 
@@ -192,10 +192,29 @@ for (const qml of filesBelow("swap-ui/src/qml").filter((path) => path.endsWith("
   assert.doesNotMatch(source(qml), /Qt\.openUrlExternally/,
     `${qml}: Basecamp modules must not attempt direct external navigation`)
 }
-assert.match(trustRow, /GhostButton\s*\{[\s\S]*Copy explorer link/,
-  "explorer URLs need an explicit keyboard-accessible copy action")
-assert.doesNotMatch(trustRow, /MouseArea/,
-  "receipt copy actions must remain keyboard-accessible controls")
+// The trust-row idiom used to live in TrustRow.qml; HexValue replaced it
+// across the receipt, the result card and the offer board's detail pane, so
+// the same guarantees are asserted against HexValue now.
+//
+// Basecamp blocks module-owned external navigation, so COPYING the explorer
+// URL is the real action rather than opening it — and it has to be reachable
+// without a mouse.
+assert.match(hexValue, /component GlyphButton: Button/,
+  "trust-row copy/link controls must be Buttons, not bare MouseAreas")
+assert.match(hexValue, /Accessible\.onPressAction:\s*glyph\.clicked\(\)/,
+  "trust-row controls must advertise a press action to assistive tech")
+assert.match(hexValue, /onClicked:\s*row\.copyText\(row\.link, "link"\)/,
+  "explorer URLs need an explicit copy action")
+assert.match(hexValue, /onClicked:\s*row\.copyText\(row\.value, "value"\)/,
+  "values need an explicit copy action")
+// One MouseArea is permitted, and only for the show-full-value toggle. A
+// second one would almost certainly be a copy action regressing to a
+// mouse-only affordance — which is what the TrustRow rule existed to prevent.
+assert.equal((hexValue.match(/MouseArea\s*\{/g) || []).length, 1,
+  "HexValue must have exactly one MouseArea (the show-full-value toggle)")
+assert.match(hexValue,
+  /MouseArea\s*\{[\s\S]*?onClicked:\s*row\.expanded = !row\.expanded/,
+  "the only MouseArea must be the value expand toggle, never a copy action")
 assert.doesNotMatch(receipt, /function receiptJson\(/,
   "the UI must not offer the raw secret-bearing receipt for public feedback")
 assert.match(receipt, /feedbackUrl:\s*"https:\/\/github\.com\/logos-co\/eth-lez-atomic-swaps\/issues\/new\?template=trial-feedback\.yml"/,
