@@ -48,7 +48,7 @@ ScrollView {
     // string, never a clickable open: Basecamp silently no-ops module-owned
     // external navigation (#84), so Qt.openUrlExternally would do nothing —
     // the receipts use the same copy-and-paste idiom.
-    readonly property string sepoliaFaucetUrl: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
+    readonly property string sepoliaFaucetUrl: "https://sepolia-faucet.pk910.de/"
 
     // Which value was last copied, for transient "copied" button feedback.
     property string copiedKind: ""
