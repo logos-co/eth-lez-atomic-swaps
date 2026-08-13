@@ -26,8 +26,38 @@ ScrollView {
 
     readonly property bool hasEthKey: swapBackend.ethPrivateKey !== ""
     readonly property bool hasLezAccount: swapBackend.lezSigningKey !== ""
-    readonly property bool isFunded: swapBackend.setupStep === "Done"
+    // LEZ side funded via the pinata faucet (step 3). This is NOT the same as
+    // "ready" — the Ethereum side still needs gas (see hasEthBalance/isReady).
+    readonly property bool lezFunded: swapBackend.setupStep === "Done"
+    // Ethereum side holds gas. ethBalance is a wei string from the shared
+    // balance refresh; any positive value means the user has funded Sepolia.
+    readonly property bool hasEthBalance: {
+        var n = Number(swapBackend.ethBalance)
+        return !isNaN(n) && n > 0
+    }
+    // Setup is only truly ready when BOTH sides can transact: LEZ funded AND
+    // Ethereum funded for gas. The app funds LEZ (150 via the faucet) but
+    // CANNOT auto-fund Sepolia ETH — there's no free programmatic faucet — so
+    // a fresh account with 150 LEZ and 0 Sepolia ETH still fails its first
+    // swap on "insufficient funds for gas" (every 0.4.3 tester hit this).
+    // Gate the Done step and every "ready" claim on both.
+    readonly property bool isReady: lezFunded && hasEthBalance
     readonly property bool anyRunning: swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning
+
+    // A reliable, no-wallet-login-friendly Sepolia faucet. Kept as a COPYABLE
+    // string, never a clickable open: Basecamp silently no-ops module-owned
+    // external navigation (#84), so Qt.openUrlExternally would do nothing —
+    // the receipts use the same copy-and-paste idiom.
+    readonly property string sepoliaFaucetUrl: "https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
+
+    // Which value was last copied, for transient "copied" button feedback.
+    property string copiedKind: ""
+
+    // Bounded auto-poll for ETH arrival while the Get-test-ETH step is active
+    // (see the ethBalancePoll Timer): count of polls issued, capped so a user
+    // who wanders off doesn't have the app hammer the RPC forever.
+    property int ethPollCount: 0
+    readonly property int ethPollMax: 40
 
     function humanSetupStep(step) {
         var map = {
@@ -39,9 +69,35 @@ ScrollView {
             "Claimed":            "Claim committed on-chain",
             "ClaimFailed":        "Claim attempt failed, retrying…",
             "TargetReached":      "Target reached",
-            "Done":               "Funded and ready",
+            // Honest: step 3 funds LEZ only. "Ready" is gated on ETH too, so
+            // never say "and ready" here — the Get-test-ETH step below decides.
+            "Done":               "LEZ funded",
         }
         return map[step] || step
+    }
+
+    // wei string → human ETH/Gwei, matching the app-wide balance formatter
+    // (AtomicSwapView.weiToEth / ReceiptCard.ethDisplay).
+    function ethBalanceDisplay() {
+        var n = Number(swapBackend.ethBalance)
+        if (isNaN(n) || n === 0) return "0 ETH"
+        var eth = n / 1e18
+        if (eth >= 0.001) return eth.toFixed(6).replace(/\.?0+$/, '') + " ETH"
+        var gwei = n / 1e9
+        if (gwei >= 1) return gwei.toFixed(4).replace(/\.?0+$/, '') + " Gwei"
+        return swapBackend.ethBalance + " wei"
+    }
+
+    // Pure-QML clipboard copy, mirroring ReceiptCard's mechanism (an invisible
+    // TextEdit whose selection is copied). clipboardHelper/copiedReset live
+    // inside the content Flickable below.
+    function copyText(value, kind) {
+        clipboardHelper.text = value
+        clipboardHelper.selectAll()
+        clipboardHelper.copy()
+        clipboardHelper.text = ""
+        setupRoot.copiedKind = kind
+        copiedReset.restart()
     }
 
     // Elapsed-seconds ticker for the funding status line. Individual phases
@@ -73,10 +129,49 @@ ScrollView {
             onTriggered: setupRoot.setupStepElapsedSeconds += 1
         }
 
+        // Auto-detect Sepolia ETH arrival on the Get-test-ETH step: poll the
+        // shared balance refresh while the user has an ETH key but no ETH yet,
+        // so their funding shows up without a manual Refresh. triggeredOnStart
+        // gives an immediate first read; the interval is deliberately slow and
+        // the run is capped (ethPollMax) so it never hammers the RPC. It stops
+        // itself the moment a positive balance lands (hasEthBalance).
+        Timer {
+            id: ethBalancePoll
+            interval: 12000
+            repeat: true
+            triggeredOnStart: true
+            running: swapBackend.ready
+                     && setupRoot.hasEthKey
+                     && !setupRoot.hasEthBalance
+                     && setupRoot.ethPollCount < setupRoot.ethPollMax
+            onTriggered: {
+                if (swapBackend.balancesLoading)
+                    return
+                setupRoot.ethPollCount += 1
+                swapBackend.fetchBalances()
+            }
+        }
+
+        // Invisible clipboard surface + transient "copied" reset, mirroring
+        // ReceiptCard. Non-visual helpers stay INSIDE this Flickable so they
+        // never steal the root ScrollView's single content slot (#113).
+        TextEdit {
+            id: clipboardHelper
+            visible: false
+        }
+        Timer {
+            id: copiedReset
+            interval: 1600
+            onTriggered: setupRoot.copiedKind = ""
+        }
+
         Connections {
             target: swapBackend
             function onSetupStepChanged() { setupRoot.setupStepElapsedSeconds = 0 }
             function onSetupRunningChanged() { setupRoot.setupStepElapsedSeconds = 0 }
+            // A freshly generated key starts from zero ETH — restart the poll
+            // budget so arrival on the new address is detected.
+            function onEthRecipientAddressChanged() { setupRoot.ethPollCount = 0 }
         }
 
         ColumnLayout {
@@ -101,7 +196,7 @@ ScrollView {
             // rendered these full-width labels justified — huge inter-word
             // gaps (0.4.1 live feedback).
             Text {
-                text: "Three steps, no hand-typed keys: generate an ETH key, create a LEZ account, then fund it."
+                text: "A few steps, no hand-typed keys: generate an ETH key, create a LEZ account, fund LEZ, then add a little Sepolia test-ETH for gas."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontNormal
                 horizontalAlignment: Text.AlignLeft
@@ -200,7 +295,7 @@ ScrollView {
                 Layout.fillWidth: true
                 implicitHeight: fundCol.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
-                border.color: setupRoot.isFunded ? Theme.success : Theme.border
+                border.color: setupRoot.lezFunded ? Theme.success : Theme.border
                 border.width: 1
                 radius: Theme.radiusNormal
 
@@ -210,8 +305,8 @@ ScrollView {
                     spacing: 6
 
                     SectionHeader {
-                        label: "3. Fund it"
-                        detail: setupRoot.isFunded ? "done" : ""
+                        label: "3. Fund LEZ"
+                        detail: setupRoot.lezFunded ? "done" : ""
                         hairline: false
                     }
                     Text {
@@ -230,7 +325,7 @@ ScrollView {
                     PrimaryButton {
                         text: swapBackend.setupRunning
                               ? "Setting up…"
-                              : (setupRoot.isFunded ? "Fund again" : "Fund my account")
+                              : (setupRoot.lezFunded ? "Fund again" : "Fund my account")
                         enabled: setupRoot.hasLezAccount && !swapBackend.setupRunning && !setupRoot.anyRunning
                         Layout.preferredHeight: 42
                         onClicked: swapBackend.setupStartFunding()
@@ -281,10 +376,128 @@ ScrollView {
                 }
             }
 
-            // --- Step 4: Done ---
+            // --- Step 4: Get test ETH ---
+            // The app's faucet funds LEZ only. The Ethereum side needs gas for
+            // every swap, and there's no free programmatic Sepolia faucet — so
+            // this step GUIDES the user to fund it themselves and auto-detects
+            // arrival. Without it, a fresh account read "Funded and ready" with
+            // 0 Sepolia ETH and the first swap died on "insufficient funds for
+            // gas" (every 0.4.3 tester hit this).
             Rectangle {
                 Layout.fillWidth: true
-                visible: setupRoot.isFunded
+                implicitHeight: ethFundCol.implicitHeight + Theme.spacingNormal * 2
+                color: Theme.surface
+                border.color: setupRoot.hasEthBalance ? Theme.success : Theme.border
+                border.width: 1
+                radius: Theme.radiusNormal
+
+                ColumnLayout {
+                    id: ethFundCol
+                    anchors { fill: parent; margins: Theme.spacingNormal }
+                    spacing: 6
+
+                    SectionHeader {
+                        label: "4. Get test ETH"
+                        detail: setupRoot.hasEthBalance ? "done" : ""
+                        hairline: false
+                    }
+                    Text {
+                        text: "Send a little Sepolia test-ETH to this address to pay for swaps — "
+                              + "the app funds LEZ but not Ethereum. A few hundredths of an ETH is plenty."
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+
+                    // Your ETH address + Copy — also closes the standing
+                    // "Setup ETH address has no copy button" gap.
+                    Text {
+                        text: setupRoot.hasEthKey
+                              ? swapBackend.ethRecipientAddress
+                              : "Generate an Ethereum key in step 1 first."
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
+                        font.family: setupRoot.hasEthKey ? Theme.monoFont : ""
+                        horizontalAlignment: Text.AlignLeft
+                        // Wrap (not WordWrap): the address is one long
+                        // unbreakable hex token — must break mid-token.
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    GhostButton {
+                        visible: setupRoot.hasEthKey
+                        text: setupRoot.copiedKind === "ethAddress" ? "Address copied" : "Copy address"
+                        enabled: !setupRoot.anyRunning
+                        Layout.preferredHeight: 38
+                        font.bold: true
+                        onClicked: setupRoot.copyText(swapBackend.ethRecipientAddress, "ethAddress")
+                    }
+
+                    // Faucet link is COPY-only: Basecamp silently no-ops
+                    // module-owned external navigation (#84), so a clickable
+                    // "open" would do nothing. Copy it and paste in a browser —
+                    // the same idiom the receipts use for their links.
+                    Text {
+                        text: "Sepolia faucet (copy and paste in your browser):"
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacingSmall
+                    }
+                    Text {
+                        text: setupRoot.sepoliaFaucetUrl
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSmall
+                        font.family: Theme.monoFont
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    GhostButton {
+                        text: setupRoot.copiedKind === "faucet" ? "Faucet link copied" : "Copy faucet link"
+                        enabled: !setupRoot.anyRunning
+                        Layout.preferredHeight: 38
+                        onClicked: setupRoot.copyText(setupRoot.sepoliaFaucetUrl, "faucet")
+                    }
+
+                    // Live arrival status — auto-polled while this step is
+                    // active (ethBalancePoll Timer), so funding is detected
+                    // without a manual Refresh. Honest until it lands: never
+                    // claims ready on LEZ alone.
+                    RowLayout {
+                        visible: setupRoot.hasEthKey
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.spacingSmall
+                        spacing: Theme.spacingSmall
+
+                        BusyIndicator {
+                            visible: !setupRoot.hasEthBalance
+                            running: !setupRoot.hasEthBalance
+                            implicitWidth: 18
+                            implicitHeight: 18
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignLeft
+                            wrapMode: Text.WordWrap
+                            text: setupRoot.hasEthBalance
+                                  ? "✓ ETH received — " + setupRoot.ethBalanceDisplay()
+                                  : "Waiting for ETH… (checks automatically)"
+                            color: setupRoot.hasEthBalance ? Theme.success : Theme.textSecondary
+                            font.pixelSize: Theme.fontSmall
+                        }
+                    }
+                }
+            }
+
+            // --- Step 5: Done ---
+            Rectangle {
+                Layout.fillWidth: true
+                visible: setupRoot.isReady
                 implicitHeight: doneCol.implicitHeight + Theme.spacingNormal * 2
                 color: Theme.surface
                 border.color: Theme.success
@@ -297,11 +510,11 @@ ScrollView {
                     spacing: 6
 
                     SectionHeader {
-                        label: "4. Done"
+                        label: "5. Done"
                         hairline: false
                     }
                     Text {
-                        text: "You're set up. Head to the market to browse offers, or fine-tune anything in Config."
+                        text: "You're set up — LEZ funded and Ethereum has gas. Head to the market to browse offers, or fine-tune anything in Config."
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSmall
                         horizontalAlignment: Text.AlignLeft
