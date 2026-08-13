@@ -84,7 +84,9 @@ ScrollView {
                 text: swapBackend.ethRpcUrl
                 onValueEdited: (val) => swapBackend.setConfigValue("eth_rpc_url", val)
                 placeholderText: "wss://..."
-                hint: "Must be a WebSocket endpoint (wss://); https:// RPCs fail to connect."
+                hint: "WebSocket (wss://) only. Defaults to PublicNode — public, no signup, "
+                      + "not Google/Alchemy. Want more privacy? Point it at dRPC, 1RPC, "
+                      + "POKT/Grove, or your own node."
                 fieldEnabled: !configRoot.anyRunning
                 errorText: configRoot.errorFor("eth_rpc_url")
             }
