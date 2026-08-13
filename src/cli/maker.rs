@@ -50,6 +50,15 @@ pub struct MakerArgs {
     #[arg(long, env = "OFFER_HEARTBEAT_SECS", default_value_t = 45)]
     heartbeat_secs: u64,
 
+    /// Fallback (reliable-baseline) republish interval in seconds. The
+    /// offer-publisher uses `FALLBACK_HEARTBEAT_SECS || OFFER_HEARTBEAT_SECS ||
+    /// 30` as its actual cadence (RFQ is the fast path; this is the slow
+    /// baseline). The health check must threshold on that SAME effective
+    /// interval — otherwise a 30s fallback cadence gets flagged unhealthy by a
+    /// smaller OFFER_HEARTBEAT_SECS (the exact regression the RFQ rollout hit).
+    #[arg(long, env = "FALLBACK_HEARTBEAT_SECS")]
+    fallback_heartbeat_secs: Option<u64>,
+
     /// Node.js offer publisher script (long-lived @waku/sdk lightpush
     /// sidecar). Defaults to offer-publisher/publish-offer.mjs if present.
     #[arg(long, env = "OFFER_PUBLISHER_SCRIPT")]
@@ -245,8 +254,14 @@ fn cmd_maker_status(args: &MakerArgs) -> Result<()> {
 
     // Offer-publish freshness — only meaningful when publishing is enabled
     // (`--heartbeat-secs 0` disables it deliberately, e.g. for a restricted
-    // test deployment with no board presence).
-    if args.heartbeat_secs > 0 {
+    // test deployment with no board presence). Threshold on the SAME effective
+    // interval the publisher uses (fallback preferred over the legacy heartbeat,
+    // mirroring FALLBACK_HEARTBEAT_SECS || OFFER_HEARTBEAT_SECS), so a healthy
+    // 30s fallback cadence is not flagged by a smaller OFFER_HEARTBEAT_SECS.
+    let effective_heartbeat_secs = args
+        .fallback_heartbeat_secs
+        .unwrap_or(args.heartbeat_secs);
+    if effective_heartbeat_secs > 0 {
         if !status.publisher_alive {
             return Err(SwapError::InvalidConfig(
                 "unhealthy: offer-publisher sidecar is not alive — offers are not being \
@@ -254,16 +269,17 @@ fn cmd_maker_status(args: &MakerArgs) -> Result<()> {
                     .into(),
             ));
         }
-        let max_publish_age_ms = 3 * args.heartbeat_secs * 1000;
+        let max_publish_age_ms = 3 * effective_heartbeat_secs * 1000;
         match status.last_offer_publish_ms {
             Some(last) => {
                 let age_ms = now_ms.saturating_sub(last);
                 if age_ms > max_publish_age_ms {
                     return Err(SwapError::InvalidConfig(format!(
-                        "unhealthy: last confirmed offer publish was {}s ago (max {}s = 3x \
-                         --heartbeat-secs) — the fleet connection is likely wedged",
+                        "unhealthy: last confirmed offer publish was {}s ago (max {}s = 3x the \
+                         {}s offer-publish interval) — the fleet connection is likely wedged",
                         age_ms / 1000,
-                        max_publish_age_ms / 1000
+                        max_publish_age_ms / 1000,
+                        effective_heartbeat_secs
                     )));
                 }
             }
