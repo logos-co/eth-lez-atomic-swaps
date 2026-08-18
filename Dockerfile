@@ -82,7 +82,7 @@ WORKDIR /build/offer-publisher
 COPY offer-publisher/package.json offer-publisher/package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY offer-publisher/fleet.mjs offer-publisher/publish-offer.mjs ./
+COPY offer-publisher/fleet.mjs offer-publisher/publish-offer.mjs offer-publisher/rfq.mjs ./
 
 ########################################
 # Stage 3: runtime
