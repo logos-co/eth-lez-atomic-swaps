@@ -37,6 +37,7 @@ taker locks ETH ──▶ maker locks LEZ ──▶ taker claims LEZ (reveals se
 ```bash
 make basecamp-dev   # build the working tree and run it inside real Basecamp
 make test           # full test suite (contracts + integration, via lgs)
+make preflight      # fast local checks before you push — see docs/DEVELOPMENT.md
 ```
 
 Where things live:

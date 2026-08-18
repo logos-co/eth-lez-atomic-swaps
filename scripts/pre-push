@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# git pre-push hook — installed by `make install-hooks` (opt-in, never
+# forced on). Runs the fast local checks (`make preflight`: cargo
+# check/test, forge test, the node contract/unit tests, swap-ui-unit,
+# qmllint — no nix build, no real Basecamp launch) before letting a push
+# through, so the common CI failure classes surface in seconds-to-minutes
+# instead of after a ~40 min CI run.
+#
+# Skip once:      git push --no-verify
+# Uninstall:      rm "$(git rev-parse --git-path hooks)/pre-push"
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$repo_root"
+
+echo "pre-push: running 'make preflight' (skip once with 'git push --no-verify')"
+exec make preflight

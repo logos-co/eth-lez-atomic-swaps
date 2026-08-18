@@ -89,3 +89,32 @@ the tree hash, and the next `lgs basecamp build` rebuilds both modules
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+## Before you push
+
+CI (`.github/workflows/ci.yml` + `build-modules.yml`) takes ~40 min end to
+end — long enough that a stale-UI-text typo or a broken unit test only
+surfaces after a full cycle. Most of that is checkable locally in seconds:
+
+```bash
+make preflight   # cargo check/test, forge test, node contract/unit tests,
+                  # swap-ui-unit, qmllint — no nix build, no Basecamp launch
+```
+
+Cold (empty `target/`) it pays for compiling the Rust dependency tree once —
+a few minutes. Warm, it's seconds. It fails on the first broken check and
+prints which one.
+
+Not covered: the swap-module/swap-ui nix builds (×3 platforms) and the real-
+Basecamp UI smoke — there's no fast local form for those, see
+`make preflight-full`'s header comment in the `Makefile` for how far that
+gets and what's still a manual step.
+
+To run it automatically before every `git push`:
+
+```bash
+make install-hooks   # one-time, opt-in: symlinks scripts/pre-push into .git/hooks
+```
+
+Skip it for one push with `git push --no-verify`; remove it by deleting the
+symlink `git rev-parse --git-path hooks` points at.
