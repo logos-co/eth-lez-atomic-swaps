@@ -45,10 +45,26 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}-maker
+          # This workflow only ever runs against a `maker-v*` tag (or a
+          # manual workflow_dispatch, which may target any ref) — never a
+          # plain semver ref — so `type=semver` never matches and neither
+          # `is_default_branch` (a tag push isn't the default branch) nor a
+          # plain `type=raw,value=latest` (would fire on a dispatch off any
+          # branch/tag) is safe. Rules below:
+          #   1. type=match extracts the clean semver (`0.4.4`) from the
+          #      `maker-v0.4.4` tag name.
+          #   2. type=ref,event=tag reproduces the tag verbatim
+          #      (`maker-v0.4.4`) for provenance.
+          #   3. type=sha keeps the existing short-sha fallback tag.
+          #   4. type=raw,value=latest is gated on the ref literally being a
+          #      `maker-v*` tag, so `:latest` can only land on a real
+          #      release build — never a workflow_dispatch off a branch (or
+          #      an unrelated tag).
           tags: |
-            type=semver,pattern={{version}},prefix=maker-v
+            type=match,pattern=maker-v(\d+\.\d+\.\d+),group=1
+            type=ref,event=tag
             type=sha,prefix=,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/maker-v') }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
