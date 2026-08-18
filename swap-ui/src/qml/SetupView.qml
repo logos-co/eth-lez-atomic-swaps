@@ -33,9 +33,21 @@ PageScaffold {
 
     readonly property bool hasEthKey: swapBackend.ethPrivateKey !== ""
     readonly property bool hasLezAccount: swapBackend.lezSigningKey !== ""
-    // LEZ side funded via the faucet (step 3). NOT the same as "ready" — the
+    // LEZ side holds funds. lezBalance is a plain-LEZ string from the shared
+    // balance refresh (same idiom as hasEthBalance below); any positive value
+    // means the account is funded, regardless of whether a funding job ran
+    // THIS session.
+    readonly property bool hasLezBalance: {
+        var n = Number(swapBackend.lezBalance)
+        return !isNaN(n) && n > 0
+    }
+    // LEZ side funded (step 3) — true either because a funding job completed
+    // this session, or because the account already holds LEZ (e.g. a relaunch
+    // after funding in a previous session). Without the balance half of this,
+    // an already-funded user saw "Add funds" and a non-"done" step 3 until
+    // they clicked through a job again. NOT the same as "ready" — the
     // Ethereum side still needs gas (see hasEthBalance/isReady).
-    readonly property bool lezFunded: swapBackend.setupStep === "Done"
+    readonly property bool lezFunded: swapBackend.setupStep === "Done" || setupRoot.hasLezBalance
     // Ethereum side holds gas. ethBalance is a wei string from the shared
     // balance refresh; any positive value means the user has funded Sepolia.
     readonly property bool hasEthBalance: {
