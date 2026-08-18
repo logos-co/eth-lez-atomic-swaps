@@ -2,13 +2,13 @@
 
 Trustlessly swap Sepolia ETH ↔ LEZ, peer-to-peer, inside Logos Basecamp — no custodian.
 
-<!-- TODO(owner): drop a clean app-window screenshot at docs/img/app.png -->
-![ETH ↔ LEZ Atomic Swaps](docs/img/app.png)
+<!-- Screenshot goes here once docs/img/app.png is added:
+![ETH ↔ LEZ Atomic Swaps](docs/img/app.png) -->
 
 ## Try it
 
 1. In Basecamp, open **Settings → Repositories** and add this catalog:
-   `https://raw.githubusercontent.com/logos-co/eth-lez-atomic-swaps/master/logos-repo.json`
+   `https://logos.substratestudios.xyz/logos-repo.json`
 2. Install **swap**, then **swap_ui** (current version 0.4.4). Keep the built-in
    catalog enabled — it provides the `delivery_module` dependency.
 3. In the app, the **Setup** tab walks you through it: generate an Ethereum key,
