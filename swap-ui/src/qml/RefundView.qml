@@ -57,6 +57,24 @@ PageScaffold {
         ? (lastTakerResult.eth_tx || "") : ""
 
     readonly property bool hasKnownSwap: lastHashlock !== "" || lastEthSwapId !== ""
+
+    // A finished swap has nothing left in the lock, so the chain refuses a refund
+    // on it — offering the one-click claim there is offering a guaranteed failure.
+    // Only "completed" and "refunded" count as finished: a failure, or a status
+    // we cannot read, is exactly the stalled case this page is here for.
+    //
+    // Checked per SIDE rather than through `lastResult`, which resolves
+    // maker-first: someone who sold successfully and then had a purchase stall
+    // would otherwise have their still-locked ETH declared finished by the
+    // completed sale. Hidden only when nothing is outstanding on either side.
+    function swapSettled(result) {
+        return result !== null
+            && (result.status === "completed" || result.status === "refunded")
+    }
+    readonly property bool lastSwapFinished:
+        (lastMakerResult !== null || lastTakerResult !== null)
+        && (lastMakerResult === null || swapSettled(lastMakerResult))
+        && (lastTakerResult === null || swapSettled(lastTakerResult))
     readonly property bool busy: swapBackend.running || swapBackend.refundsLoading
 
     // Manual-entry state. LabeledField is a CONTROLLED field: it re-applies its
@@ -83,7 +101,7 @@ PageScaffold {
 
     // --- What we already know -------------------------------------------
     Card {
-        visible: refundRoot.hasKnownSwap
+        visible: refundRoot.hasKnownSwap && !refundRoot.lastSwapFinished
         tone: "done"
 
         RowLayout {
@@ -147,6 +165,31 @@ PageScaffold {
                 Layout.preferredHeight: 42
                 onClicked: swapBackend.refundLez(refundRoot.lastHashlock)
             }
+        }
+    }
+
+    // --- Last swap already finished --------------------------------------
+    Card {
+        visible: refundRoot.hasKnownSwap && refundRoot.lastSwapFinished
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot { status: "waiting"; size: 6; Layout.alignment: Qt.AlignVCenter }
+            SectionHeader { label: "Nothing to claim back"; hairline: false }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: "Your most recent swap finished, so it has nothing left locked up "
+                  + "to claim back. For an older swap, use \"Enter a refund by hand "
+                  + "(advanced)\" below — its details are on that swap's receipt in "
+                  + "History."
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSmall
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
         }
     }
 

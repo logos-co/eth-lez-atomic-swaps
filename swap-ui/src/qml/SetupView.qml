@@ -315,8 +315,14 @@ PageScaffold {
                     // visibly ticks instead of looking hung.
                     if (swapBackend.setupRunning && setupRoot.setupStepElapsedSeconds > 0)
                         parts[0] += " " + setupRoot.setupStepElapsedSeconds + "s"
+                    // The fraction only helps while it reads as progress; once the
+                    // target is met "200 / 150" scans as an overflow bug rather than
+                    // the success it is. Unparsable values compare false and so keep
+                    // the fraction.
                     if (swapBackend.setupBalance !== "")
-                        parts.push(swapBackend.setupBalance + " / " + swapBackend.setupTarget + " LEZ")
+                        parts.push(Number(swapBackend.setupBalance) >= Number(swapBackend.setupTarget)
+                                   ? swapBackend.setupBalance + " LEZ"
+                                   : swapBackend.setupBalance + " / " + swapBackend.setupTarget + " LEZ")
                     if (swapBackend.setupClaims > 0)
                         parts.push(swapBackend.setupClaims + " claim" + (swapBackend.setupClaims === 1 ? "" : "s") + " confirmed")
                     return parts.join(" — ")

@@ -1335,9 +1335,15 @@ Item {
                                 link: board.lezExplorerOk && board.sel !== null
                                       ? Links.lezAccount(board.sel.makerLez) : ""
                             }
+                            // An offer is an advertisement, not a swap: the
+                            // hashlock only exists once one actually starts.
+                            // Showing a permanent placeholder here would spend
+                            // a row of the trust surface on nothing, so the row
+                            // appears only for an offer that carries a real one.
                             OfferField {
                                 label: "Hashlock"
                                 value: board.sel !== null ? board.sel.hashlock : ""
+                                visible: board.sel !== null && board.sel.hashlock !== ""
                             }
                             OfferField {
                                 label: "LEZ program"
