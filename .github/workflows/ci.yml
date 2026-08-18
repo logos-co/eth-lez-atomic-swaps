@@ -15,6 +15,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [master]
 
@@ -25,9 +26,26 @@ concurrency:
 permissions:
   contents: read
 
+# OPTING OUT
+#   Add the `skip-ci` label to a pull request and every job here is skipped.
+#   Intended for changes that cannot affect what these jobs prove — a README
+#   edit, a comment-only pass. It is a deliberate, visible act: the label sits
+#   on the PR for a reviewer to see, and removing it re-runs everything.
+#
+#   `labeled`/`unlabeled` are listed under `types:` for exactly that reason.
+#   The default pull_request types are opened/synchronize/reopened, so without
+#   them the label would only take effect on a PR that already carried it
+#   before its last push — silently doing nothing the rest of the time.
+#
+#   The guard is written so it can only ever be false on a pull_request:
+#   `github.event.pull_request` is null on a push to master, so the label list
+#   is empty, contains() is false, and the job runs. Merging to master is
+#   therefore never skippable, whatever the PR was labelled.
+
 jobs:
   rust-checks:
     name: rust-checks (cargo check + unit tests)
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-ci') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -97,6 +115,7 @@ jobs:
 
   basecamp-ui-runtime:
     name: basecamp-ui-runtime (real Basecamp, linux-amd64)
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-ci') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
