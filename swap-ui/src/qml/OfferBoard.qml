@@ -828,7 +828,10 @@ Item {
                                 Layout.minimumWidth: 0
                                 elide: Text.ElideRight
                                 horizontalAlignment: Text.AlignLeft
-                                text: "MAKER"
+                                // SELLER, not MAKER: this column holds the same
+                                // address the detail pane calls "Seller ETH
+                                // address" two hundred pixels to the right.
+                                text: "SELLER"
                                 color: Theme.textMuted
                                 font.pixelSize: Theme.fontCaption; font.bold: true
                                 font.letterSpacing: 1

@@ -99,7 +99,11 @@ Rectangle {
         && (ethAmountWei !== "" || ethAmountEth !== "")
     readonly property string counterpartyEth: ctx.counterpartyEth || ""
     readonly property string counterpartyLez: ctx.counterpartyLez || ""
-    readonly property string counterpartyName: role === "taker" ? "Maker" : "Taker"
+    // The other party, in the app's words rather than the protocol's: if you
+    // bought, they sold. Never Maker/Taker — the offer board labels these exact
+    // two values "Seller ETH address" / "Seller LEZ account", and a receipt
+    // calling them something else reads as a different pair of facts.
+    readonly property string counterpartyName: role === "taker" ? "Seller" : "Buyer"
     readonly property string ethHtlcAddress: ctx.ethHtlcAddress || ""
     readonly property string lezProgramId: ctx.lezProgramId || ""
     readonly property double lezTimelockUnix: Number(ctx.lezTimelockUnix || 0)
