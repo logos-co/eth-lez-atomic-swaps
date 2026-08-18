@@ -117,15 +117,7 @@ Rectangle {
 
     // --- Display helpers (Number() for display only) --------------------
     function ethDisplay() {
-        if (ethAmountWei !== "") {
-            var n = Number(ethAmountWei)
-            if (isNaN(n) || n === 0) return "0 ETH"
-            var eth = n / 1e18
-            if (eth >= 0.001) return eth.toFixed(6).replace(/\.?0+$/, '') + " ETH"
-            var gwei = n / 1e9
-            if (gwei >= 1) return gwei.toFixed(4).replace(/\.?0+$/, '') + " Gwei"
-            return ethAmountWei + " wei"
-        }
+        if (ethAmountWei !== "") return Format.weiToEth(ethAmountWei)
         if (ethAmountEth !== "") return ethAmountEth + " ETH"
         return ""
     }
