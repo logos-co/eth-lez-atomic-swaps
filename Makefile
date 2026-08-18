@@ -1,6 +1,8 @@
 .PHONY: contracts demo infra \
        setup localnet-start localnet-stop test basecamp-ui-smoke swap-ui-unit \
-       basecamp-dev
+       basecamp-dev \
+       preflight preflight-full preflight-qmllint preflight-node-tests \
+       preflight-rust-check preflight-rust-anvil install-hooks
 
 .DEFAULT_GOAL := contracts
 
@@ -145,3 +147,123 @@ basecamp-launch-%:
 	  || { echo "basecamp layout drift: scaffold's modules_dir for profile '$*' is not $(BASECAMP_USER_DIR)/modules"; \
 	       echo "compare 'lgs basecamp paths $* --json' with BASECAMP_USER_DIR in the Makefile"; exit 1; }
 	LOGOS_USER_DIR=$(BASECAMP_USER_DIR) lgs basecamp launch $*
+
+# --- Preflight (fast local checks — see docs/DEVELOPMENT.md "Before you push") ---
+#
+# `preflight` mirrors as much of ci.yml's `rust-checks` job as runs in seconds,
+# plus the dependency-free swap-ui/JS checks, with NO nix build and NO real
+# Basecamp launch. Cold (first checkout, empty target/) it pays for compiling
+# the Rust dependency tree once, a few minutes; warm (the target/ dir any
+# normal `cargo check`/`cargo test` use leaves behind) it's seconds. Each
+# stage below echoes its own name before running, so a failure names the
+# exact check that broke instead of a bare "make: *** Error 1".
+#
+# NOT covered, and why:
+#   - the swap-module / swap-ui nix builds (build-modules.yml's `build` job,
+#     matrixed over darwin-arm64/linux-amd64/linux-arm64) — there is no fast
+#     local form; a real `nix build` on each platform IS the check.
+#   - basecamp-ui-runtime's real-Basecamp smoke (tests/basecamp-ui-smoke.mjs)
+#     — see `preflight-full` below, which gets partway there.
+#
+# RISC0_SKIP_BUILD is exported only for the two rust preflight recipes (GNU
+# Make target-specific `export`, scoped via the recipe's prerequisites) so it
+# never leaks into `test`/`demo`/`infra`, which need the real risc0 guest
+# build to run an actual swap — see ci.yml's own comment on the same var.
+
+# Mirrors ci.yml's "verify protocol-v2 EIP-712 fixture" + "cargo check
+# swap-ffi" + "cargo test (lib targets)" steps.
+preflight-rust-check: export RISC0_SKIP_BUILD := 1
+preflight-rust-check:
+	@echo "==> scripts/verify-protocol-v2-fixture.sh"
+	@scripts/verify-protocol-v2-fixture.sh || { echo "preflight FAILED: scripts/verify-protocol-v2-fixture.sh"; exit 1; }
+	@echo "==> cargo check -p swap-ffi --locked"
+	@cargo check -p swap-ffi --locked || { echo "preflight FAILED: cargo check -p swap-ffi"; exit 1; }
+	@echo "==> cargo test --lib --locked"
+	@cargo test --lib --locked || { echo "preflight FAILED: cargo test --lib"; exit 1; }
+
+# Mirrors ci.yml's "forge test (contract invariants)" + "cargo test (anvil
+# integration)" steps — the anvil-backed suites that catch a silent ABI/
+# binding regression (see ci.yml's comment on taker_binding/eth_integration).
+# `contracts` (forge build) is a prerequisite, not duplicated here.
+preflight-rust-anvil: export RISC0_SKIP_BUILD := 1
+preflight-rust-anvil: contracts
+	@echo "==> forge test (contracts)"
+	@cd contracts && forge test || { echo "preflight FAILED: forge test"; exit 1; }
+	@echo "==> cargo test --locked --test taker_binding --test eth_integration"
+	@cargo test --locked --test taker_binding --test eth_integration \
+	  || { echo "preflight FAILED: cargo test (anvil integration)"; exit 1; }
+
+# Every dependency-free node contract/unit test in the repo (no Waku node, no
+# Qt, no Basecamp) — see each file's own header comment for what it guards.
+NODE_PREFLIGHT_TESTS := \
+	tests/check-feedback-evidence.mjs \
+	tests/check-qml-backend-contract.mjs \
+	tests/check-qml-scrollview-content.mjs \
+	tests/check-persistence-paths.mjs \
+	tests/amount-format.test.mjs \
+	tests/offer-filter.test.mjs \
+	tests/maker-balance-refresh-contract.test.mjs \
+	tests/basecamp-ui-process-match.test.mjs \
+	offer-publisher/rfq.test.mjs
+
+preflight-node-tests:
+	@for f in $(NODE_PREFLIGHT_TESTS); do \
+		echo "==> node $$f"; \
+		node "$$f" || { echo "preflight FAILED: node $$f"; exit 1; }; \
+	done
+
+# qmllint is not wired into CI at all today (nothing on the fast path builds
+# Qt), but where it's on PATH it catches real QML syntax/type errors in
+# seconds — e.g. from `brew install qt` on macOS, or any nix profile that has
+# already built swap-ui once (its qtdeclarative closure carries qmllint).
+# Existing QML already trips plenty of qmllint's stylistic Info/Warning
+# diagnostics; only genuine errors (bad syntax, unresolved types) make it
+# exit non-zero, which is what this gates on. Skips cleanly, rather than
+# forcing a Qt install on every contributor, when it isn't available.
+preflight-qmllint:
+	@if command -v qmllint >/dev/null 2>&1; then \
+		echo "==> qmllint swap-ui/src/qml"; \
+		qmllint swap-ui/src/qml/*.qml || { echo "preflight FAILED: qmllint"; exit 1; }; \
+	else \
+		echo "==> qmllint: skipped (not on PATH — brew install qt on macOS, or use a nix profile/shell that provides qt6.qtdeclarative, to enable this check)"; \
+	fi
+
+preflight: preflight-qmllint swap-ui-unit preflight-node-tests preflight-rust-check preflight-rust-anvil
+	@echo "==> preflight: all fast checks passed"
+
+# Adds the one CI job with no fast local equivalent, as far as it goes:
+# builds swap + swap_ui from the WORKING TREE and stages them (plus the
+# pinned delivery_module) into the isolated dev profile, via
+# `scripts/basecamp-dev.sh --no-launch` — the same packaging path
+# basecamp-ui-runtime exercises. This is a real nix build: minutes, not
+# seconds (~3-6 min warm per docs/local-dev-harness.md, longer cold) — that's
+# why it's opt-in via preflight-full and not part of plain `preflight`.
+#
+# TODO(local UI-text smoke): this only proves the packages BUILD and INSTALL
+# cleanly. It does NOT run tests/basecamp-ui-smoke.mjs's actual UI assertions
+# — the ones that catch a stale-text regression like today's — because that
+# script additionally needs a *launched* Basecamp binary plus the
+# logos-qt-mcp inspector test framework (BASECAMP_BIN/BASECAMP_RUNTIME_DIR/
+# LOGOS_QT_MCP; see .github/scripts/run-basecamp-ui-smoke.sh), none of which
+# `basecamp-dev.sh --no-launch` stages. Wiring that up is a real follow-up
+# (candidate: teach basecamp-dev.sh to optionally build logos-qt-mcp and hand
+# off to tests/basecamp-ui-smoke.mjs against its own staged profile), not a
+# few lines here. Until then, verify UI text changes by hand:
+#   make basecamp-dev              # (no ARGS=--no-launch) launches real Basecamp
+# then walk the screens your change touched.
+preflight-full: preflight
+	@echo "==> make basecamp-dev ARGS=--no-launch (working-tree build + stage, no launch)"
+	@$(MAKE) basecamp-dev ARGS=--no-launch || { echo "preflight-full FAILED: basecamp-dev --no-launch"; exit 1; }
+	@echo "==> preflight-full: build+stage passed — see the TODO above to verify UI text by hand"
+
+# One-time opt-in: symlinks scripts/pre-push into the shared hooks dir (works
+# from any worktree of this repo — `git rev-parse --git-path hooks` resolves
+# to the same shared .git/hooks either way) so `git push` runs `make
+# preflight` first. Never installed automatically; nothing here runs the
+# hook until a contributor asks for it.
+install-hooks:
+	@hooks_dir=$$(git rev-parse --git-path hooks) && \
+	mkdir -p "$$hooks_dir" && \
+	chmod +x scripts/pre-push && \
+	ln -sf "$(CURDIR)/scripts/pre-push" "$$hooks_dir/pre-push" && \
+	echo "installed: $$hooks_dir/pre-push -> scripts/pre-push (runs 'make preflight' before every push)"
