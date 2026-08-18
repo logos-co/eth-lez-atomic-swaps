@@ -2,23 +2,49 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
+import SwapFormat
 
+// The app shell: navigation, the account strip, and the content stack.
+//
+// Navigation is grouped rather than flat. Seven tabs of equal weight gave the
+// two personas crammed into them — the taker (most users) and the maker
+// (advanced) — no front door. Everyday work is on the left; the maker and
+// recovery surfaces sit after a divider on the right.
+//
+// Tab identity is now by NAME, not index. Views emit navigation intents
+// (OfferBoard's navigateToSetup/Sell/Swap, SetupView's finished) and this file
+// resolves them through indexOf, so reordering or renaming a tab can no longer
+// silently send a button to the wrong screen.
 Item {
     id: root
 
-    // Tab indices — keep in lockstep with the Repeater model and StackLayout
-    // children below. Setup is APPENDED at the end (never inserted):
-    // OfferBoard.qml navigates by hardcoded index (tabConfig=1/tabMaker=2/
-    // tabTaker=3), so inserting anywhere earlier would silently break it.
-    readonly property int tabMarket: 0
-    readonly property int tabSetup: 6
+    // Order here is the order on screen; `primaryCount` is where the divider
+    // goes. Add or reorder freely — nothing indexes into this by number.
+    readonly property var tabs: [
+        { key: "market",  label: "Market"  },
+        { key: "swap",    label: "Swap"    },
+        { key: "history", label: "History" },
+        { key: "sell",    label: "Sell"    },
+        { key: "refund",  label: "Refund"  },
+        { key: "setup",   label: "Setup"   },
+    ]
+    readonly property int primaryCount: 3
 
-    // First-run guided setup: once config validation has settled (see the
-    // Timer pair below — same pattern as OfferBoard.qml's own readiness
-    // check), jump to the Setup tab if the config actually turns out
-    // incomplete. Gated to fire at most once and only while the user is
-    // still sitting on the default Market tab, so it can never yank
-    // navigation away from someone who has already started using the app.
+    function indexOfTab(key) {
+        for (var i = 0; i < root.tabs.length; i++)
+            if (root.tabs[i].key === key) return i
+        return 0
+    }
+    function goTo(key) {
+        tabBar.currentIndex = root.indexOfTab(key)
+    }
+
+    // First-run guided setup: once config validation has settled (see the Timer
+    // pair below — same pattern as OfferBoard.qml's own readiness check), jump
+    // to Setup if the config actually turns out incomplete. Gated to fire at
+    // most once and only while the user is still sitting on the default Market
+    // tab, so it can never yank navigation away from someone who has already
+    // started using the app.
     property bool validationRequested: false
     property bool validationSettled: false
     property bool autoNavigatedToSetup: false
@@ -32,9 +58,9 @@ Item {
 
     onValidationSettledChanged: {
         if (validationSettled && !configReady && !autoNavigatedToSetup
-                && tabBar.currentIndex === tabMarket) {
+                && tabBar.currentIndex === root.indexOfTab("market")) {
             autoNavigatedToSetup = true
-            tabBar.currentIndex = tabSetup
+            root.goTo("setup")
         }
     }
 
@@ -49,10 +75,10 @@ Item {
         }
     }
 
-    // Settles validation when the answer is "no errors": equal-value writes
-    // to validationErrorsJson emit no change signal, so a valid (complete)
-    // config would otherwise never flip validationSettled and the guided
-    // Setup tab would never get a chance to NOT show up for it.
+    // Settles validation when the answer is "no errors": equal-value writes to
+    // validationErrorsJson emit no change signal, so a valid (complete) config
+    // would otherwise never flip validationSettled and the guided Setup tab
+    // would never get a chance to NOT show up for it.
     Timer {
         id: validationSettleFallback
         interval: 1500
@@ -67,338 +93,473 @@ Item {
         }
     }
 
+    // --- Balance liveness (issue #57) ------------------------------------
+    // The account strip has no Refresh button, so its balances have to be right
+    // on their own.
+    //
+    // The backend already tries: five completion paths call beginBalanceSettle(),
+    // which re-arms requestAutomaticBalanceRefresh() up to eight times. But that
+    // function only ever calls fetchBalancesFromLoadedEnv(), gated on
+    // `!m_loadedEnvPath.isEmpty()` — a path set in exactly one place, a
+    // successful loadEnvFile(). Anyone who configured through Setup (i.e. every
+    // real user) has an empty m_loadedEnvPath, so every automatic refresh takes
+    // the Decision::Unavailable branch and no-ops with only a trace line. That
+    // is why the seller's "Available" never moved after a sale.
+    //
+    // Driving fetchBalances() — the config-backed route — from here fixes it for
+    // the config-backed majority without touching the C++ contract or the
+    // env-backed path.
+    property int balanceSettleTicks: 0
+
+    function refreshBalancesSoon() {
+        if (!swapBackend.ready) return
+        swapBackend.fetchBalances()
+        // A chain write is not visible the instant a job reports done, so keep
+        // asking for a while rather than trusting a single read.
+        root.balanceSettleTicks = 6
+    }
+
+    Timer {
+        interval: 4000
+        repeat: true
+        running: root.balanceSettleTicks > 0
+        onTriggered: {
+            root.balanceSettleTicks -= 1
+            if (!swapBackend.balancesLoading)
+                swapBackend.fetchBalances()
+        }
+    }
+
+    // First read, once there is a config worth reading with.
+    //
+    // The latch is load-bearing. `running` is a live binding, and
+    // applyBalancesResult() leaves ethBalance untouched when a fetch FAILS
+    // (swap_ui_plugin.cpp:1656) — so without it, a dead or rate-limited RPC
+    // gives: fetch fails -> ethBalance still "" -> binding re-evaluates true ->
+    // timer restarts -> fetch again, ~1.4x/second for as long as the app is
+    // open. The OfferBoard timer this replaced had the same latch; dropping it
+    // turned a one-shot into a hot loop.
+    // Bounded retry rather than a one-shot latch. Latching on the ATTEMPT was
+    // the obvious fix for the hot loop, but it trades a loud bug for a silent
+    // one: if that single read fails (dead RPC, timeout) the strip shows "—" for
+    // the rest of the session, because nothing else calls fetchBalances() until
+    // a swap or refund happens to finish. Counting attempts stops the loop and
+    // still gives a flaky endpoint a few chances.
+    property int initialBalanceAttempts: 0
+    readonly property int maxInitialBalanceAttempts: 4
+
+    Timer {
+        // Back off between tries so a failing endpoint is not hammered.
+        interval: 600 + root.initialBalanceAttempts * 3000
+        repeat: false
+        running: root.initialBalanceAttempts < root.maxInitialBalanceAttempts
+                 && swapBackend.ready && root.configReady
+                 && swapBackend.ethBalance === "" && !swapBackend.balancesLoading
+        onTriggered: {
+            root.initialBalanceAttempts += 1
+            swapBackend.fetchBalances()
+        }
+    }
+
+    // A config edit is a new chance: the previous failures may well have been
+    // the old RPC URL. Resets the budget without reintroducing the loop, since
+    // this only fires on an actual config change, not on every failed read.
+    Connections {
+        target: swapBackend
+        function onEthRpcUrlChanged() { root.initialBalanceAttempts = 0 }
+        function onLezSequencerUrlChanged() { root.initialBalanceAttempts = 0 }
+    }
+
+    // --- Sticky error notice ---------------------------------------------
+    // The strip cannot bind straight to swapBackend.errorMessage, because
+    // fetchBalances() opens with setErrorMessage("") (swap_ui_plugin.cpp:1697)
+    // and the settle loop above calls it every 4s for 24s after any run ends.
+    // A failed swap sets takerRunning=false (arming the settle window) and THEN
+    // writes the failure into errorMessage — so the message the user most needs
+    // would appear and then be silently erased four seconds later.
+    //
+    // Latching it keeps the failure on screen until the user dismisses it or a
+    // new run starts. Errors about money should not evaporate on a timer.
+    property string noticeError: ""
+
+    Connections {
+        target: swapBackend
+        function onErrorMessageChanged() {
+            if (swapBackend.errorMessage !== "")
+                root.noticeError = swapBackend.errorMessage
+        }
+        // A new attempt supersedes the last failure.
+        function onRunningChanged() {
+            if (swapBackend.running) root.noticeError = ""
+        }
+        // Refunds too. refundLez/refundEth do set makerRunning/takerRunning (so
+        // `running` covers them), but this view should not depend on that
+        // internal detail — the Refund page is precisely where someone goes
+        // after a failure, and leaving the old error stacked above the new
+        // action reads as "the refund failed as well".
+        function onRefundsLoadingChanged() {
+            if (swapBackend.refundsLoading) root.noticeError = ""
+        }
+    }
+
+    Connections {
+        target: swapBackend
+        // A completed sale in the selling loop — the case #57 reported.
+        function onAutoAcceptCompletedChanged() { root.refreshBalancesSoon() }
+        // Any run finishing, in either direction, moves both balances.
+        function onTakerRunningChanged() {
+            if (!swapBackend.takerRunning) root.refreshBalancesSoon()
+        }
+        function onMakerRunningChanged() {
+            if (!swapBackend.makerRunning) root.refreshBalancesSoon()
+        }
+        function onAutoAcceptRunningChanged() {
+            if (!swapBackend.autoAcceptRunning) root.refreshBalancesSoon()
+        }
+        // A refund returns funds too.
+        function onRefundsLoadingChanged() {
+            if (!swapBackend.refundsLoading) root.refreshBalancesSoon()
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        // Tab bar
-        TabBar {
-            id: tabBar
+        // --- Navigation --------------------------------------------------
+        Rectangle {
             Layout.fillWidth: true
-            background: Rectangle { color: Theme.surface }
+            implicitHeight: 44
+            color: Theme.surface
 
-            Repeater {
-                // Order is load-bearing: OfferBoard navigates by index
-                // (tabConfig=1 / tabMaker=2 / tabTaker=3), so new tabs are
-                // appended, never inserted. Must stay in lockstep with the
-                // StackLayout below. "Setup" appended at index 6 — see
-                // root.tabSetup above.
-                model: ["Market", "Config", "Maker", "Taker", "Refund", "History", "Setup"]
-                TabButton {
-                    text: modelData
-                    width: implicitWidth
-                    leftPadding: 20
-                    rightPadding: 20
-                    font.pixelSize: Theme.fontNormal
-                    // Accessibility: a bare TabButton surfaces to macOS as an
-                    // AXRadioButton but advertises no AXPress action, so
-                    // assistive tech and UI automation can't switch tabs
-                    // (issue #59). Qt's PageTab role has the same limitation on
-                    // macOS, so use its radio-button fallback there: Cocoa maps
-                    // AXPress on that role to toggleAction. Keep PageTab on
-                    // other platforms so the tabs retain native tab-list
-                    // membership and semantics.
-                    Accessible.role: Qt.platform.os === "osx"
-                                     ? Accessible.RadioButton
-                                     : Accessible.PageTab
-                    Accessible.name: modelData
-                    Accessible.checkable: Qt.platform.os === "osx"
-                    Accessible.checked: Qt.platform.os === "osx"
-                                        && tabBar.currentIndex === index
-                    Accessible.selectable: Qt.platform.os !== "osx"
-                    Accessible.selected: Qt.platform.os !== "osx"
-                                         && tabBar.currentIndex === index
-                    Accessible.onPressAction: tabBar.currentIndex = index
-                    Accessible.onToggleAction: tabBar.currentIndex = index
-                    contentItem: Text {
-                        text: parent.text
-                        font: parent.font
-                        color: tabBar.currentIndex === index ? Theme.accent : Theme.textSecondary
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                    }
-                    background: Rectangle {
-                        color: tabBar.currentIndex === index ? Theme.surfaceLight : "transparent"
-                        Rectangle {
-                            anchors.bottom: parent.bottom
-                            width: parent.width
-                            height: 3
-                            color: tabBar.currentIndex === index ? Theme.accent : "transparent"
+            TabBar {
+                id: tabBar
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                background: null
+
+                Repeater {
+                    model: root.tabs
+                    TabButton {
+                        required property int index
+                        required property var modelData
+
+                        text: modelData.label
+                        width: implicitWidth
+                        leftPadding: 20
+                        rightPadding: 20
+                        font.pixelSize: Theme.fontNormal
+                        // Accessibility: a bare TabButton surfaces to macOS as an
+                        // AXRadioButton but advertises no AXPress action, so
+                        // assistive tech and UI automation can't switch tabs
+                        // (issue #59). Qt's PageTab role has the same limitation on
+                        // macOS, so use its radio-button fallback there: Cocoa maps
+                        // AXPress on that role to toggleAction. Keep PageTab on
+                        // other platforms so the tabs retain native tab-list
+                        // membership and semantics.
+                        Accessible.role: Qt.platform.os === "osx"
+                                         ? Accessible.RadioButton
+                                         : Accessible.PageTab
+                        Accessible.name: modelData.label
+                        Accessible.checkable: Qt.platform.os === "osx"
+                        Accessible.checked: Qt.platform.os === "osx"
+                                            && tabBar.currentIndex === index
+                        Accessible.selectable: Qt.platform.os !== "osx"
+                        Accessible.selected: Qt.platform.os !== "osx"
+                                             && tabBar.currentIndex === index
+                        Accessible.onPressAction: tabBar.currentIndex = index
+                        Accessible.onToggleAction: tabBar.currentIndex = index
+
+                        contentItem: Text {
+                            text: parent.text
+                            font: parent.font
+                            color: tabBar.currentIndex === index
+                                   ? Theme.accent
+                                   : (parent.hovered ? Theme.textPrimary : Theme.textSecondary)
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Item {
+                            // Divider between the everyday tabs and the
+                            // advanced ones, drawn on the leading edge of the
+                            // first advanced tab.
+                            Rectangle {
+                                visible: index === root.primaryCount
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 1
+                                height: 18
+                                color: Theme.border
+                            }
+                            Rectangle {
+                                anchors.bottom: parent.bottom
+                                width: parent.width
+                                height: 2
+                                color: tabBar.currentIndex === index
+                                       ? Theme.accent : "transparent"
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Separator line below tab bar
         Rectangle {
             Layout.fillWidth: true
-            height: 1
+            Layout.preferredHeight: 1
             color: Theme.border
         }
 
-        // Role badge
-        Rectangle {
-            visible: swapBackend.swapRole === "maker" || swapBackend.swapRole === "taker"
-            Layout.fillWidth: true
-            height: 32
-            color: swapBackend.swapRole === "maker" ? Theme.surface : Theme.surface
-
-            RowLayout {
-                anchors.centerIn: parent
-                spacing: 8
-
-                Rectangle {
-                    width: 8; height: 8
-                    radius: 4
-                    color: swapBackend.swapRole === "maker" ? Theme.success : Theme.accent
-                }
-                Text {
-                    text: swapBackend.swapRole === "maker" ? "MAKER INSTANCE" : "TAKER INSTANCE"
-                    color: swapBackend.swapRole === "maker" ? Theme.success : Theme.accent
-                    font.pixelSize: 12
-                    font.bold: true
-                    font.letterSpacing: 1.5
-                }
-                Rectangle {
-                    width: 8; height: 8
-                    radius: 4
-                    color: swapBackend.swapRole === "maker" ? Theme.success : Theme.accent
-                }
-            }
-        }
-
-        // Wallet balances header
+        // --- Account strip ------------------------------------------------
+        // Role badge and balances used to be two stacked bands, with the
+        // balances crammed left and a Refresh button stranded at the far right.
+        // One line now: who you are, what you hold, and whether you're
+        // connected. Balances update themselves; there is no Refresh.
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: balanceHeaderRow.implicitHeight + Theme.spacingNormal * 2
+            implicitHeight: 52
             color: Theme.surface
 
-            function weiToEth(wei) {
-                var n = Number(wei)
-                if (isNaN(n) || n === 0) return "0 ETH"
-                var eth = n / 1e18
-                if (eth >= 0.001) return eth.toFixed(6).replace(/\.?0+$/, '') + " ETH"
-                var gwei = n / 1e9
-                if (gwei >= 1) return gwei.toFixed(4).replace(/\.?0+$/, '') + " Gwei"
-                return wei + " wei"
-            }
-
             RowLayout {
-                id: balanceHeaderRow
                 anchors {
                     fill: parent
-                    leftMargin: Theme.spacingXLarge
-                    rightMargin: Theme.spacingXLarge
-                    topMargin: Theme.spacingNormal
-                    bottomMargin: Theme.spacingNormal
+                    leftMargin: Theme.spacingLarge
+                    rightMargin: Theme.spacingLarge
                 }
                 spacing: Theme.spacingLarge
 
+                StatusChip {
+                    visible: swapBackend.swapRole === "maker" || swapBackend.swapRole === "taker"
+                    text: swapBackend.swapRole === "maker" ? "Selling" : "Buying"
+                    status: "waiting"
+                    Layout.alignment: Qt.AlignVCenter
+                }
+
+                RowLayout {
+                    spacing: Theme.spacingSmall
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        text: "ETH"
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        font.bold: true
+                    }
+                    Text {
+                        text: swapBackend.ethAddress
+                              ? Format.shortHex(swapBackend.ethAddress, 6, 4) : "—"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontCaption
+                        font.family: Theme.monoFont
+                    }
+                    Text {
+                        text: swapBackend.ethBalance
+                              ? Format.weiToEth(swapBackend.ethBalance)
+                              : (swapBackend.balancesLoading ? "Reading…" : "—")
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 1
+                    Layout.preferredHeight: 20
+                    Layout.alignment: Qt.AlignVCenter
+                    color: Theme.border
+                }
+
+                RowLayout {
+                    spacing: Theme.spacingSmall
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                        text: "LEZ"
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        font.bold: true
+                    }
+                    Text {
+                        text: swapBackend.lezAccount
+                              ? Format.shortHex(swapBackend.lezAccount, 6, 4) : "—"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontCaption
+                        font.family: Theme.monoFont
+                    }
+                    Text {
+                        text: swapBackend.lezBalance
+                              ? swapBackend.lezBalance + " LEZ"
+                              : (swapBackend.balancesLoading ? "Reading…" : "—")
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontNormal
+                        font.bold: true
+                    }
+                }
+
+                // Last thing the engine said. The backend calls setStatus() in
+                // ~60 places and most are confirmations, not failures — "App
+                // data reset to defaults", "Config loaded from env", "Balances
+                // fetched". Deleting the bottom status bar took all of them off
+                // screen, so a destructive action like Reset app data completed
+                // with no acknowledgement at all. Failures additionally set
+                // errorMessage and get the loud strip below; this is the quiet
+                // channel for everything else.
                 Text {
-                    text: "ETH"
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.leftMargin: Theme.spacingSmall
+                    text: swapBackend.status
                     color: Theme.textMuted
-                    font.pixelSize: 11
-                    font.bold: true
-                }
-                Text {
-                    text: swapBackend.ethAddress ? swapBackend.ethAddress.substring(0, 8) + "..." + swapBackend.ethAddress.substring(38) : "--"
-                    color: Theme.textSecondary
-                    font.pixelSize: 11
-                    font.family: Theme.monoFont
-                }
-                Text {
-                    text: swapBackend.balancesLoading ? "Loading..." : (swapBackend.ethBalance ? parent.parent.weiToEth(swapBackend.ethBalance) : "--")
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontNormal
-                    font.bold: true
+                    font.pixelSize: Theme.fontCaption
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignRight
                 }
 
-                Rectangle { width: 1; Layout.fillHeight: true; color: Theme.border }
+                // Connection state — one dot, one phrase, same vocabulary as
+                // everywhere else in the app.
+                StatusChip {
+                    id: connectionChip
+                    Layout.alignment: Qt.AlignVCenter
 
-                Text {
-                    text: "LEZ"
-                    color: Theme.textMuted
-                    font.pixelSize: 11
-                    font.bold: true
-                }
-                Text {
-                    text: swapBackend.lezAccount ? swapBackend.lezAccount.substring(0, 8) + "..." + swapBackend.lezAccount.substring(swapBackend.lezAccount.length - 4) : "--"
-                    color: Theme.textSecondary
-                    font.pixelSize: 11
-                    font.family: Theme.monoFont
-                }
-                Text {
-                    text: swapBackend.balancesLoading ? "Loading..." : (swapBackend.lezBalance ? swapBackend.lezBalance + " LEZ" : "--")
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontNormal
-                    font.bold: true
-                }
-
-                Item { Layout.fillWidth: true }
-
-                Button {
-                    text: swapBackend.balancesLoading ? "Refreshing" : "Refresh"
-                    enabled: !swapBackend.balancesLoading
-                    Layout.preferredHeight: 28
-                    font.pixelSize: 11
-                    background: Rectangle {
-                        color: parent.hovered ? Qt.darker(Theme.surface, 1.1) : Theme.surface
-                        border.color: Theme.border
-                        border.width: 1
-                        radius: Theme.radiusSmall
-                    }
-                    contentItem: Text {
-                        text: parent.text
-                        color: parent.enabled ? Theme.textSecondary : Theme.textMuted
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font: parent.font
-                    }
-                    onClicked: swapBackend.fetchBalances()
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.fillWidth: true
-            height: 1
-            color: Theme.border
-        }
-
-        // Content
-        StackLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            currentIndex: tabBar.currentIndex
-
-            OfferBoard {}
-            ConfigPanel {}
-            MakerView {}
-            TakerView { id: takerView }
-            RefundView {}
-            HistoryView {}
-            SetupView {
-                id: setupView
-                onFinished: tabBar.currentIndex = root.tabMarket
-            }
-        }
-
-        // Status bar
-        Rectangle {
-            Layout.fillWidth: true
-            height: 32
-            color: Theme.surface
-
-            function humanStep(step) {
-                var map = {
-                    "WaitingForEthLock": "Waiting for buyer to lock ETH\u2026",
-                    "EthLockDetected":   "ETH lock detected",
-                    "EthLockRejected":   "ETH lock rejected \u2014 timelock too tight, still waiting",
-                    "LezLocking":        "Locking LEZ in escrow\u2026",
-                    "LezLocked":         "LEZ locked",
-                    "WaitingForPreimage": "Waiting for preimage reveal\u2026",
-                    "PreimageRevealed":  "Preimage revealed",
-                    "ClaimingEth":       "Claiming ETH\u2026",
-                    "EthClaimed":        "ETH claimed",
-                    "PreimageGenerated": "Preimage generated",
-                    "LockingEth":        "Locking ETH\u2026",
-                    "EthLocked":         "ETH locked",
-                    "WaitingForLezLock": "Waiting for seller to lock LEZ\u2026",
-                    "LezLockDetected":   "LEZ lock detected",
-                    "VerifyingLezEscrow": "Verifying LEZ escrow\u2026",
-                    "LezEscrowVerified": "LEZ escrow verified",
-                    "ClaimingLez":       "Claiming LEZ\u2026",
-                    "LezClaimed":        "LEZ claimed",
-                    "TimelockExpired":   "Timelock expired",
-                    "Refunding":         "Refunding\u2026",
-                    "RefundComplete":    "Refund complete",
-                    "AutoAcceptStarted": "Starting auto-accept\u2026",
-                    "AutoAcceptCancelled": "Auto-accept stopped",
-                }
-                return map[step] || step
-            }
-
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: Theme.spacingNormal
-                anchors.rightMargin: Theme.spacingNormal
-
-                Text {
-                    text: {
-                        var hs = parent.parent.humanStep
-                        var parts = []
-                        if (swapBackend.makerRunning || swapBackend.autoAcceptRunning)
-                            parts.push("Maker: " + hs(swapBackend.makerCurrentStep || "..."))
-                        if (swapBackend.takerRunning)
-                            parts.push("Taker: " + hs(swapBackend.takerCurrentStep || "..."))
-                        if (parts.length > 0)
-                            return parts.join(" | ")
-                        if (!swapBackend.ready)
-                            return "Connecting to backend..."
-                        return swapBackend.status || "Idle"
-                    }
-                    color: swapBackend.messagingRetrying ? Theme.warning : (swapBackend.errorMessage !== "" ? Theme.error : swapBackend.running ? Theme.warning : Theme.textMuted)
-                    font.pixelSize: Theme.fontSmall
-                }
-                Item { Layout.fillWidth: true }
-                Text {
-                    visible: true
                     // A KNOWN zero-peer reading while connected is fleet
-                    // isolation: the local node is up and subscribed but
-                    // nothing can reach it, which a bare "Delivery
-                    // connected" used to mask (live 0.4.1 incident: stale
-                    // delivery_module, empty board, no error anywhere).
-                    // Gated on messagingHint so the alarm respects the
-                    // backend's post-start grace window (0 peers seconds
-                    // after start is normal dialing) — same gate as
-                    // OfferBoard.fleetIsolated.
+                    // isolation: the local node is up and subscribed but nothing
+                    // can reach it, which a bare "connected" used to mask (live
+                    // 0.4.1 incident: stale delivery_module, empty board, no
+                    // error anywhere). Gated on messagingHint so the alarm
+                    // respects the backend's post-start grace window — 0 peers
+                    // seconds after start is normal dialing.
                     readonly property bool fleetIsolated:
                         swapBackend.messagingConnected
                         && swapBackend.messagingPeerCountKnown
                         && swapBackend.messagingPeerCount === 0
                         && swapBackend.messagingHint !== ""
+
+                    status: {
+                        if (connectionChip.fleetIsolated || swapBackend.messagingHint !== "")
+                            return "attention"
+                        if (swapBackend.messagingConnected) return "live"
+                        if (swapBackend.messagingLoading || swapBackend.messagingRetrying)
+                            return "working"
+                        return "attention"
+                    }
                     text: {
                         if (swapBackend.messagingConnected) {
+                            if (connectionChip.fleetIsolated) return "No peers"
+                            if (swapBackend.messagingHint !== "") return "Needs attention"
                             if (swapBackend.messagingPeerCount > 0)
-                                return "Delivery connected \u00B7 " + swapBackend.messagingPeerCount + " fleet peer" + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
-                            if (fleetIsolated)
-                                return "Delivery connected \u00B7 0 fleet peers"
-                            if (swapBackend.messagingHint !== "")
-                                return "Delivery degraded"
-                            if (swapBackend.messagingConnectionStatus !== "")
-                                return "Delivery " + swapBackend.messagingConnectionStatus.toLowerCase()
-                            return "Delivery connected"
+                                return "Connected · " + swapBackend.messagingPeerCount + " peer"
+                                       + (swapBackend.messagingPeerCount !== 1 ? "s" : "")
+                            return "Connected"
                         }
-                        if (swapBackend.messagingLoading)
-                            return "Starting Delivery..."
-                        if (swapBackend.messagingRetrying)
-                            return "Waiting for Delivery..."
-                        if (swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
-                            return "Swap in progress"
-                        return "Delivery not ready"
+                        if (swapBackend.messagingLoading) return "Connecting…"
+                        if (swapBackend.messagingRetrying) return "Reconnecting…"
+                        if (!swapBackend.ready) return "Starting…"
+                        return "Not connected"
                     }
-                    color: {
-                        if (fleetIsolated || swapBackend.messagingHint !== "")
-                            return Theme.warning
-                        return (swapBackend.messagingConnected || swapBackend.makerRunning || swapBackend.takerRunning || swapBackend.autoAcceptRunning)
-                               ? Theme.success
-                               : Theme.warning
-                    }
-                    font.pixelSize: Theme.fontSmall
+                }
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 1
+            color: Theme.border
+        }
+
+        // --- Error strip ----------------------------------------------------
+        // Errors used to live in the bottom status bar as one line of coloured
+        // text, 900px below whatever the user was looking at. A failure that
+        // involves money deserves to be in the reading path, so it sits under
+        // the account strip and pushes content down rather than whispering.
+        Rectangle {
+            id: errorStrip
+            Layout.fillWidth: true
+            visible: root.noticeError !== ""
+            implicitHeight: visible ? errorRow.implicitHeight + Theme.spacingNormal : 0
+            color: Qt.rgba(Theme.toneProblem.r, Theme.toneProblem.g,
+                           Theme.toneProblem.b, 0.12)
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: 1
+                color: Theme.toneProblem
+                opacity: 0.4
+            }
+
+            RowLayout {
+                id: errorRow
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    verticalCenter: parent.verticalCenter
+                    leftMargin: Theme.spacingLarge
+                    rightMargin: Theme.spacingLarge
+                }
+                spacing: Theme.spacingSmall
+
+                StatusDot {
+                    status: "problem"
+                    size: 6
+                    Layout.alignment: Qt.AlignVCenter
                 }
                 Text {
-                    visible: true
-                    text: swapBackend.messagingConnected ? " \u25CF " : " \u25CB "
-                    color: (swapBackend.messagingConnected && swapBackend.messagingHint === "")
-                           ? Theme.success : Theme.warning
+                    Layout.fillWidth: true
+                    text: root.noticeError
+                    color: Theme.toneProblem
                     font.pixelSize: Theme.fontSmall
+                    horizontalAlignment: Text.AlignLeft
+                    wrapMode: Text.WordWrap
                 }
-                Text {
-                    text: "LEZ Atomic Swap"
-                    color: Theme.textMuted
-                    font.pixelSize: Theme.fontSmall
+                // Latched, so it needs a way out that isn't "wait and hope".
+                Button {
+                    Layout.preferredWidth: 24
+                    Layout.preferredHeight: 24
+                    Layout.alignment: Qt.AlignVCenter
+                    flat: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Dismiss this message"
+                    background: Rectangle {
+                        color: parent.hovered ? Theme.surfaceLight : "transparent"
+                        radius: Theme.radiusSmall
+                    }
+                    contentItem: Text {
+                        text: "✕"
+                        color: Theme.toneProblem
+                        font.pixelSize: Theme.fontCaption
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    onClicked: root.noticeError = ""
                 }
+            }
+        }
+
+        // --- Content -------------------------------------------------------
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: tabBar.currentIndex
+
+            OfferBoard {
+                onNavigateToSetup: root.goTo("setup")
+                onNavigateToSell: root.goTo("sell")
+                onNavigateToSwap: root.goTo("swap")
+                onSwapEngaged: (offer) => {
+                    takerView.acceptedOffer = offer
+                    takerView.swapCompleted = false
+                }
+                onSwapAbandoned: takerView.acceptedOffer = null
+            }
+            TakerView {
+                id: takerView
+                onBrowseMarket: root.goTo("market")
+            }
+            HistoryView {}
+            MakerView {}
+            RefundView {}
+            SetupView {
+                onFinished: root.goTo("market")
             }
         }
     }

@@ -1,37 +1,56 @@
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
+import SwapFormat
+import SwapCopy
 
-ScrollView {
+// Sell LEZ — publish an offer and let buyers take it.
+//
+// Three things changed here beyond styling:
+//
+//  - The live step is shown on this page. It used to live only in the shell's
+//    bottom status bar, ~900px below the stepper describing the same moment.
+//  - The seller now gets the safety reassurance too. Their LEZ sits in escrow
+//    for minutes at a time and nothing on this screen ever said it comes back.
+//  - The per-sale receipt is rendered. buildLoopReceipt() has always run on
+//    every completed sale and the result was assigned to `loopReceipt` and then
+//    never displayed — the evidence was assembled and thrown away.
+PageScaffold {
     id: makerRoot
-    clip: true
-    contentWidth: availableWidth
-    background: Rectangle { color: Theme.background }
+
+    title: "Sell LEZ"
+    subtitle: "Publish your rate as an offer. Buyers lock ETH, you lock LEZ, and "
+              + "the swap finishes on its own."
+
+    headerTrailingData: StatusChip {
+        text: swapBackend.autoAcceptRunning ? "Live" : "Offline"
+        status: swapBackend.autoAcceptRunning ? "live" : "waiting"
+        bold: swapBackend.autoAcceptRunning
+    }
 
     // Hints render as one calm expectation line under the active step (shared
-    // ProgressStepper). The maker's waits (for the buyer's ETH lock, then for
-    // the buyer's preimage/claim) are the ones that look idle for minutes.
+    // ProgressStepper). The seller's waits (for the buyer's ETH lock, then for
+    // the buyer's claim) are the ones that look idle for minutes.
     property var makerSteps: [
-        { name: "WaitingForEthLock", label: "Wait for ETH Lock",
-          hint: "Listening for a buyer to lock ETH. Can sit idle until someone "
-                + "takes your offer — that is normal." },
-        { name: "EthLockDetected",   label: "ETH Lock Detected",
-          hint: "A buyer locked ETH. Preparing to lock your LEZ." },
-        { name: "LezLocking",        label: "Lock LEZ",
+        { name: "WaitingForEthLock", label: "Wait for the buyer to lock ETH",
+          hint: "Listening for a buyer to take your offer. This can sit idle for "
+                + "a long time — that is normal, not stuck." },
+        { name: "EthLockDetected",   label: "Buyer locked ETH",
+          hint: "A buyer locked their ETH. Getting ready to lock your LEZ." },
+        { name: "LezLocking",        label: "Lock your LEZ",
           hint: "Locking your LEZ in escrow — LEZ blocks can be a minute or more "
                 + "apart, so a short wait here is normal." },
-        { name: "LezLocked",         label: "LEZ Locked",
-          hint: "LEZ locked. Waiting for the buyer to claim, which reveals the "
-                + "preimage." },
-        { name: "WaitingForPreimage", label: "Wait for Preimage",
-          hint: "Waiting for the buyer to claim LEZ and reveal the preimage. "
-                + "Typically 1–5 min on the LEZ testnet." },
-        { name: "PreimageRevealed",  label: "Preimage Revealed",
-          hint: "Got the preimage. Claiming the buyer's ETH." },
-        { name: "ClaimingEth",       label: "Claim ETH",
-          hint: "Claiming the buyer's ETH on Sepolia — usually under a minute." },
-        { name: "EthClaimed",        label: "ETH Claimed",
+        { name: "LezLocked",         label: "Your LEZ is locked",
+          hint: "Locked. Waiting for the buyer to claim it, which reveals the "
+                + "secret you need to collect their ETH." },
+        { name: "WaitingForPreimage", label: "Wait for the buyer to claim",
+          hint: "Waiting for the buyer to claim their LEZ. Typically 1–5 minutes. "
+                + "If they never do, your LEZ comes back to you after the timer." },
+        { name: "PreimageRevealed",  label: "Buyer claimed",
+          hint: "Got what we need. Collecting the buyer's ETH." },
+        { name: "ClaimingEth",       label: "Collect your ETH",
+          hint: "Collecting the buyer's ETH on Ethereum — usually under a minute." },
+        { name: "EthClaimed",        label: "ETH collected",
           hint: "" },
     ]
 
@@ -51,41 +70,20 @@ ScrollView {
         if (n <= 0) return ""
         var lezSold = n * Number(swapBackend.lezAmount)
         var ethEarned = n * Number(swapBackend.ethAmount)
-        return n + " swap" + (n > 1 ? "s" : "") + " completed (" + lezSold + " LEZ sold for " + ethEarned + " ETH)"
+        return n + " swap" + (n > 1 ? "s" : "") + " completed — "
+               + lezSold + " LEZ sold for " + ethEarned + " ETH"
     }
 
-    property string statusText: {
-        if (!swapBackend.autoAcceptRunning) {
-            if (makerRoot.cumulativeStats)
-                return "Offline \u2014 " + makerRoot.cumulativeStats
-            return "Set your rate and go live to publish an actionable offer"
-        }
-        if (swapBackend.makerCurrentStep === "" || swapBackend.makerCurrentStep === "WaitingForEthLock") {
-            if (swapBackend.autoAcceptCompleted === 0)
-                return "\u25CF LIVE \u2014 Listening for buyers..."
-            return "\u25CF LIVE \u2014 " + makerRoot.cumulativeStats + " \u2014 listening for buyers..."
-        }
-        return "\u25CF LIVE \u2014 Processing swap..."
-    }
-
-    function timeAgo(timestampMs) {
-        if (!timestampMs) return ""
-        var diff = Date.now() - timestampMs
-        if (diff < 0) diff = 0
-        var sec = Math.floor(diff / 1000)
-        if (sec < 60) return sec + "s ago"
-        var min = Math.floor(sec / 60)
-        if (min < 60) return min + "m ago"
-        var hr = Math.floor(min / 60)
-        return hr + "h " + (min % 60) + "m ago"
-    }
+    readonly property bool inSwap: swapBackend.autoAcceptRunning
+                                   && swapBackend.makerCurrentStep !== ""
+                                   && swapBackend.makerCurrentStep !== "WaitingForEthLock"
 
     // --- Receipt capture (session-only, PR1) ---------------------------
-    // The auto-accept loop reports per-swap completions without a result
-    // JSON (the backend discards the outcome until a later PR), so the
-    // receipt is assembled from what is in memory at completion time:
-    // config amounts/contracts/timelocks plus the taker's Delivery
-    // SwapAccept (hashlock, ETH swap ID, taker identities) surfaced in
+    // The auto-accept loop reports per-swap completions without a result JSON
+    // (the backend discards the outcome until a later PR), so the receipt is
+    // assembled from what is in memory at completion time: config
+    // amounts/contracts/timelocks plus the taker's Delivery SwapAccept
+    // (hashlock, ETH swap ID, taker identities) surfaced in
     // coordinationEventsJson.
     property double swapEngagedMs: 0
     property var loopReceipt: null
@@ -119,372 +117,331 @@ ScrollView {
         return ctx
     }
 
-    Flickable {
-        contentHeight: makerCol.implicitHeight + Theme.spacingXLarge * 2
-        boundsBehavior: Flickable.StopAtBounds
+    Connections {
+        target: swapBackend
 
-        ColumnLayout {
-            id: makerCol
-            anchors {
-                top: parent.top
-                left: parent.left
-                right: parent.right
-                margins: Theme.spacingXLarge
+        function onAutoAcceptRunningChanged() {
+            if (swapBackend.autoAcceptRunning) {
+                // Fresh live session: the moment-of-completion card belongs
+                // to the previous session — drop it.
+                makerRoot.loopReceipt = null
+                makerRoot.swapEngagedMs = 0
+                makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
             }
-            spacing: Theme.spacingLarge
+        }
 
-            Connections {
-                target: swapBackend
-
-                function onAutoAcceptRunningChanged() {
-                    if (swapBackend.autoAcceptRunning) {
-                        // Fresh live session: the moment-of-completion card belongs
-                        // to the previous session — drop it.
-                        makerRoot.loopReceipt = null
-                        makerRoot.swapEngagedMs = 0
-                        makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
-                    }
-                }
-
-                function onMakerCurrentStepChanged() {
-                    // First step past idle marks the moment a buyer engaged.
-                    if (swapBackend.autoAcceptRunning
-                            && makerRoot.swapEngagedMs === 0
-                            && swapBackend.makerCurrentStep !== ""
-                            && swapBackend.makerCurrentStep !== "WaitingForEthLock"
-                            && swapBackend.makerCurrentStep !== "AutoAcceptStarted") {
-                        makerRoot.swapEngagedMs = Date.now()
-                    }
-                }
-
-                function onAutoAcceptCompletedChanged() {
-                    if (swapBackend.autoAcceptCompleted <= makerRoot.seenCompleted) {
-                        makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
-                        return
-                    }
-                    makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
-                    makerRoot.loopReceipt = makerRoot.buildLoopReceipt()
-                    makerRoot.swapEngagedMs = 0
-                }
+        function onMakerCurrentStepChanged() {
+            // First step past idle marks the moment a buyer engaged.
+            if (swapBackend.autoAcceptRunning
+                    && makerRoot.swapEngagedMs === 0
+                    && swapBackend.makerCurrentStep !== ""
+                    && swapBackend.makerCurrentStep !== "WaitingForEthLock"
+                    && swapBackend.makerCurrentStep !== "AutoAcceptStarted") {
+                makerRoot.swapEngagedMs = Date.now()
             }
+        }
 
-            RowLayout {
+        function onAutoAcceptCompletedChanged() {
+            if (swapBackend.autoAcceptCompleted <= makerRoot.seenCompleted) {
+                makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+                return
+            }
+            makerRoot.seenCompleted = swapBackend.autoAcceptCompleted
+            makerRoot.loopReceipt = makerRoot.buildLoopReceipt()
+            makerRoot.swapEngagedMs = 0
+        }
+    }
+
+    // --- Your rate -------------------------------------------------------
+    Card {
+        SectionHeader {
+            label: "Your rate"
+            hairline: false
+        }
+        RowLayout {
+            spacing: Theme.spacingSmall
+
+            Text {
+                text: swapBackend.lezAmount + " LEZ"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLarge
+                font.bold: true
+                font.family: Theme.monoFont
+            }
+            Text {
+                text: "for"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSmall
+            }
+            Text {
+                text: swapBackend.ethAmount + " ETH"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontLarge
+                font.bold: true
+                font.family: Theme.monoFont
+            }
+            Text {
+                text: "per swap"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSmall
+            }
+            Item { Layout.fillWidth: true }
+        }
+        Text {
+            Layout.fillWidth: true
+            text: {
+                var bal = swapBackend.lezBalance
+                var amt = Number(swapBackend.lezAmount)
+                var n = (amt > 0) ? Math.floor(Number(bal) / amt) : 0
+                return "Available: " + bal + " LEZ"
+                       + (n > 0 ? "  (about " + n + " swaps at this rate)" : "")
+            }
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSmall
+        }
+        Text {
+            Layout.fillWidth: true
+            text: "Change your rate under Advanced settings in Setup."
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+    }
+
+    // --- Go live ---------------------------------------------------------
+    Card {
+        tone: swapBackend.autoAcceptRunning ? "active" : "neutral"
+
+        SectionHeader {
+            label: swapBackend.autoAcceptRunning ? "You are live" : "Go live"
+            hairline: false
+        }
+        Text {
+            Layout.fillWidth: true
+            text: swapBackend.autoAcceptRunning
+                  ? "Your offer is published and you're listening for buyers. "
+                    + "Leave this running."
+                  : "Publishes your rate as an offer buyers can take, and starts "
+                    + "listening for them to lock their ETH."
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSmall
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+
+        // Filled accent to go live; error-outlined ghost to stop.
+        GhostButton {
+            id: goLiveButton
+            visible: swapBackend.autoAcceptRunning
+            text: "Stop selling"
+            enabled: !swapBackend.messagingLoading
+            accented: false
+            Layout.fillWidth: true
+            Layout.preferredHeight: 42
+            font.bold: true
+            onClicked: swapBackend.stopAutoAccept()
+        }
+        PrimaryButton {
+            visible: !swapBackend.autoAcceptRunning
+            text: swapBackend.messagingRetrying
+                  ? "Waiting for the swap network…"
+                  : "Go live and publish my offer"
+            enabled: !swapBackend.makerRunning && !swapBackend.takerRunning
+                     && !swapBackend.messagingLoading && !swapBackend.messagingRetrying
+            Layout.fillWidth: true
+            Layout.preferredHeight: 42
+            onClicked: swapBackend.startAutoAccept()
+        }
+
+        // Live status line, on the page rather than in a status bar.
+        RowLayout {
+            visible: swapBackend.autoAcceptRunning
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot {
+                status: makerRoot.inSwap ? "working" : "live"
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
                 Layout.fillWidth: true
-                spacing: Theme.spacingNormal
-
-                Text {
-                    text: "Sell LEZ"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontTitle
-                    font.bold: true
-                }
-                StatusChip {
-                    text: swapBackend.autoAcceptRunning ? "Live" : "Offline"
-                    tone: swapBackend.autoAcceptRunning ? Theme.success : Theme.textMuted
-                    pulsing: swapBackend.autoAcceptRunning
-                    bold: swapBackend.autoAcceptRunning
-                }
-                Item { Layout.fillWidth: true }
+                text: makerRoot.inSwap
+                      ? Copy.step(swapBackend.makerCurrentStep)
+                      : "Listening for buyers…"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
             }
+        }
+        Text {
+            visible: swapBackend.autoAcceptRunning && makerRoot.cumulativeStats !== ""
+            Layout.fillWidth: true
+            text: makerRoot.cumulativeStats
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+    }
 
-            // --- Your Offer summary card ---
-            Rectangle {
+    // The seller's own reassurance. Previously absent entirely: their LEZ sits
+    // in escrow for minutes and nothing said it comes back.
+    SafetyNote {
+        visible: swapBackend.autoAcceptRunning
+        text: Copy.lezAutoRefunds
+    }
+
+    // --- Swap in progress -------------------------------------------------
+    Card {
+        visible: makerRoot.inSwap
+
+        SectionHeader {
+            label: "Swap in progress"
+            hairline: false
+        }
+        ProgressStepper {
+            Layout.fillWidth: true
+            steps: makerRoot.makerSteps
+            currentStep: swapBackend.makerCurrentStep
+            completedSteps: makerRoot.completedSteps
+        }
+    }
+
+    // --- The sale that just completed -------------------------------------
+    ReceiptCard {
+        visible: makerRoot.loopReceipt !== null
+        Layout.fillWidth: true
+        role: "maker"
+        context: makerRoot.loopReceipt
+    }
+
+    // --- Offline / nothing-yet state --------------------------------------
+    Card {
+        visible: !swapBackend.autoAcceptRunning
+
+        EmptyState {
+            Layout.fillWidth: true
+            tone: Theme.toneWaiting
+            title: makerRoot.cumulativeStats !== ""
+                   ? "You're offline" : "Not selling yet"
+            subtitle: makerRoot.cumulativeStats !== ""
+                      ? makerRoot.cumulativeStats + ". Go live again whenever you like."
+                      : "Go live to publish your rate. Buyers will see it on the market "
+                        + "and can take it while you're running."
+        }
+    }
+
+    // --- Completed sales ---------------------------------------------------
+    Card {
+        visible: swapBackend.swapHistory.length > 0
+
+        SectionHeader {
+            label: "This session"
+            detail: "" + swapBackend.swapHistory.length
+            hairline: false
+        }
+
+        Repeater {
+            model: swapBackend.swapHistory
+            delegate: ColumnLayout {
+                id: entryCol
+                required property var modelData
+
                 Layout.fillWidth: true
-                implicitHeight: offerCol.implicitHeight + Theme.spacingNormal * 2
-                color: Theme.surface
-                border.color: Theme.border
-                border.width: 1
-                radius: Theme.radiusNormal
+                spacing: 4
 
-                ColumnLayout {
-                    id: offerCol
-                    anchors {
-                        fill: parent
-                        margins: Theme.spacingNormal
-                    }
-                    spacing: 6
+                property var entry: {
+                    try { return JSON.parse(modelData) }
+                    catch (e) { return { status: "unknown" } }
+                }
 
-                    SectionHeader {
-                        label: "Your rate"
-                        hairline: false
-                    }
-                    RowLayout {
-                        spacing: 6
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    Layout.topMargin: Theme.spacingSmall
+                    color: Theme.border
+                    opacity: 0.6
+                }
 
-                        Text {
-                            text: swapBackend.lezAmount + " LEZ"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontLarge
-                            font.bold: true
-                            font.family: Theme.monoFont
-                        }
-                        Text {
-                            text: "\u21c4"
-                            color: Theme.textMuted
-                            font.pixelSize: Theme.fontNormal
-                        }
-                        Text {
-                            text: swapBackend.ethAmount + " ETH"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontLarge
-                            font.bold: true
-                            font.family: Theme.monoFont
-                        }
-                        Text {
-                            text: "per swap"
-                            color: Theme.textMuted
-                            font.pixelSize: Theme.fontSmall
-                        }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacingSmall
+
+                    StatusDot {
+                        status: entryCol.entry.status === "completed" ? "live" : "problem"
+                        size: 6
+                        Layout.alignment: Qt.AlignVCenter
                     }
                     Text {
                         text: {
-                            var bal = swapBackend.lezBalance
-                            var amt = Number(swapBackend.lezAmount)
-                            var n = (amt > 0) ? Math.floor(Number(bal) / amt) : 0
-                            return "Available: " + bal + " LEZ" + (n > 0 ? "  (~" + n + " swaps at this rate)" : "")
+                            var e = entryCol.entry
+                            if (e.status === "completed")
+                                return "Sold " + e.lez_amount + " LEZ for " + e.eth_amount + " ETH"
+                            if (e.status === "failed")
+                                return "Didn't complete"
+                            if (e.status === "insufficient_funds")
+                                return "Not enough LEZ"
+                            return e.status
                         }
-                        color: Theme.textSecondary
+                        color: entryCol.entry.status === "completed"
+                               ? Theme.textPrimary : Theme.toneProblem
                         font.pixelSize: Theme.fontSmall
-                    }
-                }
-            }
-
-            // --- Go Live Action ---
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: goLiveCol.implicitHeight + Theme.spacingNormal * 2
-                color: Theme.surface
-                border.color: swapBackend.autoAcceptRunning ? Theme.accent : Theme.border
-                border.width: 1
-                radius: Theme.radiusNormal
-
-                ColumnLayout {
-                    id: goLiveCol
-                    anchors {
-                        fill: parent
-                        margins: Theme.spacingNormal
-                    }
-                    spacing: 6
-
-                    SectionHeader {
-                        label: "Live maker"
-                        hairline: false
-                    }
-
-                    Text {
-                        text: "Publishes your current rate as an actionable offer and starts listening for buyer ETH locks."
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSmall
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
-                    }
-
-                    Button {
-                        id: goLiveButton
-                        text: swapBackend.messagingRetrying && !swapBackend.autoAcceptRunning
-                              ? "Waiting for Delivery..."
-                              : (swapBackend.autoAcceptRunning ? "Stop Live Maker" : "Go Live & Publish Offer")
-                        enabled: swapBackend.autoAcceptRunning
-                                 ? !swapBackend.messagingLoading
-                                 : (!swapBackend.makerRunning && !swapBackend.takerRunning && !swapBackend.messagingLoading
-                                    && !swapBackend.messagingRetrying
-                                    )
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 42
-                        font.pixelSize: Theme.fontNormal
                         font.bold: true
-
-                        // Filled accent to go live; error-outlined ghost to stop.
-                        background: Rectangle {
-                            color: swapBackend.autoAcceptRunning
-                                   ? (goLiveButton.enabled && goLiveButton.hovered
-                                      ? Theme.surfaceLight : Theme.surface)
-                                   : (goLiveButton.enabled
-                                      ? (goLiveButton.hovered ? Theme.accentHover : Theme.accent)
-                                      : Theme.surfaceLight)
-                            border.color: swapBackend.autoAcceptRunning ? Theme.error : "transparent"
-                            border.width: swapBackend.autoAcceptRunning ? 1 : 0
-                            radius: Theme.radiusNormal
-                        }
-                        contentItem: Text {
-                            text: goLiveButton.text
-                            color: swapBackend.autoAcceptRunning
-                                   ? Theme.error
-                                   : (goLiveButton.enabled ? Theme.accentForeground : Theme.textMuted)
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            font: goLiveButton.font
-                        }
-
-                        onClicked: {
-                            if (swapBackend.autoAcceptRunning)
-                                swapBackend.stopAutoAccept()
-                            else
-                                swapBackend.startAutoAccept()
-                        }
+                    }
+                    Item { Layout.fillWidth: true }
+                    Text {
+                        text: Format.timeAgo(entryCol.entry.timestamp)
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        font.family: Theme.monoFont
                     }
                 }
-            }
 
-            // --- Contextual Status Text ---
-            Text {
-                text: makerRoot.statusText
-                color: swapBackend.autoAcceptRunning ? Theme.accent : Theme.textSecondary
-                font.pixelSize: Theme.fontSmall
-                wrapMode: Text.Wrap
-                Layout.fillWidth: true
-            }
+                HexValue {
+                    visible: entryCol.entry.status === "completed" && !!entryCol.entry.eth_tx
+                    label: "ETH claim"
+                    value: entryCol.entry.eth_tx || ""
+                }
+                HexValue {
+                    visible: entryCol.entry.status === "completed" && !!entryCol.entry.lez_tx
+                    label: "LEZ lock"
+                    value: entryCol.entry.lez_tx || ""
+                }
 
-            // --- Progress (only visible during active swap) ---
-            Rectangle {
-                visible: swapBackend.autoAcceptRunning && swapBackend.makerCurrentStep !== ""
-                Layout.fillWidth: true
-                implicitHeight: makerProgressCol.implicitHeight + Theme.spacingNormal * 2
-                color: Theme.surface
-                border.color: Theme.border
-                border.width: 1
-                radius: Theme.radiusNormal
-
+                Text {
+                    visible: entryCol.entry.status === "insufficient_funds"
+                    Layout.fillWidth: true
+                    text: "You had " + (entryCol.entry.lez_balance || "?")
+                          + " LEZ but the swap needed "
+                          + (entryCol.entry.lez_required || "?") + " LEZ."
+                    color: Theme.textMuted
+                    font.pixelSize: Theme.fontCaption
+                    horizontalAlignment: Text.AlignLeft
+                    wrapMode: Text.WordWrap
+                }
                 ColumnLayout {
-                    id: makerProgressCol
-                    anchors {
-                        fill: parent
-                        margins: Theme.spacingNormal
-                    }
-                    spacing: Theme.spacingSmall
-
-                    SectionHeader {
-                        label: "Swap in progress"
-                        hairline: false
-                    }
-                    ProgressStepper {
-                        id: makerStepper
+                    visible: entryCol.entry.status === "failed" && !!entryCol.entry.error
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Text {
                         Layout.fillWidth: true
-                        steps: makerSteps
-                        currentStep: swapBackend.makerCurrentStep
-                        completedSteps: makerRoot.completedSteps
+                        text: "Nothing was lost — anything locked comes back after its timer."
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontCaption
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.WordWrap
                     }
-                }
-            }
-
-
-            // --- Completed Swaps ---
-            Rectangle {
-                visible: swapBackend.swapHistory.length > 0
-                Layout.fillWidth: true
-                implicitHeight: historyCol.implicitHeight + Theme.spacingNormal * 2
-                color: Theme.surface
-                border.color: Theme.border
-                border.width: 1
-                radius: Theme.radiusNormal
-
-                ColumnLayout {
-                    id: historyCol
-                    anchors {
-                        fill: parent
-                        margins: Theme.spacingNormal
-                    }
-                    spacing: 8
-
-                    SectionHeader {
-                        label: "Completed swaps"
-                        detail: "" + swapBackend.swapHistory.length
-                        hairline: false
-                    }
-
-                    Repeater {
-                        model: swapBackend.swapHistory
-                        delegate: Rectangle {
-                            Layout.fillWidth: true
-                            implicitHeight: entryCol.implicitHeight + 12
-                            color: "transparent"
-
-                            // Hairline separator (tape idiom)
-                            Rectangle {
-                                anchors.top: parent.top
-                                width: parent.width
-                                height: 1
-                                color: Theme.border
-                                opacity: 0.6
-                            }
-
-                            ColumnLayout {
-                                id: entryCol
-                                anchors {
-                                    fill: parent
-                                    topMargin: 8
-                                    bottomMargin: 4
-                                }
-                                spacing: 4
-
-                                // Parse the JSON entry
-                                property var entry: {
-                                    try { return JSON.parse(modelData) }
-                                    catch(e) { return { status: "unknown" } }
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Text {
-                                        text: {
-                                            if (entryCol.entry.status === "completed")
-                                                return "Sold " + entryCol.entry.lez_amount + " LEZ for " + entryCol.entry.eth_amount + " ETH"
-                                            if (entryCol.entry.status === "failed")
-                                                return "Failed"
-                                            if (entryCol.entry.status === "insufficient_funds")
-                                                return "Insufficient funds"
-                                            return entryCol.entry.status
-                                        }
-                                        color: entryCol.entry.status === "completed" ? Theme.success : Theme.error
-                                        font.pixelSize: Theme.fontSmall
-                                        font.bold: true
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    Text {
-                                        text: makerRoot.timeAgo(entryCol.entry.timestamp)
-                                        color: Theme.textMuted
-                                        font.pixelSize: Theme.fontCaption
-                                        font.family: Theme.monoFont
-                                    }
-                                }
-
-                                // Completed: show tx hashes
-                                Text {
-                                    visible: entryCol.entry.status === "completed" && (entryCol.entry.eth_tx || entryCol.entry.lez_tx)
-                                    text: entryCol.entry.eth_tx ? "ETH: " + entryCol.entry.eth_tx.substring(0, 10) + "..." + entryCol.entry.eth_tx.substring(entryCol.entry.eth_tx.length - 5) : ""
-                                    color: Theme.textMuted
-                                    font.pixelSize: Theme.fontCaption
-                                    font.family: Theme.monoFont
-                                }
-                                Text {
-                                    visible: entryCol.entry.status === "completed" && entryCol.entry.lez_tx
-                                    text: entryCol.entry.lez_tx ? "LEZ: " + entryCol.entry.lez_tx.substring(0, 10) + "..." + entryCol.entry.lez_tx.substring(entryCol.entry.lez_tx.length - 5) : ""
-                                    color: Theme.textMuted
-                                    font.pixelSize: Theme.fontCaption
-                                    font.family: Theme.monoFont
-                                }
-
-                                // Failed: show error
-                                Text {
-                                    visible: entryCol.entry.status === "failed" && entryCol.entry.error
-                                    text: entryCol.entry.error || ""
-                                    color: Theme.textMuted
-                                    font.pixelSize: Theme.fontCaption
-                                    wrapMode: Text.Wrap
-                                    Layout.fillWidth: true
-                                }
-
-                                // Insufficient funds: show balance info
-                                Text {
-                                    visible: entryCol.entry.status === "insufficient_funds"
-                                    text: "Have " + (entryCol.entry.lez_balance || "?") + " LEZ, need " + (entryCol.entry.lez_required || "?") + " LEZ"
-                                    color: Theme.textMuted
-                                    font.pixelSize: Theme.fontCaption
-                                    wrapMode: Text.Wrap
-                                    Layout.fillWidth: true
-                                }
-                            }
-                        }
+                    Text {
+                        Layout.fillWidth: true
+                        text: entryCol.entry.error || ""
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        font.family: Theme.monoFont
+                        horizontalAlignment: Text.AlignLeft
+                        wrapMode: Text.Wrap
                     }
                 }
             }

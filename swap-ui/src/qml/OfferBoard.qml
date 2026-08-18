@@ -2,6 +2,9 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
+import SwapFormat
+import SwapCopy
+import SwapLinks
 import "OfferFilter.js" as OfferFilter
 
 // Live offer board — the app's home screen.
@@ -19,9 +22,25 @@ Item {
     readonly property int pollIntervalMs: 5000
     readonly property int freshMs: 12000          // "NEW" ping window
     readonly property int expiredGraceSec: 15     // keep expired rows briefly
-    readonly property int tabConfig: 1
-    readonly property int tabMaker: 2
-    readonly property int tabTaker: 3
+
+    // --- Navigation intents ---------------------------------------------
+    // This view does not own the tab bar; the shell does. It used to declare
+    // its own copies of the tab indices (tabConfig=1/tabMaker=2/tabTaker=3) and
+    // assign straight into `tabBar.currentIndex` — an id resolved by dynamic
+    // scope from AtomicSwapView. That made the tab ORDER a load-bearing,
+    // silently-breakable contract between two files. Emitting intent instead
+    // means the shell can reorder, rename or merge tabs freely.
+    // Same pattern as SetupView's `finished()`.
+    signal navigateToSetup()
+    signal navigateToSell()
+    signal navigateToSwap()
+
+    // Accepting an offer hands it to the swap screen. Emitted rather than
+    // written straight into TakerView's properties (this view used to assign to
+    // a `takerView` id resolved by dynamic scope from AtomicSwapView, which
+    // broke silently the moment the shell stopped naming that child).
+    signal swapEngaged(var offer)
+    signal swapAbandoned()
     // Spam caps (defense-in-depth on top of the backend cache's own caps).
     // maxOffers bounds the total rendered set so a spammer can't grow the
     // board unbounded; maxGhostRows bounds the "blocked — unsafe" ghost rows
@@ -44,6 +63,19 @@ Item {
     readonly property int colRateW: 96
     readonly property int colAgeW: 44
     readonly property int colExpiresW: 72
+
+    // Reading-column cap. The detail pane is a fixed 380 and only MAKER is
+    // elastic, so past ~1400 the extra width is spent entirely on one column of
+    // truncated addresses — capping costs nothing but whitespace.
+    //
+    // ONE number feeds both the status strip and the table, which is the whole
+    // point: capping only the content would leave the strip's margins on the
+    // window edge while the table's identical margins moved inward, and the two
+    // rows would visibly disagree about where the page starts. The strip's
+    // background and hairline stay full-bleed — a rule that stops mid-window
+    // reads as a rendering fault, not as a margin.
+    readonly property int contentInset:
+        Math.max(0, (board.width - Theme.boardMaxWidth) / 2)
 
     // --- Live state ----------------------------------------------------
     property int tick: 0                // 1 Hz clock driving countdowns/fades
@@ -95,6 +127,11 @@ Item {
         && swapBackend.messagingPeerCountKnown
         && swapBackend.messagingPeerCount === 0
         && swapBackend.messagingHint !== ""
+
+    // The LEZ explorer only indexes the public testnet, so a board pointed at
+    // any other sequencer must not offer a link that resolves nowhere.
+    readonly property bool lezExplorerOk:
+        Links.isLezTestnet(swapBackend.lezSequencerUrl)
 
     // Selected offer (plain object copy; depends on modelRev + selectedKey)
     readonly property var sel: {
@@ -285,9 +322,23 @@ Item {
             if (offersModel.get(j).key === board.selectedKey) { found = true; break }
         }
         if (!found)
-            board.selectedKey = (board.selectedKey === "" && offersModel.count > 0)
-                ? offersModel.get(0).key : ""
+            board.selectedKey = board.selectedKey === "" ? firstHonestKey() : ""
         board.modelRev++
+    }
+
+    // Newest offer the user could actually accept. Auto-selection deliberately
+    // skips ghosts: rows are inserted newest-first, so a single non-canonical
+    // offer arriving would otherwise become the board's default selection and
+    // open the app on a "Blocked — unsafe" banner with no accept button —
+    // making the safety net look like the app's own failure. Returns "" when
+    // every row is blocked, which leaves the detail pane on its neutral
+    // "Select an offer to inspect" state rather than showcasing the ghost.
+    function firstHonestKey() {
+        for (var i = 0; i < offersModel.count; i++) {
+            var o = offersModel.get(i)
+            if (!o.blocked) return o.key
+        }
+        return ""
     }
 
     function findOffer(key) {
@@ -330,22 +381,16 @@ Item {
         var offer = wireOffer(sel)
         board.acceptError = ""
         board.accepting = true
-        takerView.acceptedOffer = offer
-        takerView.swapCompleted = false
+        board.swapEngaged(offer)
         swapBackend.acceptOfferAndStartTaker(offer)
     }
 
     // --- Formatting helpers --------------------------------------------
-    function weiToEth(wei) {
-        var n = Number(wei)
-        if (isNaN(n) || n === 0) return "0 ETH"
-        var eth = n / 1e18
-        if (eth >= 0.001) return eth.toFixed(6).replace(/\.?0+$/, '') + " ETH"
-        var gwei = n / 1e9
-        if (gwei >= 1) return gwei.toFixed(4).replace(/\.?0+$/, '') + " Gwei"
-        return wei + " wei"
-    }
-
+    // Amounts, rates and hex truncation live in SwapFormat.Format — this file's
+    // private weiToEth/fmtRate were character-identical copies, and its
+    // shortHex was one of nine competing truncation shapes.
+    //
+    // fmtAge and fmtRemaining below stay LOCAL on purpose; see their comments.
     function rateOf(o) {
         var eth = Number(o.ethAmountWei) / 1e18
         var lez = Number(o.lezAmount)
@@ -353,18 +398,8 @@ Item {
         return lez / eth
     }
 
-    function fmtRate(r) {
-        if (!(r > 0)) return "—"
-        if (r >= 100) return r.toFixed(0)
-        if (r >= 1) return r.toFixed(2)
-        return r.toFixed(6)
-    }
-
-    function shortHex(s, head, tail) {
-        if (!s || s.length <= head + tail + 3) return s || "—"
-        return s.substring(0, head) + "…" + s.substring(s.length - tail)
-    }
-
+    // Not Format.timeAgo: that appends " ago", which does not fit the 44px AGE
+    // column. This is the bare "3m" tape form.
     function fmtAge(receivedMs) {
         var sec = Math.max(0, Math.floor((Date.now() - receivedMs) / 1000))
         if (sec < 60) return sec + "s"
@@ -379,6 +414,9 @@ Item {
         return expiry - Math.floor(Date.now() / 1000)
     }
 
+    // Not Format.expiresIn: that takes an ABSOLUTE timestamp at minute
+    // granularity, while this takes seconds remaining and has a sub-minute
+    // branch — which is what feeds rampColor's urgency in the last minute.
     function fmtRemaining(sec) {
         if (sec <= 0) return "expired"
         if (sec < 60) return sec + "s"
@@ -458,22 +496,13 @@ Item {
         onTriggered: {
             if (board.accepting && !swapBackend.takerRunning) {
                 board.accepting = false
-                board.acceptError = "The swap did not start. Check messaging and configuration, then try again."
-                takerView.acceptedOffer = null
+                // The reassurance used to be spliced onto the end of this
+                // string; it now comes from the SafetyNote under every accept
+                // error, so it reads the same however the accept failed.
+                board.acceptError = "The swap didn't start. Check you're still "
+                    + "connected, then try again."
+                board.swapAbandoned()
             }
-        }
-    }
-
-    // Fetch balances once config is complete (header shows them app-wide).
-    property bool balancesRequested: false
-    Timer {
-        interval: 600
-        running: !board.balancesRequested && board.configReady && swapBackend.ready
-            && swapBackend.ethBalance === "" && !swapBackend.balancesLoading
-        repeat: false
-        onTriggered: {
-            board.balancesRequested = true
-            swapBackend.fetchBalances()
         }
     }
 
@@ -491,7 +520,7 @@ Item {
         function onTakerRunningChanged() {
             if (swapBackend.takerRunning && board.accepting) {
                 board.accepting = false
-                tabBar.currentIndex = board.tabTaker
+                board.navigateToSwap()
             }
         }
 
@@ -499,7 +528,7 @@ Item {
             if (board.accepting && swapBackend.errorMessage !== "") {
                 board.accepting = false
                 board.acceptError = swapBackend.errorMessage
-                takerView.acceptedOffer = null
+                board.swapAbandoned()
             }
         }
     }
@@ -520,22 +549,14 @@ Item {
             RowLayout {
                 anchors {
                     fill: parent
-                    leftMargin: Theme.spacingLarge
-                    rightMargin: Theme.spacingLarge
+                    leftMargin: Theme.spacingLarge + board.contentInset
+                    rightMargin: Theme.spacingLarge + board.contentInset
                 }
                 spacing: Theme.spacingNormal
 
                 // Live dot
-                Rectangle {
-                    width: 8; height: 8; radius: 4
-                    color: board.marketLive ? Theme.success : Theme.warning
-
-                    SequentialAnimation on opacity {
-                        running: board.marketLive
-                        loops: Animation.Infinite
-                        NumberAnimation { from: 1.0; to: 0.35; duration: 900 }
-                        NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
-                    }
+                StatusDot {
+                    status: board.marketLive ? "live" : "attention"
                 }
 
                 Text {
@@ -577,7 +598,7 @@ Item {
                     Text {
                         text: swapBackend.offersLoading ? "scanning…" : "next scan"
                         color: Theme.textMuted
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.fontCaption
                     }
                     Item {
                         width: 56; height: 3
@@ -604,69 +625,37 @@ Item {
                     }
                 }
 
-                // Config readiness chip
-                Rectangle {
-                    implicitWidth: configChipRow.implicitWidth + Theme.spacingNormal
-                    implicitHeight: 24
-                    radius: 12
-                    color: configChipMouse.containsMouse ? Theme.surfaceLight : "transparent"
-                    border.color: board.configReady ? Theme.success : Theme.warning
-                    border.width: 1
-
-                    RowLayout {
-                        id: configChipRow
-                        anchors.centerIn: parent
-                        spacing: 6
-
-                        Rectangle {
-                            width: 6; height: 6; radius: 3
-                            color: board.configReady ? Theme.success : Theme.warning
-                        }
-                        Text {
-                            text: board.configReady
-                                  ? "Config ready"
-                                  : (board.validationRequested
-                                     ? board.configIssueCount + " config issue"
-                                       + (board.configIssueCount === 1 ? "" : "s")
-                                     : "Checking config…")
-                            color: board.configReady ? Theme.success : Theme.warning
-                            font.pixelSize: 11
-                        }
-                    }
-
-                    MouseArea {
-                        id: configChipMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: tabBar.currentIndex = board.tabConfig
-                    }
+                // Setup readiness chip. "Checking…" is deliberately `waiting`
+                // (grey) rather than the amber it used to be: a validation
+                // round-trip in flight is an ordinary precondition, and amber
+                // here is the same treatment as a real problem.
+                StatusChip {
+                    status: board.configReady
+                            ? "live"
+                            : (board.validationRequested ? "attention" : "waiting")
+                    // Settled setup is a fact, not a heartbeat. `live` pulses
+                    // by default, and this chip sits in the same strip as the
+                    // LIVE MARKET dot — two green pulses saying different
+                    // things is exactly the drift StatusDot exists to end.
+                    pulsing: false
+                    text: board.configReady
+                          ? "Ready to trade"
+                          : (board.validationRequested
+                             ? board.configIssueCount + " setup issue"
+                               + (board.configIssueCount === 1 ? "" : "s")
+                             : "Checking setup…")
+                    clickable: true
+                    onClicked: board.navigateToSetup()
                 }
 
-                // Maker CTA
-                Rectangle {
-                    implicitWidth: makeOfferText.implicitWidth + Theme.spacingNormal
-                    implicitHeight: 24
-                    radius: 12
-                    color: makeOfferMouse.containsMouse ? Theme.surfaceLight : "transparent"
-                    border.color: Theme.accent
-                    border.width: 1
-
-                    Text {
-                        id: makeOfferText
-                        anchors.centerIn: parent
-                        text: "+ Make an offer"
-                        color: Theme.accent
-                        font.pixelSize: 11
-                        font.bold: true
-                    }
-                    MouseArea {
-                        id: makeOfferMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: tabBar.currentIndex = board.tabMaker
-                    }
+                // Maker CTA. GhostButton's accent-outline treatment was lifted
+                // from this exact button — see its doc comment.
+                GhostButton {
+                    text: "+ Make an offer"
+                    Layout.preferredHeight: 24
+                    font.pixelSize: Theme.fontCaption
+                    font.bold: true
+                    onClicked: board.navigateToSell()
                 }
             }
 
@@ -688,129 +677,87 @@ Item {
                 anchors.fill: parent
                 visible: offersModel.count === 0
 
-                ColumnLayout {
+                EmptyState {
                     anchors.centerIn: parent
                     width: Math.min(parent.width - Theme.spacingXLarge * 2, 440)
-                    spacing: Theme.spacingNormal
 
-                    // Pulsing beacon
-                    Item {
-                        Layout.alignment: Qt.AlignHCenter
-                        width: 48; height: 48
+                    tone: (board.marketLive && !board.fleetIsolated)
+                          ? Theme.accent : Theme.warning
 
-                        Rectangle {
-                            id: beaconRing
-                            anchors.centerIn: parent
-                            width: 16; height: 16; radius: width / 2
-                            color: "transparent"
-                            border.width: 2
-                            border.color: (board.marketLive && !board.fleetIsolated) ? Theme.accent : Theme.warning
-
-                            ParallelAnimation {
-                                running: offersModel.count === 0 && board.visible
-                                loops: Animation.Infinite
-                                NumberAnimation {
-                                    target: beaconRing; property: "width"
-                                    from: 16; to: 48; duration: 1800
-                                    easing.type: Easing.OutQuad
-                                }
-                                NumberAnimation {
-                                    target: beaconRing; property: "height"
-                                    from: 16; to: 48; duration: 1800
-                                    easing.type: Easing.OutQuad
-                                }
-                                NumberAnimation {
-                                    target: beaconRing; property: "opacity"
-                                    from: 0.9; to: 0.0; duration: 1800
-                                }
-                            }
-                        }
-                        Rectangle {
-                            anchors.centerIn: parent
-                            width: 10; height: 10; radius: 5
-                            color: (board.marketLive && !board.fleetIsolated) ? Theme.accent : Theme.warning
-                        }
+                    title: {
+                        if (!swapBackend.ready)
+                            return "Starting the swap engine…"
+                        // browseReady (network constants), not configReady
+                        // (full trade config) — browsing the market never
+                        // needs credentials, amounts, or timelocks. See
+                        // feat/browse-before-config. Pre-filled testnet
+                        // defaults mean this branch is rarely reached.
+                        if (!board.browseReady)
+                            return "Finish network setup to browse"
+                        if (!swapBackend.messagingConnected)
+                            return "Connecting to the swap network…"
+                        if (board.fleetIsolated)
+                            return "Connected, but nobody else is"
+                        if (swapBackend.messagingHint !== "")
+                            return "The swap network needs attention"
+                        return "No offers on the board yet"
                     }
 
-                    Text {
-                        Layout.alignment: Qt.AlignHCenter
-                        text: {
-                            if (!swapBackend.ready)
-                                return "Starting swap engine…"
-                            // browseReady (network constants), not configReady
-                            // (full trade config) — browsing the market never
-                            // needs credentials, amounts, or timelocks. See
-                            // feat/browse-before-config. Pre-filled testnet
-                            // defaults mean this branch is rarely reached.
-                            if (!board.browseReady)
-                                return "Finish network setup to browse"
-                            if (!swapBackend.messagingConnected)
-                                return "Connecting to the swap network…"
-                            if (board.fleetIsolated)
-                                return "Connected, but no fleet peers"
-                            if (swapBackend.messagingHint !== "")
-                                return "Delivery needs attention"
-                            return "No offers on the board yet"
-                        }
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontTitle
-                        font.bold: true
+                    subtitle: {
+                        if (!swapBackend.ready)
+                            return "This takes a few seconds."
+                        if (!board.browseReady)
+                            return "Add your ETH RPC and LEZ sequencer details in Setup to browse the market."
+                        if (!swapBackend.messagingConnected)
+                            return swapBackend.messagingRetrying
+                                   ? "Looking for the swap network. Offers stream in as soon as a peer answers."
+                                   : "The swap network is starting automatically."
+                        if (board.fleetIsolated)
+                            return "You're on the swap network but not attached to any peers, so no offers can reach you. This usually clears on its own; if it doesn't, check for a module update in Basecamp and restart it."
+                        // The hint is a diagnostic written for whoever runs
+                        // the network, not for someone trying to buy LEZ. Say
+                        // what it means for them here; the raw text is kept
+                        // verbatim below as secondary detail.
+                        if (swapBackend.messagingHint !== "")
+                            return "You're connected, but the swap network is reporting a problem, so offers may not reach you."
+                        // Browsing never required setup; only accepting an
+                        // offer does. Nudge the still-unconfigured case toward
+                        // setting up to *trade*, not "to see offers" — offers
+                        // are already visible at this point.
+                        return board.configReady
+                               ? "The market is waking up — offers appear here the moment sellers publish them."
+                               : "The market is waking up — offers appear here the moment sellers publish them. Finish Setup once you see one you like."
                     }
 
+                    // Raw diagnostic, kept but demoted: it names module
+                    // versions and cluster ids, which is the right level of
+                    // detail for a bug report and the wrong one for a headline.
                     Text {
-                        Layout.alignment: Qt.AlignHCenter
+                        visible: swapBackend.ready
+                                 && swapBackend.messagingConnected
+                                 && !board.fleetIsolated
+                                 && swapBackend.messagingHint !== ""
                         Layout.fillWidth: true
+                        Layout.maximumWidth: 440
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
-                        text: {
-                            if (!swapBackend.ready)
-                                return "The backend module is loading."
-                            if (!board.browseReady)
-                                return "Add your ETH RPC / LEZ sequencer details in Config to browse the market."
-                            if (!swapBackend.messagingConnected)
-                                return swapBackend.messagingRetrying
-                                       ? "Waiting for the delivery fleet. Offers will stream in as soon as a peer is found."
-                                       : "Delivery is starting automatically."
-                            if (board.fleetIsolated)
-                                return "Your delivery node is running and subscribed, but attached to zero fleet peers — offers cannot arrive. Check that the delivery_module is up to date in the module manager, then restart Basecamp."
-                            if (swapBackend.messagingHint !== "")
-                                return swapBackend.messagingHint
-                            // Browsing never required Config; only accepting
-                            // an offer does. Nudge the still-unconfigured case
-                            // toward set up to *trade*, not "to see offers" —
-                            // offers are already visible at this point.
-                            return board.configReady
-                                   ? "The market is waking up — offers appear here the moment makers publish them."
-                                   : "The market is waking up — offers appear here the moment makers publish them. Set up to trade in Config once you see one you like."
-                        }
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontNormal
+                        textFormat: Text.PlainText
+                        text: swapBackend.messagingHint
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        font.family: Theme.monoFont
                     }
 
-                    Button {
+                    PrimaryButton {
                         Layout.alignment: Qt.AlignHCenter
                         Layout.preferredWidth: 200
                         Layout.preferredHeight: 42
-                        Layout.topMargin: Theme.spacingSmall
                         visible: swapBackend.ready
                                  && (board.configReady || board.validationRequested)
-                        text: board.configReady ? "Make an offer" : "Open Config"
-                        font.pixelSize: Theme.fontNormal
-                        font.bold: true
-
-                        background: Rectangle {
-                            color: parent.hovered ? Theme.accentHover : Theme.accent
-                            radius: Theme.radiusNormal
-                        }
-                        contentItem: Text {
-                            text: parent.text
-                            color: "#ffffff"
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            font: parent.font
-                        }
-                        onClicked: tabBar.currentIndex =
-                            board.configReady ? board.tabMaker : board.tabConfig
+                        text: board.configReady ? "Make an offer" : "Finish setup"
+                        onClicked: board.configReady
+                                   ? board.navigateToSell()
+                                   : board.navigateToSetup()
                     }
 
                     Text {
@@ -818,14 +765,18 @@ Item {
                         visible: board.marketLive
                         text: "scanning every " + (board.pollIntervalMs / 1000) + "s"
                         color: Theme.textMuted
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.fontCaption
                     }
                 }
             }
 
             // Master-detail split
             RowLayout {
-                anchors.fill: parent
+                anchors {
+                    fill: parent
+                    leftMargin: board.contentInset
+                    rightMargin: board.contentInset
+                }
                 visible: offersModel.count > 0
                 spacing: 0
 
@@ -858,7 +809,7 @@ Item {
                                 horizontalAlignment: Text.AlignLeft
                                 text: "OFFER"
                                 color: Theme.textMuted
-                                font.pixelSize: 11; font.bold: true
+                                font.pixelSize: Theme.fontCaption; font.bold: true
                                 font.letterSpacing: 1
                             }
                             Text {
@@ -869,7 +820,7 @@ Item {
                                 horizontalAlignment: Text.AlignRight
                                 text: "RATE LEZ/ETH"
                                 color: Theme.textMuted
-                                font.pixelSize: 11; font.bold: true
+                                font.pixelSize: Theme.fontCaption; font.bold: true
                                 font.letterSpacing: 1
                             }
                             Text {
@@ -877,9 +828,12 @@ Item {
                                 Layout.minimumWidth: 0
                                 elide: Text.ElideRight
                                 horizontalAlignment: Text.AlignLeft
-                                text: "MAKER"
+                                // SELLER, not MAKER: this column holds the same
+                                // address the detail pane calls "Seller ETH
+                                // address" two hundred pixels to the right.
+                                text: "SELLER"
                                 color: Theme.textMuted
-                                font.pixelSize: 11; font.bold: true
+                                font.pixelSize: Theme.fontCaption; font.bold: true
                                 font.letterSpacing: 1
                             }
                             Text {
@@ -890,7 +844,7 @@ Item {
                                 horizontalAlignment: Text.AlignRight
                                 text: "AGE"
                                 color: Theme.textMuted
-                                font.pixelSize: 11; font.bold: true
+                                font.pixelSize: Theme.fontCaption; font.bold: true
                                 font.letterSpacing: 1
                             }
                             Text {
@@ -901,7 +855,7 @@ Item {
                                 horizontalAlignment: Text.AlignRight
                                 text: "EXPIRES"
                                 color: Theme.textMuted
-                                font.pixelSize: 11; font.bold: true
+                                font.pixelSize: Theme.fontCaption; font.bold: true
                                 font.letterSpacing: 1
                             }
                         }
@@ -1032,15 +986,15 @@ Item {
                                             loops: Animation.Infinite
                                             NumberAnimation {
                                                 target: pingRing; property: "width"
-                                                from: 6; to: 14; duration: 1200
+                                                from: 6; to: 14; duration: Theme.durPing
                                             }
                                             NumberAnimation {
                                                 target: pingRing; property: "height"
-                                                from: 6; to: 14; duration: 1200
+                                                from: 6; to: 14; duration: Theme.durPing
                                             }
                                             NumberAnimation {
                                                 target: pingRing; property: "opacity"
-                                                from: 0.9; to: 0; duration: 1200
+                                                from: 0.9; to: 0; duration: Theme.durPing
                                             }
                                         }
                                     }
@@ -1078,7 +1032,7 @@ Item {
                                         Layout.fillWidth: true
                                         textFormat: Text.PlainText
                                         Layout.minimumWidth: 0
-                                        text: board.weiToEth(model.ethAmountWei)
+                                        text: Format.weiToEth(model.ethAmountWei)
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSmall
                                         font.family: Theme.monoFont
@@ -1098,9 +1052,16 @@ Item {
                                     elide: Text.ElideRight
                                     horizontalAlignment: Text.AlignRight
                                     textFormat: Text.PlainText
+                                    // No ⚠ glyph: amber + bold on a row that is
+                                    // already ghosted says it, and the strip's
+                                    // "· N blocked" counter says it again. A
+                                    // third mark in a 96px cell is noise, and
+                                    // wrapping this cell in a RowLayout to fit
+                                    // a StatusDot would put a second item into
+                                    // the shared column-width model (#135).
                                     text: model.blocked
-                                          ? "⚠ blocked"
-                                          : board.fmtRate(offerRow.rowRate)
+                                          ? "blocked"
+                                          : Format.fmtRate(offerRow.rowRate)
                                             + (offerRow.bestDeal ? " ★" : "")
                                     color: model.blocked
                                            ? Theme.warning
@@ -1116,9 +1077,9 @@ Item {
                                     textFormat: Text.PlainText
                                     Layout.minimumWidth: 0
                                     horizontalAlignment: Text.AlignLeft
-                                    text: board.shortHex(model.makerEth, 8, 4)
+                                    text: Format.shortHex(model.makerEth, 8, 4)
                                     color: Theme.textMuted
-                                    font.pixelSize: 12
+                                    font.pixelSize: Theme.fontDetail
                                     font.family: Theme.monoFont
                                     elide: Text.ElideRight
                                 }
@@ -1135,7 +1096,7 @@ Item {
                                         return board.fmtAge(model.receivedMs)
                                     }
                                     color: Theme.textMuted
-                                    font.pixelSize: 11
+                                    font.pixelSize: Theme.fontCaption
                                     font.family: Theme.monoFont
                                 }
 
@@ -1148,7 +1109,7 @@ Item {
                                     horizontalAlignment: Text.AlignRight
                                     text: board.fmtRemaining(offerRow.remain)
                                     color: board.rampColor(offerRow.remain)
-                                    font.pixelSize: 11
+                                    font.pixelSize: Theme.fontCaption
                                     font.family: Theme.monoFont
                                     font.strikeout: offerRow.remain <= 0
                                 }
@@ -1166,9 +1127,9 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
                             anchors.leftMargin: Theme.spacingLarge
-                            text: "Offers are advertisements — a swap completes only if the maker is live."
+                            text: "Offers are advertisements — a swap completes only if the seller is still online."
                             color: Theme.textMuted
-                            font.pixelSize: 11
+                            font.pixelSize: Theme.fontCaption
                         }
                     }
                 }
@@ -1182,7 +1143,11 @@ Item {
 
                 // --- Right: detail + accept ----------------------------
                 Rectangle {
-                    Layout.preferredWidth: 340
+                    // 380, not the old 340: the trust rows are now
+                    // label + value + copy + link on ONE line (HexValue), and
+                    // at 340 the value column came out ~64px — narrower than a
+                    // truncated hash, so every address wrapped to two lines.
+                    Layout.preferredWidth: 380
                     Layout.fillHeight: true
                     color: Theme.surface
 
@@ -1218,7 +1183,7 @@ Item {
                                 Text {
                                     text: "OFFER"
                                     color: Theme.textMuted
-                                    font.pixelSize: 11
+                                    font.pixelSize: Theme.fontCaption
                                     font.bold: true
                                     font.letterSpacing: 2
                                 }
@@ -1236,7 +1201,7 @@ Item {
                                         anchors.centerIn: parent
                                         text: "NEW"
                                         color: Theme.success
-                                        font.pixelSize: 9
+                                        font.pixelSize: Theme.fontMicro
                                         font.bold: true
                                     }
                                 }
@@ -1254,14 +1219,14 @@ Item {
                             }
                             Text {
                                 text: board.sel !== null
-                                      ? "for " + board.weiToEth(board.sel.ethAmountWei)
+                                      ? "for " + Format.weiToEth(board.sel.ethAmountWei)
                                       : ""
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontLarge
                             }
                             Text {
                                 text: board.sel !== null
-                                      ? "1 ETH ≈ " + board.fmtRate(board.rateOf(board.sel)) + " LEZ"
+                                      ? "1 ETH ≈ " + Format.fmtRate(board.rateOf(board.sel)) + " LEZ"
                                       : ""
                                 color: {
                                     if (board.sel === null) return Theme.textMuted
@@ -1345,25 +1310,49 @@ Item {
                                 color: Theme.border
                             }
 
-                            // Identity / verification block
-                            DetailField {
-                                label: "Maker ETH address"
+                            // Identity / verification block — the trust
+                            // surface. This is the screen where someone
+                            // decides whether a counterparty is who they say
+                            // before locking ETH, and until now it was the one
+                            // place that showed these values with no way to
+                            // copy them and no way to look them up.
+                            //
+                            // Only the LEZ side gets explorer links: SwapLinks
+                            // derives an Ethereum explorer from a CHAIN ID, and
+                            // the board has no chain id to go on before a swap
+                            // starts (takerEthChainId is a fact about a run in
+                            // progress). Guessing one from the configured RPC
+                            // would be a claim from a config file pointed at a
+                            // block explorer — exactly what SwapLinks refuses
+                            // to do. Copy still works on every row.
+                            OfferField {
+                                label: "Seller ETH address"
                                 value: board.sel !== null ? board.sel.makerEth : ""
                             }
-                            DetailField {
-                                label: "Maker LEZ account"
+                            OfferField {
+                                label: "Seller LEZ account"
                                 value: board.sel !== null ? board.sel.makerLez : ""
+                                link: board.lezExplorerOk && board.sel !== null
+                                      ? Links.lezAccount(board.sel.makerLez) : ""
                             }
-                            DetailField {
+                            // An offer is an advertisement, not a swap: the
+                            // hashlock only exists once one actually starts.
+                            // Showing a permanent placeholder here would spend
+                            // a row of the trust surface on nothing, so the row
+                            // appears only for an offer that carries a real one.
+                            OfferField {
                                 label: "Hashlock"
                                 value: board.sel !== null ? board.sel.hashlock : ""
+                                visible: board.sel !== null && board.sel.hashlock !== ""
                             }
-                            DetailField {
-                                label: "LEZ HTLC program"
+                            OfferField {
+                                label: "LEZ program"
                                 value: board.sel !== null ? board.sel.lezProgramId : ""
+                                link: board.lezExplorerOk && board.sel !== null
+                                      ? Links.lezAccount(board.sel.lezProgramId) : ""
                             }
-                            DetailField {
-                                label: "ETH HTLC contract"
+                            OfferField {
+                                label: "ETH contract"
                                 value: board.sel !== null ? board.sel.ethHtlcAddr : ""
                             }
 
@@ -1394,10 +1383,15 @@ Item {
 
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        spacing: 6
-                                        Text {
-                                            text: "🛡"
-                                            font.pixelSize: Theme.fontNormal
+                                        spacing: Theme.spacingSmall
+                                        // Was a 🛡 emoji: a full-colour glyph
+                                        // rendered by the system font, at a
+                                        // size and hue nothing else in the app
+                                        // uses. The status vocabulary already
+                                        // has a mark for "the user should look".
+                                        StatusDot {
+                                            status: "attention"
+                                            Layout.alignment: Qt.AlignVCenter
                                         }
                                         Text {
                                             text: "Blocked — unsafe"
@@ -1410,10 +1404,17 @@ Item {
                                     Text {
                                         Layout.fillWidth: true
                                         textFormat: Text.PlainText
-                                        text: "Blocked for your safety — this offer routes through a swap program this app doesn't recognize, so no funds were locked."
+                                        text: "This offer settles through a swap program the app doesn't recognise, so it can't be trusted to release your funds."
                                         color: Theme.textSecondary
                                         font.pixelSize: Theme.fontSmall
                                         wrapMode: Text.Wrap
+                                    }
+                                    // The reassurance belongs in the app's one
+                                    // reassurance motif, not buried as a clause
+                                    // at the end of the explanation.
+                                    SafetyNote {
+                                        Layout.topMargin: 2
+                                        text: Copy.nothingLockedYet
                                     }
                                 }
                             }
@@ -1435,13 +1436,35 @@ Item {
                                     active: swapBackend.ready && !swapBackend.messagingConnected
                                 }
                                 BlockedReason {
-                                    reason: "Complete configuration first → Config"
+                                    reason: "Finish setting up first — open Setup"
                                     active: swapBackend.ready && !board.configReady
-                                    clickTab: board.tabConfig
+                                    clickAction: () => board.navigateToSetup()
                                 }
+                                // A refund also raises makerRunning/takerRunning
+                                // (refundLez/refundEth set them alongside
+                                // refundsLoading), so it has to be checked
+                                // FIRST — otherwise someone mid-refund is told
+                                // to "stop your sale" and sent to the Sell tab.
                                 BlockedReason {
-                                    reason: "A swap is already running"
-                                    active: swapBackend.running
+                                    reason: "Wait for your refund to finish"
+                                    active: swapBackend.refundsLoading
+                                }
+                                // Otherwise route by which side is actually
+                                // busy. `swapBackend.running` covers the selling
+                                // loop too, so sending everyone to the buyer's
+                                // Swap screen dumped a seller on a page with
+                                // nothing about their sale on it.
+                                BlockedReason {
+                                    reason: swapBackend.makerRunning || swapBackend.autoAcceptRunning
+                                            ? "Finish or stop your sale first"
+                                            : "Finish your swap in progress first"
+                                    active: swapBackend.running && !swapBackend.refundsLoading
+                                    clickAction: () => {
+                                        if (swapBackend.makerRunning || swapBackend.autoAcceptRunning)
+                                            board.navigateToSell()
+                                        else
+                                            board.navigateToSwap()
+                                    }
                                 }
                                 BlockedReason {
                                     reason: "This offer has expired"
@@ -1449,19 +1472,38 @@ Item {
                                 }
                             }
 
-                            // Accept error
-                            Text {
-                                visible: board.acceptError !== ""
+                            // Accept error. A failed accept is the single most
+                            // frightening thing that can happen on this screen
+                            // — the user just clicked a button that spends
+                            // their ETH and got told it went wrong — and it
+                            // was the one error surface with no reassurance on
+                            // it at all. Nothing is locked until the swap
+                            // actually starts, so say so.
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                text: board.acceptError
-                                color: Theme.error
-                                font.pixelSize: Theme.fontSmall
-                                wrapMode: Text.Wrap
+                                Layout.topMargin: Theme.spacingSmall
+                                visible: board.acceptError !== ""
+                                spacing: Theme.spacingSmall
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    // Relayed from swapBackend.errorMessage,
+                                    // which can quote chain reverts and offer
+                                    // fields — not author-written copy.
+                                    textFormat: Text.PlainText
+                                    text: board.acceptError
+                                    color: Theme.error
+                                    font.pixelSize: Theme.fontSmall
+                                    wrapMode: Text.Wrap
+                                }
+                                SafetyNote {
+                                    text: Copy.nothingLockedYet
+                                }
                             }
 
                             // ACCEPT — hidden entirely for a ghosted offer (the
                             // block banner above stands in its place).
-                            Button {
+                            PrimaryButton {
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 48
                                 Layout.topMargin: Theme.spacingSmall
@@ -1472,32 +1514,18 @@ Item {
                                       : (board.sel !== null
                                          ? "Accept — buy " + board.sel.lezAmount + " LEZ"
                                          : "Accept")
-                                font.pixelSize: Theme.fontNormal
-                                font.bold: true
-
-                                background: Rectangle {
-                                    color: parent.enabled
-                                           ? (parent.hovered ? Theme.accentHover : Theme.accent)
-                                           : Theme.surfaceLight
-                                    radius: Theme.radiusNormal
-                                }
-                                contentItem: Text {
-                                    text: parent.text
-                                    color: parent.enabled || board.accepting
-                                           ? "#ffffff" : Theme.textMuted
-                                    horizontalAlignment: Text.AlignHCenter
-                                    verticalAlignment: Text.AlignVCenter
-                                    font: parent.font
-                                }
                                 onClicked: board.acceptSelected()
                             }
 
                             Text {
                                 Layout.fillWidth: true
                                 visible: !(board.sel !== null && board.sel.blocked)
-                                text: "Accepting locks your ETH in the HTLC; the maker then locks LEZ and the swap completes automatically. Progress appears in the Taker tab."
+                                // Was "the maker then locks LEZ … the Taker
+                                // tab": one protocol role the user never sees,
+                                // and one tab that no longer exists.
+                                text: "Accepting locks your ETH in escrow; the seller then locks their LEZ and the swap finishes on its own. You can watch it on the Swap tab."
                                 color: Theme.textMuted
-                                font.pixelSize: 11
+                                font.pixelSize: Theme.fontCaption
                                 wrapMode: Text.Wrap
                             }
                         }
@@ -1508,56 +1536,51 @@ Item {
     }
 
     // --- Inline sub-components -----------------------------------------
-    component DetailField: ColumnLayout {
-        property string label
-        property string value
-        spacing: 1
-        Layout.fillWidth: true
-
-        Text {
-            text: parent.label
-            color: Theme.textMuted
-            font.pixelSize: 10
-            font.letterSpacing: 0.5
-        }
-        Text {
-            Layout.fillWidth: true
-            // Offer-derived, attacker-controlled strings render as plain text
-            // only — never let a maker inject rich text through an address or
-            // program-id field.
-            textFormat: Text.PlainText
-            text: parent.value !== "" ? parent.value : "—"
-            color: Theme.textSecondary
-            font.pixelSize: 11
-            font.family: Theme.monoFont
-            elide: Text.ElideMiddle
-        }
+    // One trust row on the detail pane. Replaces the private DetailField,
+    // which stacked an un-copyable, un-linkable value under its label. The
+    // narrower label column (vs HexValue's 128 default) buys back width for
+    // the value in a 380px pane; every sibling shares it so the values line up.
+    component OfferField: HexValue {
+        labelWidth: 104
+        reserveLinkSlot: true
     }
 
+    // Why the Accept button is currently unavailable.
+    //
+    // These are ordinary preconditions — "the backend is still starting", "a
+    // swap is already running" — not hazards. They used to render amber with a
+    // ⚠, which is the same treatment as a genuine warning; training the eye to
+    // ignore amber is exactly how a real alarm gets missed. Steady neutral dot,
+    // secondary text. `severity: "attention"` is still available for the cases
+    // that have actually gone wrong.
     component BlockedReason: RowLayout {
+        id: blocked
         property string reason
         property bool active: false
-        property int clickTab: -1
+        property string severity: "waiting"
+        // Optional navigation, e.g. () => board.navigateToSetup()
+        property var clickAction: null
         visible: active
-        spacing: 6
+        spacing: Theme.spacingSmall
 
-        Text {
-            text: "⚠"
-            color: Theme.warning
-            font.pixelSize: 11
+        StatusDot {
+            status: blocked.severity
+            size: 6
+            Layout.alignment: Qt.AlignVCenter
         }
         Text {
             Layout.fillWidth: true
-            text: parent.reason
-            color: Theme.warning
-            font.pixelSize: 12
+            text: blocked.reason
+            color: blocked.severity === "waiting"
+                   ? Theme.textSecondary : Theme.toneFor(blocked.severity)
+            font.pixelSize: Theme.fontDetail
             wrapMode: Text.Wrap
 
             MouseArea {
                 anchors.fill: parent
-                enabled: parent.parent.clickTab >= 0
+                enabled: blocked.clickAction !== null
                 cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: tabBar.currentIndex = parent.parent.clickTab
+                onClicked: if (blocked.clickAction) blocked.clickAction()
             }
         }
     }

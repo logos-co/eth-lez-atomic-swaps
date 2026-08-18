@@ -171,6 +171,22 @@ function rootType(src) {
 const files = readdirSync(qmlDir).filter((f) => f.endsWith(".qml"));
 const failures = [];
 let scrollViews = 0;
+let scaffolded = 0;
+
+// PageScaffold owns the Flickable on its views' behalf, so a PageScaffold-rooted
+// view CANNOT reproduce #113 — anything in its default slot lands inside the
+// content ColumnLayout, not in ScrollView's content slot. Those views are safe
+// by construction; the invariant just moves into PageScaffold.qml itself, which
+// is ScrollView-rooted and therefore still checked below.
+//
+// Counted separately so that migrating every view to PageScaffold cannot make
+// this check quietly vacuous: if PageScaffold ever stops being the thing that
+// holds the Flickable, the assertion at the bottom fires.
+for (const file of files) {
+  if (rootType(readFileSync(join(qmlDir, file), "utf8")) === "PageScaffold") {
+    scaffolded += 1;
+  }
+}
 
 for (const file of files) {
   const src = readFileSync(join(qmlDir, file), "utf8");
@@ -202,10 +218,26 @@ if (scrollViews === 0) {
   console.error("FAIL: no ScrollView-rooted views found — the checker is miswired");
   process.exit(1);
 }
+
+// PageScaffold is the shared scroll surface. If views delegate to it but it is
+// no longer ScrollView-rooted, every one of those views just lost its guard
+// without a single failure being reported — so make that state loud.
+if (scaffolded > 0 && rootType(readFileSync(join(qmlDir, "PageScaffold.qml"), "utf8")) !== "ScrollView") {
+  console.error(
+    `FAIL: ${scaffolded} view(s) delegate their scroll surface to PageScaffold, ` +
+    `but PageScaffold.qml is no longer ScrollView-rooted — the #113 guard now ` +
+    `covers nothing. Re-root PageScaffold on ScrollView or check its new root here.`
+  );
+  process.exit(1);
+}
+
 if (failures.length > 0) {
   console.error("FAIL: ScrollView content-slot violations:");
   for (const f of failures) console.error("  " + f);
   process.exit(1);
 }
 
-console.log(`qml scrollview content contract: OK (${scrollViews} ScrollView-rooted views, single visual child each)`);
+console.log(
+  `qml scrollview content contract: OK (${scrollViews} ScrollView-rooted views, ` +
+  `single visual child each; ${scaffolded} view(s) delegating to PageScaffold)`
+);

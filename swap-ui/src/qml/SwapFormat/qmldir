@@ -1,0 +1,2 @@
+module SwapFormat
+singleton Format 1.0 Format.qml

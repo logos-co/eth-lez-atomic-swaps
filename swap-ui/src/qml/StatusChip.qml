@@ -2,19 +2,25 @@ import QtQuick
 import QtQuick.Layouts
 import SwapTheme
 
-// Bordered status pill with a small dot — the offer board's chip idiom
-// (config-readiness chip, "+ Make an offer" CTA). Set `clickable: true`
-// to get hover feedback and the clicked() signal.
+// Bordered status pill. Set `status` to one of the five StatusDot states and
+// the dot, colour and pulse all follow from it — that is the whole point, and
+// it is why `tone`/`pulsing` are overrides rather than the primary API.
+//
+// Set `clickable: true` for hover feedback and the clicked() signal. Set
+// `showDot: false` to use it as a plain count badge.
 Rectangle {
     id: chip
 
     property string text
-    property color tone: Theme.textSecondary
+    // "live" | "working" | "waiting" | "attention" | "problem"
+    property string status: "waiting"
+    // Explicit overrides; both default to whatever `status` implies. They
+    // derive from Theme, not from the child dot, so there is no binding cycle.
+    property color tone: Theme.toneFor(chip.status)
+    property bool pulsing: Theme.pulsesFor(chip.status)
     property bool showDot: true
     property bool bold: false
     property bool clickable: false
-    // Pulses the dot (the board's live-dot treatment).
-    property bool pulsing: false
     signal clicked()
 
     implicitWidth: chipRow.implicitWidth + Theme.spacingNormal
@@ -25,23 +31,24 @@ Rectangle {
     border.color: chip.tone
     border.width: 1
 
+    Behavior on border.color {
+        ColorAnimation { duration: Theme.durNormal }
+    }
+
     RowLayout {
         id: chipRow
         anchors.centerIn: parent
         spacing: 6
 
-        Rectangle {
-            id: chipDot
+        StatusDot {
+            id: dot
             visible: chip.showDot
-            width: 6; height: 6; radius: 3
-            color: chip.tone
-
-            SequentialAnimation on opacity {
-                running: chip.pulsing && chip.visible
-                loops: Animation.Infinite
-                NumberAnimation { from: 1.0; to: 0.35; duration: 900 }
-                NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
-            }
+            status: chip.status
+            size: 6
+            // Push the chip's overrides down rather than restyling the dot
+            // here, so the dot owns its own pulse animation exclusively.
+            tone: chip.tone
+            pulsing: chip.pulsing
         }
         Text {
             text: chip.text

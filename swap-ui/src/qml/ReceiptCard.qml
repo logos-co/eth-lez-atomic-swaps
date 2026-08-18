@@ -1,10 +1,11 @@
 import QtQuick
 import QtQuick.Layouts
 import SwapTheme
+import SwapFormat
 import SwapLinks
 
 // Receipt card — the full evidence surface for the just-completed swap.
-// Composes the board's trust vocabulary (TrustRow, section dividers,
+// Composes the board's trust vocabulary (HexValue, section dividers,
 // GhostButton) into the offer detail pane's sibling: hero amounts + rate,
 // both chain references labeled per role, hashlock, preimage with a
 // reveal affordance, counterparty and contract identity, timelocks, the
@@ -98,7 +99,11 @@ Rectangle {
         && (ethAmountWei !== "" || ethAmountEth !== "")
     readonly property string counterpartyEth: ctx.counterpartyEth || ""
     readonly property string counterpartyLez: ctx.counterpartyLez || ""
-    readonly property string counterpartyName: role === "taker" ? "Maker" : "Taker"
+    // The other party, in the app's words rather than the protocol's: if you
+    // bought, they sold. Never Maker/Taker — the offer board labels these exact
+    // two values "Seller ETH address" / "Seller LEZ account", and a receipt
+    // calling them something else reads as a different pair of facts.
+    readonly property string counterpartyName: role === "taker" ? "Seller" : "Buyer"
     readonly property string ethHtlcAddress: ctx.ethHtlcAddress || ""
     readonly property string lezProgramId: ctx.lezProgramId || ""
     readonly property double lezTimelockUnix: Number(ctx.lezTimelockUnix || 0)
@@ -131,13 +136,6 @@ Rectangle {
                                       : Number(ethAmountEth)
         if (!(lez > 0) || !(eth > 0)) return 0
         return lez / eth
-    }
-
-    function fmtRate(r) {
-        if (!(r > 0)) return "—"
-        if (r >= 100) return r.toFixed(0)
-        if (r >= 1) return r.toFixed(2)
-        return r.toFixed(6)
     }
 
     function fmtClock(ms) {
@@ -294,7 +292,7 @@ Rectangle {
         }
         Text {
             visible: !card.isError && card.hasAmounts && card.rate() > 0
-            text: "1 ETH ≈ " + card.fmtRate(card.rate()) + " LEZ"
+            text: "1 ETH ≈ " + Format.fmtRate(card.rate()) + " LEZ"
             color: Theme.textMuted
             font.pixelSize: Theme.fontSmall
             font.family: Theme.monoFont
@@ -310,7 +308,7 @@ Rectangle {
         }
 
         // --- Evidence stack --------------------------------------------
-        TrustRow {
+        EvidenceRow {
             visible: !card.isError
             label: "Hashlock"
             value: card.hashlock
@@ -363,35 +361,35 @@ Rectangle {
         // bytes32 key, not a tx hash, and linking it to /tx/ would be a
         // mislabel (the reason ReceiptCard disambiguates eth_tx per role
         // in the first place).
-        TrustRow {
+        EvidenceRow {
             visible: card.isCompleted && card.ethLockTx !== ""
             label: "ETH lock tx"
             value: card.ethLockTx
             link: Links.ethTx(card.ethLockTx, card.ethChainId)
         }
-        TrustRow {
+        EvidenceRow {
             visible: card.isCompleted && card.role === "taker"
             label: "ETH swap ID (lock)"
             value: card.ethSwapId
         }
-        TrustRow {
+        EvidenceRow {
             visible: card.isCompleted && card.role === "taker"
             label: "LEZ claim tx"
             value: card.lezClaimTx
             link: card.lezExplorerAvailable ? Links.lezTx(card.lezClaimTx) : ""
         }
-        TrustRow {
+        EvidenceRow {
             visible: card.isCompleted && card.role === "maker" && card.ethSwapId !== ""
             label: "ETH swap ID (lock)"
             value: card.ethSwapId
         }
-        TrustRow {
+        EvidenceRow {
             visible: card.isCompleted && card.role === "maker"
             label: "LEZ lock tx"
             value: card.lezLockTx
             link: card.lezExplorerAvailable ? Links.lezTx(card.lezLockTx) : ""
         }
-        TrustRow {
+        EvidenceRow {
             visible: card.isCompleted && card.role === "maker"
             label: "ETH claim tx"
             value: card.ethClaimTx
@@ -399,13 +397,13 @@ Rectangle {
         }
 
         // Refund evidence (refunded swaps)
-        TrustRow {
+        EvidenceRow {
             visible: card.isRefunded
             label: "ETH refund tx"
             value: card.ethRefundTx !== "" ? card.ethRefundTx : "n/a"
             link: Links.ethTx(card.ethRefundTx, card.ethChainId)
         }
-        TrustRow {
+        EvidenceRow {
             visible: card.isRefunded
             label: "LEZ refund tx"
             value: card.lezRefundTx !== "" ? card.lezRefundTx : "n/a"
@@ -413,13 +411,13 @@ Rectangle {
         }
 
         // Counterparty identity
-        TrustRow {
+        EvidenceRow {
             visible: !card.isError && card.counterpartyEth !== ""
             label: card.counterpartyName + " ETH address"
             value: card.counterpartyEth
             link: Links.ethAddress(card.counterpartyEth, card.ethChainId)
         }
-        TrustRow {
+        EvidenceRow {
             visible: !card.isError && card.counterpartyLez !== ""
             label: card.counterpartyName + " LEZ account"
             value: card.counterpartyLez
@@ -427,13 +425,13 @@ Rectangle {
         }
 
         // Contract identity
-        TrustRow {
+        EvidenceRow {
             visible: !card.isError && card.ethHtlcAddress !== ""
             label: "ETH HTLC contract"
             value: card.ethHtlcAddress
             link: Links.ethAddress(card.ethHtlcAddress, card.ethChainId)
         }
-        TrustRow {
+        EvidenceRow {
             visible: !card.isError && card.lezProgramId !== ""
             label: "LEZ HTLC program"
             value: card.lezProgramId
@@ -520,5 +518,12 @@ Rectangle {
             font.pixelSize: Theme.fontCaption
             wrapMode: Text.Wrap
         }
+    }
+
+    // One evidence row. reserveLinkSlot holds the link column open on
+    // rows that have no explorer link, so the copy buttons stay in one
+    // column down a stack where only some values are linkable.
+    component EvidenceRow: HexValue {
+        reserveLinkSlot: true
     }
 }
