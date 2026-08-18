@@ -308,7 +308,12 @@ PageScaffold {
         }
 
         RowLayout {
+            // Show the confirmation line whenever funding is active, ran this
+            // session (setupStep set), OR the account already holds LEZ from a
+            // prior session (lezFunded) — otherwise an already-funded relaunch
+            // shows a "done" step with no "LEZ funded — N" line beneath it.
             visible: swapBackend.setupRunning || swapBackend.setupStep !== ""
+                     || setupRoot.lezFunded
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
 
@@ -322,6 +327,12 @@ PageScaffold {
                 horizontalAlignment: Text.AlignLeft
                 wrapMode: Text.WordWrap
                 text: {
+                    // Already funded from a prior session (no job ran this one):
+                    // confirm from the real header balance, mirroring the step's
+                    // balance-based "done" state.
+                    if (!swapBackend.setupRunning && swapBackend.setupStep === ""
+                        && setupRoot.hasLezBalance)
+                        return "LEZ funded — " + swapBackend.lezBalance + " LEZ"
                     var parts = [setupRoot.humanSetupStep(swapBackend.setupStep)]
                     // Live per-phase elapsed counter, so a slow chain phase
                     // visibly ticks instead of looking hung.
