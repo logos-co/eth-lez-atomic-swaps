@@ -260,7 +260,7 @@ try {
   );
   await app.click("ETH ↔ LEZ Atomic Swap", { exact: true });
   await app.waitFor(
-    () => app.expectTexts(["LEZ Atomic Swap", "LIVE MARKET", "Market", "Config", "Maker", "Taker", "Refund", "History"]),
+    () => app.expectTexts(["Market", "Swap", "History", "Sell", "Refund", "Setup"]),
     { timeout: 30000, interval: 500, description: "swap_ui view" },
   );
 
@@ -281,12 +281,12 @@ try {
   }, { timeout: 30000, interval: 500, description: "swap_ui backend connection" });
 
   const tabChecks = [
-    ["Config", ["Configuration", "Load Maker Env", "Load Taker Env"]],
-    ["Maker", ["Sell LEZ"]],
-    ["Taker", ["Buy LEZ"]],
-    ["Refund", ["Manual Refund"]],
-    ["History", ["Swap History"]],
-    ["Market", ["LIVE MARKET"]],
+    ["Market",  ["LIVE MARKET"]],
+    ["Swap",    ["Your swap"]],
+    ["Sell",    ["Sell LEZ"]],
+    ["Refund",  ["Get your money back"]],
+    ["History", ["Swap history"]],
+    ["Setup",   ["Get set up"]],
   ];
   for (const [tab, texts] of tabChecks) {
     await app.click(tab, { exact: true });
