@@ -15,16 +15,18 @@ QtObject {
     id: fmt
 
     // --- Amounts --------------------------------------------------------
-    // Wei -> a display string that picks its own unit. Deliberately lossy and
-    // for display only; never round-trip a value through this.
+    // Wei -> a display string, always in ETH. Deliberately lossy and for
+    // display only; never round-trip a value through this.
+    //
+    // Always ETH — never Gwei or raw wei — so every amount on screen reads
+    // in the same unit. Uses up to 8 decimal places (trailing zeros
+    // trimmed) so small-but-real amounts stay visibly nonzero: a 4500 Gwei
+    // offer (0.0000045 ETH) must never render as "0.00 ETH".
     function weiToEth(wei) {
         var n = Number(wei)
         if (isNaN(n) || n === 0) return "0 ETH"
         var eth = n / 1e18
-        if (eth >= 0.001) return eth.toFixed(6).replace(/\.?0+$/, '') + " ETH"
-        var gwei = n / 1e9
-        if (gwei >= 1) return gwei.toFixed(4).replace(/\.?0+$/, '') + " Gwei"
-        return wei + " wei"
+        return eth.toFixed(8).replace(/\.?0+$/, '') + " ETH"
     }
 
     // Wei -> a bare numeric ETH string, for pre-filling config fields. No unit
