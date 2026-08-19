@@ -144,11 +144,42 @@ Item {
         return sel !== null && remainingSec(sel) <= 0
     }
 
+    // Pre-flight funds guard (fix/insufficient-eth-guard): can the wallet's
+    // KNOWN ETH balance cover this offer plus a little gas? A 0-ETH taker
+    // used to click Buy, watch "Generate your secret" succeed, and then hit
+    // step 2 with a raw "insufficient funds for gas * price + value" RPC
+    // error. Both wei strings; Number() is fine for a threshold check (the
+    // gas headroom dwarfs double rounding at these magnitudes).
+    //
+    // An UNKNOWN balance ("", or unparseable) never blocks: the guard stops
+    // swaps that are certain to fail, not accepts behind a flaky balance
+    // read — the backend re-checks at accept time (acceptOfferAndStartTaker)
+    // and the chain is the final judge. A known "0" always blocks.
+    //
+    // The 0.0005 ETH headroom is a rough fixed margin (the app has no live
+    // gas-price feed) — keep it in sync with kEthGasHeadroomWei in
+    // swap-ui/src/eth_funds_guard.h; tests/insufficient-eth-guard.test.mjs
+    // asserts the two match.
+    function hasEnoughEth(balanceWei, offerWei) {
+        var headroomWei = 500000000000000 // 0.0005 ETH for gas
+        if (balanceWei === undefined || balanceWei === null || balanceWei === "")
+            return true
+        var bal = Number(balanceWei)
+        var need = Number(offerWei) + headroomWei
+        if (isNaN(bal) || isNaN(need))
+            return true
+        return bal >= need
+    }
+
+    readonly property bool selNeedsMoreEth: sel !== null && !sel.blocked
+        && !hasEnoughEth(swapBackend.ethBalance, sel.ethAmountWei)
+
     readonly property bool canAccept: sel !== null
         // A ghosted (venue-mismatch) offer is never acceptable — the accept
         // path stays disabled; the accept-time venue check is the true gate.
         && !sel.blocked
         && !selExpired
+        && !selNeedsMoreEth
         && swapBackend.ready
         && swapBackend.messagingConnected
         && configReady
@@ -1438,6 +1469,18 @@ Item {
                                 BlockedReason {
                                     reason: "Finish setting up first — open Setup"
                                     active: swapBackend.ready && !board.configReady
+                                    clickAction: () => board.navigateToSetup()
+                                }
+                                // The pre-flight funds guard. "attention", not
+                                // the neutral dot: unlike "backend starting"
+                                // this doesn't resolve itself — the user has
+                                // to go get test ETH.
+                                BlockedReason {
+                                    reason: "You don't have enough ETH for this swap. You need at least "
+                                        + (board.sel !== null ? Format.weiToEth(board.sel.ethAmountWei) : "")
+                                        + " plus a little for gas — get free test ETH on the Setup tab"
+                                    active: board.selNeedsMoreEth
+                                    severity: "attention"
                                     clickAction: () => board.navigateToSetup()
                                 }
                                 // A refund also raises makerRunning/takerRunning

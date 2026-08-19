@@ -137,6 +137,9 @@ swap-ui-unit:
 	@offer_venue_bin=$$(mktemp /tmp/atomic-swaps-offer-venue.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/offer_venue_test.cpp -o "$$offer_venue_bin"; \
 		"$$offer_venue_bin"
+	@eth_funds_bin=$$(mktemp /tmp/atomic-swaps-eth-funds-guard.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/eth_funds_guard_test.cpp -o "$$eth_funds_bin"; \
+		"$$eth_funds_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
@@ -201,6 +204,7 @@ NODE_PREFLIGHT_TESTS := \
 	tests/check-qml-scrollview-content.mjs \
 	tests/check-persistence-paths.mjs \
 	tests/amount-format.test.mjs \
+	tests/insufficient-eth-guard.test.mjs \
 	tests/offer-filter.test.mjs \
 	tests/maker-balance-refresh-contract.test.mjs \
 	tests/basecamp-ui-process-match.test.mjs \

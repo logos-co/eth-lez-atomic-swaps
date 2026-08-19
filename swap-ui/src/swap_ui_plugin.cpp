@@ -1,5 +1,6 @@
 #include "swap_ui_plugin.h"
 
+#include "eth_funds_guard.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include "offer_venue.h"
@@ -145,6 +146,22 @@ QString weiToEthValue(QString wei)
         fraction.chop(1);
     }
     return fraction.isEmpty() ? whole : QStringLiteral("%1.%2").arg(whole, fraction);
+}
+
+// Raw backend errors are diagnostic text, not user copy — the live 0.4.4
+// incident put "error code -32000: failed with 16777216 gas: insufficient
+// funds for gas * price + value: address 0x8019...e75B have 0 want
+// 10000000000000" on screen as the headline, twice. Translate the failures
+// we recognise into plain language for DISPLAY surfaces (errorMessage /
+// status) only; the untouched raw text still lands in lastResultJson,
+// taker/makerResultJson and the receipt journal, so nothing diagnostic is
+// lost.
+QString displaySwapError(const QString& raw)
+{
+    if (swap_ui::isInsufficientEthError(raw.toStdString())) {
+        return QString::fromUtf8(swap_ui::kInsufficientEthDisplayCopy);
+    }
+    return raw;
 }
 
 QString compactVariantJson(const QVariant& value)
@@ -1490,8 +1507,11 @@ void SwapUiPlugin::setResultStatus(const QString& resultJson,
     setLastResultJson(resultJson);
     const auto error = jsonError(resultJson);
     if (!error.isEmpty()) {
-        setErrorMessage(error);
-        setStatus(QStringLiteral("%1: %2").arg(failureStatus, error));
+        // Display copy only — lastResultJson (set above, raw) keeps the
+        // verbatim backend error for receipts and diagnostics.
+        const auto display = displaySwapError(error);
+        setErrorMessage(display);
+        setStatus(QStringLiteral("%1: %2").arg(failureStatus, display));
         return;
     }
     setErrorMessage(QString{});
@@ -1804,8 +1824,11 @@ void SwapUiPlugin::handleJobStartResult(const QString& role, const QString& resu
 {
     const auto error = jsonError(resultJson);
     if (!error.isEmpty()) {
-        setErrorMessage(error);
-        setStatus(QStringLiteral("Failed to start %1: %2").arg(role, error));
+        // Same display-only translation as setResultStatus: the raw error
+        // stays in the start-ack result JSON for diagnostics.
+        const auto display = displaySwapError(error);
+        setErrorMessage(display);
+        setStatus(QStringLiteral("Failed to start %1: %2").arg(role, display));
         if (role == QStringLiteral("maker")) {
             setMakerRunning(false);
             setMakerJobId(QString{});
@@ -1923,6 +1946,24 @@ void SwapUiPlugin::acceptOfferAndStartTaker(const QString& offerJson)
     const auto offer = parseObject(offerJson);
     if (offer.isEmpty()) {
         setErrorMessage(QStringLiteral("Invalid offer JSON"));
+        setStatus(errorMessage());
+        return;
+    }
+    // Pre-flight funds guard: a wallet that cannot cover the offer plus a
+    // little gas would sail through "Generate your secret" and then die on
+    // "Lock your ETH" with a raw RPC error (the live 0-ETH incident). The
+    // offer board disables Buy first (OfferBoard.qml hasEnoughEth); this is
+    // the backstop for races — a balance that went stale between the click
+    // and the start. An unknown balance never blocks here (the guard only
+    // stops swaps that are certain to fail); a known-too-small one always
+    // does, before any swap state is touched.
+    const auto offerWei = valueString(offer, QStringLiteral("eth_amount"));
+    if (swap_ui::insufficientEthForOffer(ethBalance().toStdString(),
+                                         offerWei.toStdString())) {
+        setErrorMessage(QStringLiteral(
+            "You don't have enough ETH for this swap. You need at least "
+            "%1 ETH plus a little for gas — get free test ETH on the "
+            "Setup tab.").arg(weiToEthValue(offerWei)));
         setStatus(errorMessage());
         return;
     }
