@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import SwapTheme
+import SwapCopy
 import SwapFormat
 import SwapLinks
 
@@ -256,10 +257,13 @@ Rectangle {
             }
         }
 
-        // Error message — keeps the current error-card presentation
+        // Error message — headline in the app's words when the failure is
+        // one we recognise (Copy.friendlyError), otherwise the raw text as
+        // before. The verbatim error is still in resultJson / the receipt
+        // journal; only the headline is translated.
         Text {
             visible: card.isError
-            text: card.parsed ? (card.parsed.error || "") : ""
+            text: card.parsed ? Copy.friendlyError(card.parsed.error || "") : ""
             color: Theme.textPrimary
             font.pixelSize: Theme.fontSmall
             wrapMode: Text.Wrap

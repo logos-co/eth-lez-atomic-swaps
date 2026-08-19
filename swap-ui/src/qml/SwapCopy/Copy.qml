@@ -65,6 +65,23 @@ QtObject {
         return map[name] || "Working…"
     }
 
+    // Headline translation for raw backend/chain errors the app recognises.
+    // The receipt card shows this instead of raw JSON-RPC text; the raw
+    // error itself is never discarded — it stays verbatim in the result
+    // JSON and the receipt journal for diagnostics. The same translation
+    // exists on the C++ side (eth_funds_guard.h kInsufficientEthDisplayCopy,
+    // applied in swap_ui_plugin.cpp's displaySwapError) for the error strip
+    // and status line; tests/insufficient-eth-guard.test.mjs asserts the two
+    // sentences never drift apart.
+    function friendlyError(raw) {
+        if (!raw) return ""
+        if (raw.toLowerCase().indexOf("insufficient funds") >= 0)
+            return "Your ETH balance is too low to pay for this swap "
+                + "(amount + gas). Add Sepolia test ETH from the Setup tab "
+                + "and try again."
+        return raw
+    }
+
     // The reassurance motif, in one place so it cannot drift.
     readonly property string fundsSafeGeneral:
         "A stalled swap cannot lose your funds. Both sides are locked with a "
