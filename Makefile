@@ -186,14 +186,15 @@ preflight-rust-check:
 
 # Mirrors ci.yml's "forge test (contract invariants)" + "cargo test (anvil
 # integration)" steps — the anvil-backed suites that catch a silent ABI/
-# binding regression (see ci.yml's comment on taker_binding/eth_integration).
+# binding regression, plus chain_report — the public-trial swap count decoded
+# from real logs (see ci.yml's comment on the three suites).
 # `contracts` (forge build) is a prerequisite, not duplicated here.
 preflight-rust-anvil: export RISC0_SKIP_BUILD := 1
 preflight-rust-anvil: contracts
 	@echo "==> forge test (contracts)"
 	@cd contracts && forge test || { echo "preflight FAILED: forge test"; exit 1; }
-	@echo "==> cargo test --locked --test taker_binding --test eth_integration"
-	@cargo test --locked --test taker_binding --test eth_integration \
+	@echo "==> cargo test --locked --test taker_binding --test eth_integration --test chain_report"
+	@cargo test --locked --test taker_binding --test eth_integration --test chain_report \
 	  || { echo "preflight FAILED: cargo test (anvil integration)"; exit 1; }
 
 # Every dependency-free node contract/unit test in the repo (no Waku node, no

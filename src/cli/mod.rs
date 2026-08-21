@@ -9,6 +9,7 @@ mod infra;
 mod maker;
 mod output;
 mod refund;
+pub mod report;
 mod status;
 mod taker;
 
@@ -236,6 +237,12 @@ enum Commands {
     Refund(refund::RefundArgs),
     /// Inspect escrow/HTLC state on-chain
     Status(status::StatusArgs),
+    /// Read-only, on-chain report of public-trial swap activity.
+    ///
+    /// Handled by `report::run_standalone` before `Cli::parse()` (see `run`),
+    /// so it never has to satisfy the global `ConfigArgs` — it reads public
+    /// chain data and needs no keys.
+    ChainReport(report::ChainReportArgs),
     /// Run a full demo: start local chains, deploy contracts, run both sides
     #[cfg(feature = "demo")]
     Demo(demo::DemoArgs),
@@ -285,6 +292,18 @@ pub async fn run() -> Result<()> {
         dotenvy::dotenv().ok();
     }
 
+    // `chain-report` reads PUBLIC chain data only, so it must not be forced
+    // through `ConfigArgs`'s private key / LEZ signing material / swap
+    // parameters: requiring those would stop an operator reporting from a
+    // keyless machine and stop an outside observer verifying the trial numbers
+    // at all — which is exactly the property that makes the chain a better
+    // source than the per-maker ops ledger. Short-circuit it into its own
+    // parser (same shape as the demo/infra short-circuits above; it stays in
+    // `Commands` so `--help` still lists it).
+    if std::env::args().skip(1).any(|a| a == report::COMMAND_NAME) {
+        return report::run_standalone().await;
+    }
+
     let cli = Cli::parse();
     // The loop mode needs the timelock *durations* (SwapConfig only keeps
     // absolute timestamps) to mint fresh timelocks per iteration. Pass the raw
@@ -301,6 +320,7 @@ pub async fn run() -> Result<()> {
         Commands::Taker(args) => taker::cmd_taker(args, &config, cli.json).await,
         Commands::Refund(args) => refund::cmd_refund(args, &config, cli.json).await,
         Commands::Status(args) => status::cmd_status(args, &config, cli.json).await,
+        Commands::ChainReport(_) => unreachable!("handled above"),
         #[cfg(feature = "demo")]
         Commands::Demo(_) => unreachable!("handled above"),
         #[cfg(feature = "demo")]
