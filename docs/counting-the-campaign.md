@@ -279,12 +279,24 @@ for be answered by different nodes. Same host, same configured endpoint.)
 
 If the endpoint cannot corroborate a range — after retrying, reconnecting, and
 drawing a fresh backend several times — the command **fails with an
-explanation instead of printing a count**. If you hit that, point
-`--eth-rpc-url` at a full-history endpoint, or narrow the window to blocks the
-endpoint still retains. A `corroborated: false` in the JSON means no canary
-existed at all (a chain quiet enough to have no logs near the scan, i.e. a
-localnet) and the numbers were taken on trust; on any public network it is
-`true`.
+explanation instead of printing a count**.
+
+The same applies when the anchors cannot be found in the first place. A probe
+that comes back **empty proves nothing**: it is what a chain with no logs looks
+like *and* what a backend that has pruned this era's log index looks like, and
+the response does not say which. So a run in which no probe at either end ever
+returned a log is **refused**, not printed — its most likely wrong answer is a
+zero, and a zero from a pruned backend reads exactly like a quiet trial. Only a
+successful, non-empty probe counts as evidence that the endpoint holds these
+blocks at all.
+
+If you hit either refusal, point `--eth-rpc-url` at a full-history endpoint, or
+narrow the window to blocks it still retains. A chain that genuinely has no
+logs to anchor on — a localnet — is a real case, but it is yours to assert:
+`--allow-uncorroborated` downgrades the refusal to a printed `NOTE` and
+`"corroborated": false` in the JSON. That field is therefore never `false`
+unless someone passed that flag; without it, a published count is always a
+proven one.
 
 ---
 

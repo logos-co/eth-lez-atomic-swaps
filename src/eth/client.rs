@@ -122,7 +122,13 @@ fn version_mismatch_message(verdict: VersionVerdict, address: Address) -> String
 /// Read `INTERFACE_VERSION` once and refuse to proceed on a skew. Called from
 /// [`EthClient::new`] — i.e. before any watcher starts waiting and before any
 /// funds move. One free `eth_call`; no key, no gas, no state dependency.
-pub async fn verify_interface_version<P: Provider>(provider: &P, address: Address) -> Result<()> {
+///
+/// Returns the version the contract actually reported, so a caller that
+/// records it as provenance (`swap-cli chain-report`) publishes the reading
+/// rather than the constant it was checked against — the two can only drift if
+/// the handshake is ever relaxed to accept a range, which is exactly when the
+/// difference would start to matter.
+pub async fn verify_interface_version<P: Provider>(provider: &P, address: Address) -> Result<u64> {
     let contract = EthHTLC::new(address, provider);
     // A revert / empty returndata means "no such getter" — an unversioned
     // (pre-v2) deployment, or not an EthHTLC at all. Both are fatal here, and
@@ -135,7 +141,7 @@ pub async fn verify_interface_version<P: Provider>(provider: &P, address: Addres
         .map(|v| v.saturating_to::<u64>());
 
     match version_verdict(reported) {
-        VersionVerdict::Match => Ok(()),
+        VersionVerdict::Match => Ok(reported.expect("a matched verdict carries a version")),
         other => Err(SwapError::EthAbiMismatch(version_mismatch_message(
             other, address,
         ))),

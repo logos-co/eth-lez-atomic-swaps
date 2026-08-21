@@ -40,8 +40,20 @@
 //! deployment has no such getter and fails loudly), and a non-pinned address
 //! must carry its own explicit `--from-block` rather than inheriting the pinned
 //! venue's deployment block.
+//!
+//! ## Proven, or not published
+//!
+//! The endpoint this runs against load-balances across nodes with different log
+//! retention, and a node without the index answers `eth_getLogs` with an empty
+//! list rather than an error (see [`Canary`]). So every response is batched
+//! with anchor queries that prove the backend holds the scanned range, and a
+//! scan whose anchor probes ALL came back empty proves nothing: it is refused
+//! ([`ScanDecision::Refuse`]) rather than published, because its most likely
+//! wrong answer is a zero indistinguishable from a quiet trial. A chain that
+//! genuinely has no logs to anchor on is a real case — a localnet — but it is
+//! the operator's to assert, with `--allow-uncorroborated`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use alloy::primitives::{Address, B256, FixedBytes};
 use alloy::providers::Provider;
@@ -318,10 +330,6 @@ pub struct ReportWindow {
     pub outcomes_to: u64,
 }
 
-/// Query the contract's logs and fold them into a [`SwapTally`].
-///
-/// Read-only: `eth_getLogs` only. No key, no gas, no state mutation, and no
-/// dependency on a running maker loop.
 /// A canary query: a filter a healthy endpoint always answers non-empty,
 /// batched alongside every real query so the answer carries a proof that the
 /// backend serving it actually had the log data for this scan's block range.
@@ -371,8 +379,8 @@ pub struct Canary {
 
 /// Blocks to walk inward from each end of a scan looking for one with logs to
 /// anchor on. Sepolia blocks are essentially never empty, so this succeeds on
-/// the first try there; a quiet localnet may have no anchor at all, which
-/// [`probe_canaries`] reports as an empty vec.
+/// the first try there; when every probe comes back empty [`probe_canaries`]
+/// reports [`Anchoring::Unproven`] rather than an anchor.
 const CANARY_PROBE_BLOCKS: u64 = 16;
 
 /// Attempts per candidate anchor block. A backend without the log index
@@ -392,9 +400,11 @@ const CORROBORATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from
 /// Whether a batched response may be counted, given how each canary in it
 /// answered as `(observed, expected)`.
 ///
-/// An empty slice means no anchor could be found anywhere near the scan (a
-/// localnet with no logs at all); there is then nothing to verify against, so
-/// the answer is taken and the report says it was uncorroborated.
+/// An empty slice only ever reaches here on the caller's explicit
+/// `--allow-uncorroborated` opt-in (see [`ScanDecision`]): there are then no
+/// anchors to verify against, so the answer is taken and the report says it
+/// was uncorroborated. Without that opt-in an unanchored scan is refused
+/// before any of this runs.
 ///
 /// Note what is deliberately *not* here: "a non-empty answer needs no proof".
 /// It is not sound. A backend whose log index starts inside the queried chunk
@@ -405,13 +415,75 @@ pub fn is_corroborated(canaries: &[(usize, usize)]) -> bool {
         .all(|(observed, expected)| observed >= expected)
 }
 
+/// What the anchor probes established about the backend serving this scan.
+///
+/// The distinction this type draws is the whole reason it exists: an **empty**
+/// probe response proves nothing, because a backend that has pruned this era's
+/// log index answers `[]` exactly like a genuinely quiet chain does. Only a
+/// successful, **non-empty** probe response is evidence that the backend
+/// actually holds these blocks' logs.
+#[derive(Debug, Clone)]
+pub enum Anchoring {
+    /// Both ends of the scan anchored on a block whose logs this endpoint
+    /// served, so every response in the scan can be proven against them.
+    Anchored(Vec<Canary>),
+    /// No probe at either end ever produced an anchor — every one came back
+    /// empty or errored. Either the chain really is that quiet (a localnet) or
+    /// the endpoint cannot serve this era's logs at all, and nothing in the
+    /// responses tells the two apart, so a count taken here is unproven.
+    Unproven,
+}
+
+/// Whether a scan may be counted, given what its probes established.
+///
+/// Refusing is the default on purpose. An unproven scan's most likely wrong
+/// answer is *zero*, and a zero that came from a pruned backend is
+/// indistinguishable from a quiet trial — the exact failure this whole
+/// corroboration apparatus exists to prevent. A localnet with no logs to
+/// anchor on is a real case, but it is the operator's to assert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanDecision {
+    /// Anchored: every response is batched with a canary, and one that cannot
+    /// be corroborated is retried rather than counted.
+    Corroborated,
+    /// Unproven, but the caller explicitly opted in: count it, and report
+    /// `corroborated: false` so the reader knows which kind of number it is.
+    ProceedUnproven,
+    /// Unproven with no opt-in: publish nothing.
+    Refuse,
+}
+
+/// The decision rule itself — pure, so "when does this report refuse" is
+/// testable without a chain.
+pub fn scan_decision(anchoring: &Anchoring, allow_uncorroborated: bool) -> ScanDecision {
+    match (anchoring, allow_uncorroborated) {
+        (Anchoring::Anchored(_), _) => ScanDecision::Corroborated,
+        (Anchoring::Unproven, true) => ScanDecision::ProceedUnproven,
+        (Anchoring::Unproven, false) => ScanDecision::Refuse,
+    }
+}
+
+/// Why a scan was refused, in terms an operator can act on: the endpoint
+/// problem it most likely is, and the opt-in for the case where it is not.
+fn unproven_scan_message(from: u64, to: u64) -> String {
+    format!(
+        "blocks {from}-{to}: no canary anchor could be found at either end of this scan — every \
+         probe came back empty — so nothing shows that the RPC backend serving this connection \
+         holds these blocks' logs at all. A backend whose log index does not cover them answers \
+         with an empty list rather than an error, so a count taken here could read zero on a \
+         busy venue. Point --eth-rpc-url at a full-history endpoint, or narrow the window to \
+         blocks it still retains. If this really is a chain with no logs to anchor on (a quiet \
+         localnet), pass --allow-uncorroborated to accept an unproven count."
+    )
+}
+
 /// Find the anchors for a scan: one as close as possible to `from`, one as
 /// close as possible to `to`, so a backend that answers both provably covers
 /// everything between them (see [`Canary`]).
 ///
-/// Returns an empty vec when no block near either end has any logs — a quiet
-/// localnet — in which case the scan proceeds uncorroborated and says so.
-pub async fn probe_canaries<P: Provider>(provider: &P, from: u64, to: u64) -> Result<Vec<Canary>> {
+/// Reports [`Anchoring::Unproven`] when either end cannot be anchored: without
+/// both, there is no contiguity argument, and a half-proof is not a proof.
+pub async fn probe_canaries<P: Provider>(provider: &P, from: u64, to: u64) -> Result<Anchoring> {
     let mut out: Vec<Canary> = Vec::new();
 
     let forward = (from..=to).take(CANARY_PROBE_BLOCKS as usize);
@@ -435,12 +507,12 @@ pub async fn probe_canaries<P: Provider>(provider: &P, from: u64, to: u64) -> Re
                 );
                 // One missing end means no contiguity argument is available, so
                 // do not pretend a half-proof is a proof.
-                return Ok(Vec::new());
+                return Ok(Anchoring::Unproven);
             }
         }
     }
 
-    Ok(out)
+    Ok(Anchoring::Anchored(out))
 }
 
 /// First block in `candidates` that has any logs, anchored on whichever address
@@ -491,9 +563,10 @@ async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> Option<Cana
 }
 
 /// One scan's result: the tally, plus whether every response it counted came
-/// with a canary proof (see [`Canary`]). The flag is reported, not hidden — an
-/// uncorroborated count is still useful on a localnet, but a reader deserves to
-/// know which kind they are looking at.
+/// with a canary proof (see [`Canary`]). `corroborated: false` is only ever
+/// reachable through the caller's explicit opt-in (see [`ScanDecision`]), and
+/// the flag is reported rather than hidden so a reader can tell an unproven
+/// count from a proven one.
 #[derive(Debug, Clone)]
 pub struct Scan {
     pub tally: SwapTally,
@@ -509,6 +582,7 @@ pub async fn collect_tally<P: Provider>(
     address: Address,
     window: &ReportWindow,
     chunk: u64,
+    allow_uncorroborated: bool,
 ) -> Result<Scan> {
     let mut tally = SwapTally::new();
 
@@ -516,14 +590,32 @@ pub async fn collect_tally<P: Provider>(
     let claimed = EthHTLC::Claimed::SIGNATURE_HASH;
     let refunded = EthHTLC::Refunded::SIGNATURE_HASH;
 
+    // An empty window selects no blocks, so nothing is queried and there is
+    // nothing to prove — not an unproven scan, a scan that never happened.
+    let span_end = window.outcomes_to.max(window.locks_to);
+    if span_end < window.locks_from {
+        return Ok(Scan {
+            tally,
+            corroborated: false,
+        });
+    }
+
     // Anchor both ends of the widest span this scan touches — locks start to
     // outcomes end — so an accepted response provably came from a backend whose
     // log index covers the whole of it (see `Canary`).
-    let span_end = window.outcomes_to.max(window.locks_to);
-    let canaries = if span_end >= window.locks_from {
-        probe_canaries(provider, window.locks_from, span_end).await?
-    } else {
-        Vec::new()
+    let anchoring = probe_canaries(provider, window.locks_from, span_end).await?;
+    let canaries = match scan_decision(&anchoring, allow_uncorroborated) {
+        ScanDecision::Corroborated => match anchoring {
+            Anchoring::Anchored(canaries) => canaries,
+            Anchoring::Unproven => unreachable!("an unproven scan is never corroborated"),
+        },
+        ScanDecision::ProceedUnproven => Vec::new(),
+        ScanDecision::Refuse => {
+            return Err(SwapError::EthLogsUncorroborated(unproven_scan_message(
+                window.locks_from,
+                span_end,
+            )));
+        }
     };
 
     // One combined filter over the attempt window: three topic0s in a single
@@ -580,15 +672,19 @@ async fn scan_range<P: Provider>(
     tally: &mut SwapTally,
 ) -> Result<()> {
     let mut chunk = chunk.max(1);
-    let mut cursor = from;
+    // The spans come from `block_chunks` rather than an inline cursor so the
+    // arithmetic that decides which blocks get queried has exactly one
+    // implementation — and so its unit test covers the code that really issues
+    // `eth_getLogs`. A range rejection re-derives the remaining spans at the
+    // smaller size; a span is only dropped once its logs are in the tally.
+    let mut spans: VecDeque<(u64, u64)> = block_chunks(from, to, chunk).into();
     let mut rate_limit_retries = 0u32;
     let mut first = true;
 
-    while cursor <= to {
+    while let Some(&(cursor, end)) = spans.front() {
         if !std::mem::take(&mut first) {
             tokio::time::sleep(CHUNK_PACING).await;
         }
-        let end = cursor.saturating_add(chunk - 1).min(to);
         let filter = Filter::new()
             .address(address)
             .event_signature(topics.clone())
@@ -631,6 +727,7 @@ async fn scan_range<P: Provider>(
                 }
                 RpcFailure::RangeTooWide if chunk > MIN_CHUNK_BLOCKS => {
                     chunk = (chunk / 2).max(MIN_CHUNK_BLOCKS);
+                    spans = block_chunks(cursor, to, chunk).into();
                     debug!(chunk, %msg, "chain-report: shrinking block range");
                     continue;
                 }
@@ -661,10 +758,7 @@ async fn scan_range<P: Provider>(
             logs = logs.len(),
             "chain-report: scanned block range"
         );
-        if end == u64::MAX {
-            break;
-        }
-        cursor = end + 1;
+        spans.pop_front();
         rate_limit_retries = 0;
     }
 
@@ -1113,10 +1207,47 @@ mod tests {
         assert!(!is_corroborated(&[(3, 3), (0, 1)]));
         assert!(!is_corroborated(&[(2, 3), (1, 1)]));
 
-        // No anchor at all (a localnet with no logs to anchor on): nothing to
-        // verify against, so take the answer — the report flags it as
-        // uncorroborated rather than refusing outright.
+        // No anchors at all only reaches this function on the explicit
+        // `--allow-uncorroborated` opt-in; there is then nothing to verify
+        // against, so the answer is taken and flagged (see `scan_decision`).
         assert!(is_corroborated(&[]));
+    }
+
+    // Refusing is the default, and the reason is the whole feature: probes that
+    // ALL came back empty are exactly what a pruned backend produces, and the
+    // count it would then publish is a zero that reads as a quiet trial.
+    #[test]
+    fn a_scan_no_probe_could_anchor_is_refused_unless_the_operator_opts_in() {
+        let anchored = Anchoring::Anchored(vec![Canary {
+            filter: Filter::new().from_block(7u64).to_block(7u64),
+            expected: 1,
+        }]);
+
+        // Probes succeeded somewhere: corroboration proceeds, and the opt-in
+        // flag does not weaken it.
+        assert_eq!(scan_decision(&anchored, false), ScanDecision::Corroborated);
+        assert_eq!(scan_decision(&anchored, true), ScanDecision::Corroborated);
+
+        // No probe ever produced an anchor: refuse by default...
+        assert_eq!(
+            scan_decision(&Anchoring::Unproven, false),
+            ScanDecision::Refuse
+        );
+        // ...and only an explicit opt-in downgrades that to a flagged count.
+        assert_eq!(
+            scan_decision(&Anchoring::Unproven, true),
+            ScanDecision::ProceedUnproven
+        );
+    }
+
+    // The refusal has to tell an operator what to do next, and the two things
+    // they can do are point at a different endpoint or assert the quiet chain.
+    #[test]
+    fn the_refusal_names_the_endpoint_problem_and_the_opt_in() {
+        let msg = unproven_scan_message(100, 200);
+        assert!(msg.contains("100-200"));
+        assert!(msg.contains("--eth-rpc-url"));
+        assert!(msg.contains("--allow-uncorroborated"));
     }
 
     // Answering a rate limit by halving the span doubles the request rate —
@@ -1152,6 +1283,8 @@ mod tests {
         );
     }
 
+    // `scan_range` derives every `eth_getLogs` span from this helper, so these
+    // are the block boundaries the report really queries.
     #[test]
     fn block_chunks_covers_the_range_exactly_once() {
         assert_eq!(block_chunks(10, 19, 10), vec![(10, 19)]);

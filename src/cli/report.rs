@@ -43,7 +43,8 @@ pub struct ChainReportArgs {
     eth_htlc_address: String,
 
     /// First block to count locks from. Defaults to the pinned venue's
-    /// deployment block, i.e. the whole history of the venue.
+    /// deployment block when measuring the pinned venue — i.e. its whole
+    /// history — and is required for any other address.
     #[arg(long, conflicts_with = "since")]
     from_block: Option<u64>,
 
@@ -65,6 +66,14 @@ pub struct ChainReportArgs {
     /// rejection; raise it only if your endpoint is known to allow more.
     #[arg(long, default_value_t = DEFAULT_CHUNK_BLOCKS)]
     chunk_blocks: u64,
+
+    /// Publish a count no canary could prove, for a chain quiet enough to have
+    /// no logs to anchor on (a localnet). Without it such a scan is REFUSED:
+    /// an endpoint that has pruned this era's logs answers with an empty list
+    /// exactly like a quiet chain does, and the number it would print is a
+    /// zero indistinguishable from a quiet trial.
+    #[arg(long)]
+    allow_uncorroborated: bool,
 }
 
 /// Everything a run measured, plus what it measured it against. The provenance
@@ -88,12 +97,12 @@ pub struct ChainReport {
     /// default run; higher when `--to-block`/`--until` bound the attempt window,
     /// so a swap locked at the end of it is not miscounted as still-open.
     pub outcomes_to_block: u64,
-    /// Whether every empty log response in this run was corroborated against a
-    /// canary (see `eth::report::Canary`). `true` on any real network: it is
-    /// what rules out an under-count from a load-balanced endpoint whose
-    /// backends have pruned their log index. `false` only where no canary
-    /// exists — a chain quiet enough to have no logs at all near the scan's
-    /// start, i.e. a localnet.
+    /// Whether every log response in this run was corroborated against a
+    /// canary (see `eth::report::Canary`) — what rules out an under-count from
+    /// a load-balanced endpoint whose backends have pruned their log index. A
+    /// run that could not anchor a canary is refused outright, so `false` only
+    /// ever appears when the operator passed `--allow-uncorroborated` to
+    /// accept an unproven count (or the window selected no blocks at all).
     pub corroborated: bool,
     #[serde(flatten)]
     pub counts: SwapCounts,
@@ -146,6 +155,24 @@ pub async fn run_standalone() -> Result<()> {
 // The command
 // ---------------------------------------------------------------------------
 
+/// The oldest block a window may start at, for the venue actually being
+/// measured.
+///
+/// [`PINNED_DEPLOY_BLOCK`] is a fact about ONE deployment — earlier blocks
+/// cannot hold its events, which is what makes it a safe floor and a cheap
+/// one. It says nothing about any other address. Applying it to a non-pinned
+/// venue is the same era inheritance the guard in [`cmd_chain_report`]
+/// refuses, and through `--since` it does not even fail loudly: it silently
+/// truncates that deployment's history, down to an empty window on a localnet
+/// whose head is below the pinned venue's deployment block.
+fn search_floor(is_pinned_venue: bool, from_block: Option<u64>) -> u64 {
+    match from_block {
+        Some(explicit) => explicit,
+        None if is_pinned_venue => PINNED_DEPLOY_BLOCK,
+        None => 0,
+    }
+}
+
 pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
     let address: Address = args
         .eth_htlc_address
@@ -191,7 +218,7 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
     // The same startup handshake every client runs, and for the same reason: a
     // wrong-era contract does not error on a log query, it matches nothing. A
     // report that silently prints zeroes is worse than one that refuses to run.
-    verify_interface_version(&provider, address).await?;
+    let interface_version = verify_interface_version(&provider, address).await?;
 
     let chain_id = provider
         .get_chain_id()
@@ -202,7 +229,7 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
         .await
         .map_err(|e| SwapError::EthRpc(format!("eth_blockNumber failed: {e}")))?;
 
-    let default_from = args.from_block.unwrap_or(PINNED_DEPLOY_BLOCK);
+    let default_from = search_floor(is_pinned_venue, args.from_block);
     let from_block = match args.since {
         Some(ts) => {
             match report::first_block_at_or_after(default_from, head, ts, |b| {
@@ -262,7 +289,15 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
         } else {
             connect(&args.eth_rpc_url).await?
         };
-        match report::collect_tally(&provider, address, &window, args.chunk_blocks).await {
+        match report::collect_tally(
+            &provider,
+            address,
+            &window,
+            args.chunk_blocks,
+            args.allow_uncorroborated,
+        )
+        .await
+        {
             Ok(s) => {
                 scan = Some(s);
                 break;
@@ -284,7 +319,9 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
              backend that covers the whole range, so no count is reported rather than a count \
              that reads low. Point --eth-rpc-url at an endpoint that serves historical logs \
              consistently (an archive/full-history provider), or narrow the window with \
-             --from-block/--since to blocks the endpoint still retains."
+             --from-block/--since to blocks the endpoint still retains. On a chain that \
+             genuinely has no logs to anchor on (a quiet localnet), --allow-uncorroborated \
+             accepts an unproven count instead."
         )));
     };
 
@@ -292,7 +329,7 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
         contract_address: address.to_string(),
         is_pinned_venue,
         chain_id,
-        interface_version: crate::eth::client::EXPECTED_INTERFACE_VERSION,
+        interface_version,
         from_block: window.locks_from,
         to_block: window.locks_to,
         outcomes_to_block: window.outcomes_to,
@@ -376,9 +413,10 @@ fn print_report(report: &ChainReport, json: bool) -> Result<()> {
         println!("  outcomes through: block {}", report.outcomes_to_block);
         if !report.corroborated {
             println!(
-                "  NOTE: no corroboration canary was available on this chain (no logs near block \
-                 {}), so an empty log response could not be told apart from an RPC backend that \
-                 does not hold these blocks' logs.",
+                "  NOTE: --allow-uncorroborated was passed and no corroboration canary could \
+                 be anchored (no logs near block {}), so these counts are UNPROVEN: an empty log \
+                 response could not be told apart from an RPC backend that does not hold these \
+                 blocks' logs.",
                 report.from_block
             );
         }
@@ -559,5 +597,105 @@ mod tests {
         // Counts are flattened alongside the provenance, not nested.
         assert_eq!(v["attempted"], 0);
         assert_eq!(v["distinct_taker_wallets"], 0);
+    }
+
+    // A count no canary could prove is refused by default, so the flag that
+    // downgrades that refusal must be opt-in, never implied.
+    #[test]
+    fn uncorroborated_counts_are_opt_in() {
+        let default = parse(&["swap-cli", "chain-report", "--eth-rpc-url", "wss://example"])
+            .expect("a bare run parses");
+        assert!(!default.allow_uncorroborated);
+
+        let opted_in = parse(&[
+            "swap-cli",
+            "chain-report",
+            "--eth-rpc-url",
+            "wss://example",
+            "--allow-uncorroborated",
+        ])
+        .expect("the opt-in parses");
+        assert!(opted_in.allow_uncorroborated);
+    }
+
+    // The pinned deployment block is a fact about the pinned venue only.
+    // Inheriting it elsewhere silently truncates that venue's history — and on
+    // a localnet, whose head is far below it, truncates it to nothing.
+    #[test]
+    fn only_the_pinned_venue_inherits_the_pinned_deploy_block() {
+        assert_eq!(search_floor(true, None), PINNED_DEPLOY_BLOCK);
+        assert_eq!(
+            search_floor(false, None),
+            0,
+            "another deployment's history does not start where the pinned one's does"
+        );
+        // An explicit --from-block always wins, on either venue.
+        assert_eq!(search_floor(true, Some(42)), 42);
+        assert_eq!(search_floor(false, Some(42)), 42);
+    }
+
+    fn args_for(address: &str, from_block: Option<u64>, since: Option<u64>) -> ChainReportArgs {
+        ChainReportArgs {
+            // Unroutable on purpose: every assertion below is about a check
+            // that must happen BEFORE the command opens a connection.
+            eth_rpc_url: "http://127.0.0.1:1".into(),
+            eth_htlc_address: address.into(),
+            from_block,
+            to_block: None,
+            since,
+            until: None,
+            chunk_blocks: DEFAULT_CHUNK_BLOCKS,
+            allow_uncorroborated: false,
+        }
+    }
+
+    // The primary defence against summing two deployment eras: a non-pinned
+    // address may not inherit the pinned venue's deployment block, so it is
+    // refused until the caller says where that deployment's history starts.
+    #[tokio::test]
+    async fn a_non_pinned_venue_without_a_window_is_refused_before_connecting() {
+        let err = cmd_chain_report(args_for(SUPERSEDED_ETH_HTLC_ADDRESS, None, None), false)
+            .await
+            .expect_err("the superseded v1 venue must not inherit the pinned deployment block");
+
+        let SwapError::InvalidConfig(msg) = err else {
+            panic!("expected an InvalidConfig refusal, got: {err:?}");
+        };
+        assert!(msg.contains(PINNED_ETH_HTLC_ADDRESS));
+        assert!(msg.contains(&PINNED_DEPLOY_BLOCK.to_string()));
+        assert!(
+            msg.contains("SUPERSEDED"),
+            "the v1 address is named for what it is: {msg}"
+        );
+    }
+
+    // The same guard must not fire once the caller HAS stated the era, or
+    // `--since` would be unusable on any venue but the pinned one. The command
+    // then proceeds to the RPC (which fails, because there is none) — the
+    // point is only that it got that far.
+    #[tokio::test]
+    async fn stating_the_era_gets_a_non_pinned_venue_past_the_guard() {
+        for args in [
+            args_for(SUPERSEDED_ETH_HTLC_ADDRESS, Some(11_316_985), None),
+            args_for(SUPERSEDED_ETH_HTLC_ADDRESS, None, Some(1_787_270_400)),
+        ] {
+            let err = cmd_chain_report(args, false)
+                .await
+                .expect_err("there is no RPC at 127.0.0.1:1");
+            assert!(
+                !matches!(err, SwapError::InvalidConfig(_)),
+                "the era guard fired even though the era was stated: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zero_chunk_size_is_refused() {
+        let mut args = args_for(PINNED_ETH_HTLC_ADDRESS, None, None);
+        args.chunk_blocks = 0;
+        assert!(matches!(
+            cmd_chain_report(args, false).await,
+            Err(SwapError::InvalidConfig(_))
+        ));
     }
 }

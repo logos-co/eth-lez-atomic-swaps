@@ -17,6 +17,7 @@ use alloy::{
     sol,
 };
 use sha2::{Digest, Sha256};
+use swap_orchestrator::error::SwapError;
 use swap_orchestrator::eth::report::{ReportWindow, collect_tally};
 
 // Reads ABI + bytecode from the Foundry build artifact.
@@ -215,7 +216,7 @@ async fn counts_a_mixed_trial_from_logs_alone() {
         locks_to: to,
         outcomes_to: to,
     };
-    let counts = collect_tally(venue.taker(0), venue.address, &window, CHUNK)
+    let counts = collect_tally(venue.taker(0), venue.address, &window, CHUNK, false)
         .await
         .unwrap()
         .tally
@@ -294,6 +295,7 @@ async fn a_block_window_bounds_the_attempt_count() {
             outcomes_to: head(venue.taker(0)).await,
         },
         CHUNK,
+        false,
     )
     .await
     .unwrap()
@@ -331,6 +333,7 @@ async fn outcomes_are_followed_past_the_end_of_the_attempt_window() {
             outcomes_to: head(venue.taker(0)).await,
         },
         CHUNK,
+        false,
     )
     .await
     .unwrap()
@@ -351,6 +354,7 @@ async fn outcomes_are_followed_past_the_end_of_the_attempt_window() {
             outcomes_to: lock_block,
         },
         CHUNK,
+        false,
     )
     .await
     .unwrap()
@@ -383,6 +387,7 @@ async fn empty_window_is_zero_and_small_chunks_still_cover_the_range() {
             outcomes_to: to,
         },
         1,
+        false,
     )
     .await
     .unwrap()
@@ -400,6 +405,7 @@ async fn empty_window_is_zero_and_small_chunks_still_cover_the_range() {
             outcomes_to: to,
         },
         CHUNK,
+        false,
     )
     .await
     .unwrap()
@@ -407,4 +413,78 @@ async fn empty_window_is_zero_and_small_chunks_still_cover_the_range() {
     .counts();
     assert_eq!(empty.attempted, 0);
     assert!(empty.by_maker.is_empty());
+}
+
+/// A scan whose anchor probes ALL came back empty proves nothing — that is what
+/// a backend with no log index for the era looks like, and what a chain with no
+/// logs looks like, and the responses do not tell them apart. Refusing is the
+/// default; the operator has to assert the quiet chain.
+///
+/// This anvil has no logs at all (deploying EthHTLC emits none), which is
+/// exactly the state a pruned backend fakes.
+#[tokio::test]
+async fn a_scan_without_an_anchor_is_refused_until_the_operator_opts_in() {
+    let venue = setup().await;
+    let to = head(venue.taker(0)).await;
+    // Two blocks: enough to scan, few enough that the probe walk is quick.
+    let window = ReportWindow {
+        locks_from: to.saturating_sub(1),
+        locks_to: to,
+        outcomes_to: to,
+    };
+
+    let refused = collect_tally(venue.taker(0), venue.address, &window, CHUNK, false)
+        .await
+        .expect_err("an unprovable scan must not produce a headline number");
+    let SwapError::EthLogsUncorroborated(msg) = refused else {
+        panic!("expected an uncorroborated-logs refusal, got: {refused:?}");
+    };
+    assert!(
+        msg.contains("--allow-uncorroborated"),
+        "the refusal must name the opt-in: {msg}"
+    );
+
+    // The same scan, with the opt-in: it proceeds, and says it is unproven.
+    let scan = collect_tally(venue.taker(0), venue.address, &window, CHUNK, true)
+        .await
+        .expect("--allow-uncorroborated downgrades the refusal");
+    assert!(!scan.corroborated, "an unanchored count is never corroborated");
+    assert_eq!(scan.tally.counts().attempted, 0);
+}
+
+/// The other half of the same decision: once the probes DO anchor, a window in
+/// which the scanned contract has no logs is a *proven* zero and is reported,
+/// not refused. This is the case the refusal must not swallow.
+#[tokio::test]
+async fn a_proven_zero_is_reported_rather_than_refused() {
+    let venue = setup().await;
+    let m1 = venue.maker_address(0);
+    let start = head(venue.taker(0)).await;
+
+    lock(&venue, venue.taker(0), m1, 0x41, 3_600).await;
+    let to = head(venue.taker(0)).await;
+    let window = ReportWindow {
+        locks_from: start,
+        locks_to: to,
+        outcomes_to: to,
+    };
+
+    // These blocks demonstrably have logs, so the probes anchor — but they hold
+    // none for THIS address, so its answer is genuinely empty.
+    let quiet_venue = Address::from([0x5Au8; 20]);
+    let scan = collect_tally(venue.taker(0), quiet_venue, &window, CHUNK, false)
+        .await
+        .expect("an anchored scan reports its zero instead of refusing");
+    assert!(
+        scan.corroborated,
+        "the probes anchored, so the answer carries its proof"
+    );
+    assert_eq!(scan.tally.counts().attempted, 0);
+
+    // And the same anchored window over the real venue is a proven one.
+    let real = collect_tally(venue.taker(0), venue.address, &window, CHUNK, false)
+        .await
+        .unwrap();
+    assert!(real.corroborated);
+    assert_eq!(real.tally.counts().attempted, 1);
 }
