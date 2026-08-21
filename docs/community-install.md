@@ -10,14 +10,14 @@ Basecamp — no official-catalog listing required.
 > and rapidsnark hashes). Intel macOS is not supported — upstream ships
 > no `macos-x86_64` circuits bundle.
 
-> **Current release (as of 2026-08-04): `swap v0.3.1` / `swap_ui v0.3.0`**,
-> published 2026-08-03. Both sidecars report
+> **Current release (as of 2026-08-21): `swap v0.4.4` / `swap_ui v0.4.4`**,
+> both published 2026-08-18. Both sidecars report
 > `builtVariants: [darwin-arm64, linux-amd64, linux-arm64]` and
 > `missingVariants: []` — all three platforms are built and published, and
-> `.github/workflows/build-modules.yml` now compiles both modules on
+> `.github/workflows/build-modules.yml` compiles both modules on
 > `ubuntu-latest` and `ubuntu-24.04-arm` (in addition to macOS) on every
-> push, so the Linux legs are exercised continuously, not just at release
-> time.
+> pull request and every push to `master`, so the Linux legs are exercised
+> continuously, not just at release time.
 
 ## Prerequisites
 
@@ -38,12 +38,15 @@ Basecamp — no official-catalog listing required.
    https://raw.githubusercontent.com/logos-co/eth-lez-atomic-swaps/master/logos-repo.json
    ```
 
-   This is the canonical catalog URL — it's what `canary/leg-catalog.sh`
-   verifies on every nightly run, and it doesn't depend on any one
-   person's domain. A broader personal mirror also exists at
-   `https://logos.substratestudios.xyz/logos-repo.json` (same `swap` /
-   `swap_ui` releases, plus other unrelated apps); use the URL above
-   unless you specifically need something only the mirror carries.
+   This is the canonical catalog URL and the one to use — it's what
+   `canary/leg-catalog.sh` verifies on every nightly run, and it doesn't
+   depend on any one person's domain.
+
+   A broader personal mirror also exists at
+   `https://logos.substratestudios.xyz/logos-repo.json`. It carries the
+   same `swap` / `swap_ui` releases alongside other unrelated apps, but
+   it is not the supported path and no nightly check covers it. Reach
+   for it only if you specifically want one of those other apps.
 
 3. The "ETH ↔ LEZ Atomic Swaps" repository appears and is merged with
    the built-in catalog. **Keep the built-in/default repository
