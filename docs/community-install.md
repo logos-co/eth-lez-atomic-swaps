@@ -21,13 +21,27 @@ Basecamp — no official-catalog listing required.
 
 ## Prerequisites
 
-- **Logos Basecamp 0.2.2** — download from the
+- **Logos Basecamp 0.2.3** (0.2.2 also works) — download from the
   [logos-basecamp releases page](https://github.com/logos-co/logos-basecamp/releases):
   - macOS Apple Silicon: the `aarch64.dmg`; open it and drag Basecamp to
     Applications.
   - Linux: the `x86_64.AppImage` or `aarch64.AppImage`; `chmod +x` it and
     run it.
 - macOS on Apple Silicon (M1 or newer), or Linux on `x86_64` / `aarch64`.
+
+> **Why 0.2.3, and why 0.2.2 is fine.** 0.2.3 is what `scaffold.toml` pins
+> (`aa237766baf61404e12da86b7303cb41065464c9`, the upstream `0.2.3` tag) and
+> what the `basecamp-ui-runtime` CI job builds, installs these modules into,
+> and drives the UI of on every pull request — so it's the one to reach for.
+> 0.2.2 locks `logos-package`, `logos-package-manager`,
+> `logos-capability-module` and `logos-view-module-runtime` at exactly the
+> same revisions, so the packaging, hash-validation and module-loading paths
+> an install goes through are unchanged there. Nothing here covers 0.2.1 or
+> earlier — don't assume they work.
+>
+> That CI proof runs on **linux-amd64** and installs **locally built** `.lgx`
+> packages. macOS, and the catalog-download path in step 1, are exercised by
+> hand, not by automation.
 
 ## 1. Add the catalog
 
@@ -60,10 +74,11 @@ Basecamp — no official-catalog listing required.
 UI module).** A UI module installed first will not load.
 
 1. Go to the package/module browser.
-2. Install **swap** first. Then install **swap_ui**, which declares
-   `swap` and **delivery_module** (from the official catalog) as
-   dependencies — Basecamp may resolve these automatically, but do not
-   rely on that if it installs `swap_ui` before `swap` is present.
+2. Install **swap** first — it is the module that declares
+   **delivery_module** (from the official catalog) as a dependency. Then
+   install **swap_ui**, whose only declared dependency is `swap`. Basecamp
+   may resolve both automatically, but do not rely on that if it installs
+   `swap_ui` before `swap` is present.
 3. Restart Basecamp if a module doesn't appear immediately.
 
 ## 3. Configure the module
