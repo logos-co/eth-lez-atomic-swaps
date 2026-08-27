@@ -495,7 +495,7 @@ PageScaffold {
         }
     }
 
-    // --- Step 5: Done ---
+    // --- Done (not a numbered step) ---
     // Present but dimmed before it is reachable. It used to be `visible:
     // isReady`, so the destination did not exist until you had already
     // arrived — you could not see there was a final step to aim for.
@@ -516,7 +516,10 @@ PageScaffold {
                 Layout.alignment: Qt.AlignVCenter
             }
             SectionHeader {
-                label: "5. Start trading"
+                // Deliberately unnumbered: the subtitle promises "Four
+                // steps" and this card is not one of them — it is where you
+                // land once the four above are done (see the header comment).
+                label: "Start trading"
                 hairline: false
             }
         }

@@ -149,12 +149,21 @@ Item {
     property int initialBalanceAttempts: 0
     readonly property int maxInitialBalanceAttempts: 4
 
+    // A balance read needs an endpoint and an account, not the whole swap
+    // form — so this is gated on "some chain has a key", not on configReady
+    // (zero validation issues), which a fresh install mid-Setup never meets.
+    // The backend applies the real per-chain gate (balance_read_gate.h) and
+    // fails quietly when nothing is readable; this only decides when to ask.
+    readonly property bool balanceSourceReady: swapBackend.ethPrivateKey !== ""
+                                               || swapBackend.lezSigningKey !== ""
+                                               || swapBackend.lezAccountId !== ""
+
     Timer {
         // Back off between tries so a failing endpoint is not hammered.
         interval: 600 + root.initialBalanceAttempts * 3000
         repeat: false
         running: root.initialBalanceAttempts < root.maxInitialBalanceAttempts
-                 && swapBackend.ready && root.configReady
+                 && swapBackend.ready && root.validationSettled && root.balanceSourceReady
                  && swapBackend.ethBalance === "" && !swapBackend.balancesLoading
         onTriggered: {
             root.initialBalanceAttempts += 1
@@ -169,6 +178,9 @@ Item {
         target: swapBackend
         function onEthRpcUrlChanged() { root.initialBalanceAttempts = 0 }
         function onLezSequencerUrlChanged() { root.initialBalanceAttempts = 0 }
+        // A key arriving (Setup step 1/2) is a new source to read from.
+        function onEthPrivateKeyChanged() { root.initialBalanceAttempts = 0 }
+        function onLezSigningKeyChanged() { root.initialBalanceAttempts = 0 }
     }
 
     // --- Sticky error notice ---------------------------------------------

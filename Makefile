@@ -140,6 +140,9 @@ swap-ui-unit:
 	@eth_funds_bin=$$(mktemp /tmp/atomic-swaps-eth-funds-guard.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/eth_funds_guard_test.cpp -o "$$eth_funds_bin"; \
 		"$$eth_funds_bin"
+	@balance_gate_bin=$$(mktemp /tmp/atomic-swaps-balance-read-gate.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/balance_read_gate_test.cpp -o "$$balance_gate_bin"; \
+		"$$balance_gate_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my

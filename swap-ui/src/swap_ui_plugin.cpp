@@ -1,5 +1,6 @@
 #include "swap_ui_plugin.h"
 
+#include "balance_read_gate.h"
 #include "eth_funds_guard.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
@@ -1686,11 +1687,18 @@ void SwapUiPlugin::applyBalancesResult(const QString& resultJson)
     if (obj.contains(QStringLiteral("lez_account"))) setLezAccount(valueString(obj, QStringLiteral("lez_account")));
     if (obj.contains(QStringLiteral("lez_balance"))) setLezBalance(valueString(obj, QStringLiteral("lez_balance")));
 
+    // A side the gate skipped (see fetchBalances) comes back as a "not set up
+    // yet" error from swap-ffi. That is the expected shape mid-Setup — the
+    // ETH key exists, the LEZ account does not — and not a warning to show.
     QStringList warnings;
     const auto ethError = valueString(obj, QStringLiteral("eth_error"));
     const auto lezError = valueString(obj, QStringLiteral("lez_error"));
-    if (!ethError.isEmpty()) warnings.append(QStringLiteral("ETH: %1").arg(ethError));
-    if (!lezError.isEmpty()) warnings.append(QStringLiteral("LEZ: %1").arg(lezError));
+    if (!ethError.isEmpty() && !swap_ui::sideNotSetUp(ethError.toStdString())) {
+        warnings.append(QStringLiteral("ETH: %1").arg(ethError));
+    }
+    if (!lezError.isEmpty() && !swap_ui::sideNotSetUp(lezError.toStdString())) {
+        warnings.append(QStringLiteral("LEZ: %1").arg(lezError));
+    }
 
     if (!warnings.isEmpty()) {
         setErrorMessage(warnings.join(QStringLiteral("; ")));
@@ -1702,15 +1710,36 @@ void SwapUiPlugin::applyBalancesResult(const QString& resultJson)
     setStatus(QStringLiteral("Balances fetched"));
 }
 
+// A balance read validates ONLY what it uses — an endpoint and an account per
+// chain (balance_read_gate.h) — never the full swap form. The full form check
+// (validateConfig / validateConfigForAction) stays on the swap actions.
+//
+// When nothing is readable yet this fails QUIETLY (status line only, no
+// errorMessage): every caller of this function is an automatic refresh
+// (AtomicSwapView timers, the post-Setup-step refreshes, settle polling), and
+// a background read that cannot happen yet is not an error the user asked
+// about. Publishing it to errorMessage put a global red banner over the Setup
+// tab of a fresh install that was working correctly.
+swap_ui::BalanceReadGate SwapUiPlugin::balanceReadGate() const
+{
+    return swap_ui::balanceReadGate(ethRpcUrl().toStdString(),
+                                    ethPrivateKey().toStdString(),
+                                    ethHtlcAddress().toStdString(),
+                                    lezSequencerUrl().toStdString(),
+                                    lezSigningKey().toStdString(),
+                                    lezWalletHome().toStdString(),
+                                    lezAccountId().toStdString());
+}
+
 void SwapUiPlugin::fetchBalances()
 {
     if (!m_swap || balancesLoading()) {
         setStatus(QStringLiteral("Swap client not ready"));
         return;
     }
-    if (!validateConfig()) {
-        setErrorMessage(QStringLiteral("Fix validation errors before fetching balances"));
-        setStatus(errorMessage());
+    if (!balanceReadGate().anyReady()) {
+        swapUiTrace(QStringLiteral("fetchBalances skipped — no chain has an endpoint and an account yet"));
+        setStatus(QStringLiteral("Balances unavailable until an account is set up"));
         return;
     }
 
