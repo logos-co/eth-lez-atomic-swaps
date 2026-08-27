@@ -229,6 +229,9 @@ fn throttle_backoff(err: &SwapError, attempt: usize) -> std::time::Duration {
 /// nothing to re-anchor, only a request the endpoint asked us to slow down.
 /// Anything that is not a throttle propagates on the first failure.
 ///
+/// The block is named on the way out, never on the way in: `throttle_backoff`
+/// classifies the endpoint's own words, and a block number is not one of them.
+///
 /// Generic over the fetch for the same reason the searches above it are: a
 /// throttled endpoint is the one thing a unit test cannot get from a real one.
 async fn block_timestamp_paced<F, Fut>(block: u64, fetch: F) -> Result<u64>
@@ -236,6 +239,12 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<u64>>,
 {
+    let name_the_block = |e: SwapError| match e {
+        SwapError::EthRpc(msg) => {
+            SwapError::EthRpc(format!("eth_getBlockByNumber({block}) failed: {msg}"))
+        }
+        other => other,
+    };
     let mut attempt = 1usize;
     loop {
         let err = match fetch().await {
@@ -244,7 +253,7 @@ where
         };
         let backoff = throttle_backoff(&err, attempt);
         if backoff.is_zero() || attempt as u32 > report::MAX_RATE_LIMIT_RETRIES {
-            return Err(err);
+            return Err(name_the_block(err));
         }
         warn!(
             block,
@@ -1141,6 +1150,36 @@ mod tests {
             calls.get() as u32,
             report::MAX_RATE_LIMIT_RETRIES + 1,
             "bounded by the module's own retry budget"
+        );
+    }
+
+    // Regression: a block number is not the endpoint's words. Any block in
+    // 11,429,xxx sits inside the pinned venue's history, and before the split a
+    // plain connection reset there read as a 429 — six WARN lines claiming a
+    // throttle nobody issued, and half a minute of backoff before the same error.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_on_a_block_numbered_11429517_is_not_read_as_a_throttle() {
+        let calls = std::cell::Cell::new(0usize);
+        let err = block_timestamp_paced(11_429_517, || {
+            calls.set(calls.get() + 1);
+            async { Err(SwapError::EthRpc("connection reset".into())) }
+        })
+        .await
+        .expect_err("a connection reset is still a failure");
+        assert_eq!(calls.get(), 1, "nothing here was worth waiting out");
+
+        let SwapError::EthRpc(msg) = err else {
+            panic!("a transport failure stays a transport failure: {err:?}");
+        };
+        assert!(
+            msg.contains("eth_getBlockByNumber(11429517)"),
+            "the block is named on what is displayed: {msg}"
+        );
+        assert!(msg.contains("connection reset"), "{msg}");
+        assert_eq!(
+            report::classify_rpc_failure(&msg),
+            report::RpcFailure::Other,
+            "and naming it cannot turn it into a throttle: {msg}"
         );
     }
 

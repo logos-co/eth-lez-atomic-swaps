@@ -128,16 +128,49 @@ pub enum RpcFailure {
     Other,
 }
 
+/// Does `text` mention `token` as a whole number rather than as a run of digits
+/// inside a longer one?
+///
+/// `429` and `-32005` are the only two numbers this module reads as a verdict,
+/// and both are short enough to appear inside a block number (11429517) or a
+/// different JSON-RPC code (-324290). A leading `-` is part of the token: it is
+/// what separates the JSON-RPC code from an unrelated 32005.
+fn mentions_number(text: &str, token: &str) -> bool {
+    let (signed, digits) = match token.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if (start > 0 && bytes[start - 1] == b'-') == signed && &text[start..i] == digits {
+            return true;
+        }
+    }
+    false
+}
+
 /// Classify a transport/RPC error message. Providers phrase both conditions a
 /// dozen ways and share no error code for the range case, so this matches on
 /// the wording — pure, and unit-tested against the phrasings actually seen.
+///
+/// The message must be the endpoint's own words. Callers add their own context
+/// (which block, which span) to what they display, not to what they classify.
 pub fn classify_rpc_failure(message: &str) -> RpcFailure {
     let m = message.to_ascii_lowercase();
     if m.contains("rate limit")
         || m.contains("ratelimit")
         || m.contains("too many requests")
-        || m.contains("429")
-        || m.contains("-32005")
+        || mentions_number(&m, "429")
+        || mentions_number(&m, "-32005")
     {
         return RpcFailure::RateLimited;
     }
@@ -1359,13 +1392,17 @@ where
 
 /// Fetch one block's timestamp. Separate from the searches above so they stay
 /// chain-free and unit-testable.
+///
+/// The error carries the endpoint's words and nothing else — no block number —
+/// so a caller may hand it to [`classify_rpc_failure`]. Naming the block is the
+/// caller's job, on the message it displays.
 pub async fn block_timestamp<P: Provider>(provider: &P, block: u64) -> Result<u64> {
     provider
         .get_block_by_number(block.into())
         .await
-        .map_err(|e| SwapError::EthRpc(format!("eth_getBlockByNumber({block}) failed: {e}")))?
+        .map_err(|e| SwapError::EthRpc(e.to_string()))?
         .map(|b| b.header.timestamp)
-        .ok_or_else(|| SwapError::EthRpc(format!("block {block} not found")))
+        .ok_or_else(|| SwapError::EthRpc("no such block".into()))
 }
 
 #[cfg(test)]
@@ -1967,6 +2004,48 @@ mod tests {
                 assert_eq!(w[0].1 + 1, w[1].0);
             }
         }
+    }
+
+    // The two numbers this classifier reads as a verdict are short enough to
+    // hide inside an unrelated one, and a wrong verdict here is either a burst
+    // that provokes the throttle or half a minute of waiting for a throttle
+    // nobody issued.
+    #[test]
+    fn only_a_standalone_429_or_32005_reads_as_a_throttle() {
+        for message in [
+            "HTTP error 429 with body: rate exceeded",
+            "server returned an error response: error code -32005: request limit reached",
+            "429 Too Many Requests",
+            "Too Many Requests",
+            "you have exceeded the rate limit",
+        ] {
+            assert_eq!(
+                classify_rpc_failure(message),
+                RpcFailure::RateLimited,
+                "{message:?}"
+            );
+        }
+
+        for message in [
+            "eth_getBlockByNumber(11429517) failed: connection reset",
+            "block 11429517 not found",
+            "eth_getLogs failed at block 1429: connection reset",
+            "server returned an error response: error code -324290: unknown",
+            "server returned an error response: error code -32000: header not found",
+            "connection refused",
+        ] {
+            assert_eq!(
+                classify_rpc_failure(message),
+                RpcFailure::Other,
+                "{message:?}"
+            );
+        }
+
+        // The range verdict is unaffected by the tightened number match.
+        assert_eq!(
+            classify_rpc_failure("query exceeds max block range 10000"),
+            RpcFailure::RangeTooWide
+        );
     }
 
     // A synthetic chain with 12s blocks: block n has timestamp 1_000 + 12n.

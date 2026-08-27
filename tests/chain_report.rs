@@ -564,3 +564,34 @@ async fn an_empty_oldest_end_is_the_operators_call_not_a_hard_refusal() {
     );
     assert_eq!(scan.tally.counts().attempted, 1);
 }
+
+/// A failure from `block_timestamp` must carry the endpoint's words alone: the
+/// `--since`/`--until` searches classify what it returns, and `429` hides
+/// inside plenty of block numbers on the pinned venue's own history. Asking a
+/// real node for a block it does not have is the cheapest way to get a real
+/// failure out of it.
+#[tokio::test]
+async fn a_block_lookup_failure_is_classified_on_the_endpoints_words_alone() {
+    let venue = setup().await;
+
+    let err = swap_orchestrator::eth::report::block_timestamp(venue.reader(), 11_429_517)
+        .await
+        .expect_err("anvil has no block 11429517");
+    let SwapError::EthRpc(msg) = err else {
+        panic!("a failed block lookup is an RPC failure, got: {err:?}");
+    };
+    assert_eq!(
+        swap_orchestrator::eth::report::classify_rpc_failure(&msg),
+        swap_orchestrator::eth::report::RpcFailure::Other,
+        "the block number is not the endpoint asking for fewer requests: {msg}"
+    );
+
+    // And a block it does have still answers with a timestamp.
+    let h = head(venue.taker(0)).await;
+    assert!(
+        swap_orchestrator::eth::report::block_timestamp(venue.reader(), h)
+            .await
+            .expect("the head has a timestamp")
+            > 0
+    );
+}
