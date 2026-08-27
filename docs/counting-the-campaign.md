@@ -277,7 +277,9 @@ the proven interval is `[oldest anchor, newest anchor]`, and each anchor is the
 first block *with logs* found walking inward from its end — up to
 `CANARY_PROBE_BLOCKS - 1` (15) blocks inside the scanned range. A pruning
 boundary landing in that 16-block margin at either end is the one gap this
-does not close. (This is also why the
+does not close — as is a span short enough (roughly 32 blocks) that the two
+inward walks meet on the same block, where the anchors dedupe to one and what
+is proven is a point rather than an interval. (This is also why the
 report talks HTTP rather than `wss://`: alloy's WebSocket transport splits a
 batch into separate sends, which would let the canary and the query it vouches
 for be answered by different nodes. Same host, same configured endpoint.)
@@ -293,24 +295,29 @@ the response does not say which. Only a successful, non-empty probe counts as
 evidence that the endpoint holds these blocks at all. Both ends are always
 probed, and the two ways that can fail are **not** the same thing:
 
-- **One end anchored, the other did not.** This is not ambiguous — the backend
-  demonstrably holds logs for one end of the range and demonstrably would not
-  produce any for the other, which is what a partial log index looks like. The
-  run is **always refused**, and `--allow-uncorroborated` does not apply to it:
-  the chain plainly has logs, so there is nothing for the operator to assert.
-  The refusal names which end failed.
-- **Neither end anchored.** Nothing was learned either way. The run is refused
-  by default for the same reason as above — its likeliest wrong answer is a
-  zero, and a zero from a pruned backend reads exactly like a quiet trial — but
-  this is the one case a localnet genuinely produces, so it is yours to assert
-  with `--allow-uncorroborated`, which downgrades the refusal to a printed
-  `NOTE` and `"corroborated": false` in the JSON.
+- **The probes came back empty** — at one end, or at both. This is
+  **ambiguous**, and the report says so rather than guessing: those blocks may
+  genuinely hold no logs, or the backend may not hold them, and an empty list
+  looks the same either way. Without an anchor at both ends nothing shows the
+  index covers the whole range, so the run is **refused by default** — its
+  likeliest wrong answer is a zero, and a zero from a pruned backend reads
+  exactly like a quiet trial. But this is a question *you* can answer: if you
+  know that range is genuinely log-free (a localnet, or a quiet stretch of a
+  testnet), `--allow-uncorroborated` downgrades the refusal to a printed `NOTE`
+  and `"corroborated": false` in the JSON. Any anchor that WAS found is still
+  batched with every query — overriding gives up the two-point interval proof,
+  not the evidence that exists.
+- **The probes errored.** The endpoint did not answer at all. That is a fact
+  about the endpoint rather than an open question about the chain, so
+  `--allow-uncorroborated` does **not** cover it and the run is refused either
+  way — as is an anchor that was corroborating and then stopped mid-scan.
+  Point `--eth-rpc-url` at an endpoint that serves historical logs reliably, or
+  narrow the window.
 
-Either way, point `--eth-rpc-url` at a full-history endpoint, or narrow the
-window to blocks it still retains. `"corroborated"` is never `false` unless
-someone passed that flag; without it, a published count is always a proven one.
-(A window that selects no blocks — `--since` in the future — queried nothing,
-so nothing went unproven and the field stays `true` alongside its zeroes.)
+`"corroborated"` is never `false` unless someone passed that flag; without it,
+a published count is always a proven one. (A window that selects no blocks —
+`--since` in the future — queried nothing, so nothing went unproven and the
+field stays `true` alongside its zeroes.)
 
 ---
 

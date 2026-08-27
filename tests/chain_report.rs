@@ -37,6 +37,10 @@ const MIN_TIMELOCK_DELTA: u64 = 60;
 
 const CHUNK: u64 = 1_000;
 
+/// Comfortably more than the report's inward canary walk reaches (16 blocks),
+/// so a scan starting at block 0 cannot anchor at its oldest end.
+const LOGLESS_PREFIX_BLOCKS: usize = 24;
+
 struct Venue {
     anvil: alloy::node_bindings::AnvilInstance,
     address: Address,
@@ -511,4 +515,52 @@ async fn a_proven_zero_is_reported_rather_than_refused() {
         .unwrap();
     assert!(real.corroborated);
     assert_eq!(real.tally.counts().attempted, 1);
+}
+
+/// The localnet shape the ambiguity rule exists for: a chain whose first blocks
+/// hold no logs at all — genesis plus a deployment that emits none — with real
+/// swap activity later. The oldest end cannot anchor and the newest can, but on
+/// a single-node anvil that answered every request that is evidence of nothing
+/// except quiet blocks, so it must be the operator's call rather than a
+/// refusal they cannot override.
+#[tokio::test]
+async fn an_empty_oldest_end_is_the_operators_call_not_a_hard_refusal() {
+    let venue = setup().await;
+    let m1 = venue.maker_address(0);
+
+    // Push the first log past the probe walk's reach from block 0.
+    for _ in 0..LOGLESS_PREFIX_BLOCKS {
+        warp(venue.taker(0), 0).await;
+    }
+    lock(&venue, venue.taker(0), m1, 0x51, 3_600).await;
+    let to = head(venue.taker(0)).await;
+    let window = ReportWindow {
+        locks_from: 0,
+        locks_to: to,
+        outcomes_to: to,
+    };
+
+    // Unproven is still not published by default...
+    let refused = collect_tally(venue.reader(), venue.address, &window, CHUNK, false)
+        .await
+        .expect_err("a scan anchored at only one end is not published by default");
+    let SwapError::EthLogsUncorroborated(msg) = refused else {
+        panic!("expected an uncorroborated-logs refusal, got: {refused:?}");
+    };
+    assert!(
+        msg.contains("--allow-uncorroborated"),
+        "an empty probe is ambiguous, so the override must be offered: {msg}"
+    );
+
+    // ...but nothing errored, so the operator may answer the question — and
+    // gets the real count, batched against the anchor that WAS found, not a
+    // zero and not a hard refusal.
+    let scan = collect_tally(venue.reader(), venue.address, &window, CHUNK, true)
+        .await
+        .expect("--allow-uncorroborated covers an ambiguous empty probe");
+    assert!(
+        !scan.corroborated,
+        "one anchor is not the two-point interval proof"
+    );
+    assert_eq!(scan.tally.counts().attempted, 1);
 }

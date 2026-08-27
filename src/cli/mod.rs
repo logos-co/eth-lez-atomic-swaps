@@ -274,9 +274,6 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Default tracing for non-infra/demo subcommands (infra/demo set up their own).
-    tracing_subscriber::fmt::init();
-
     // Check for --env-file before full parse so dotenvy loads first.
     // This ensures env vars are available when clap reads `env = "..."` fallbacks.
     let env_file = std::env::args()
@@ -300,9 +297,15 @@ pub async fn run() -> Result<()> {
     // source than the per-maker ops ledger. Short-circuit it into its own
     // parser (same shape as the demo/infra short-circuits above; it stays in
     // `Commands` so `--help` still lists it).
+    // Its stdout is a data channel (`--json` is the scripting interface for the
+    // trial's headline number), so it installs its own stderr-writing
+    // subscriber rather than the stdout default below.
     if std::env::args().skip(1).any(|a| a == report::COMMAND_NAME) {
         return report::run_standalone().await;
     }
+
+    // Default tracing for every other subcommand (infra/demo set up their own).
+    tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
     // The loop mode needs the timelock *durations* (SwapConfig only keeps

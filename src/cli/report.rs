@@ -67,11 +67,13 @@ pub struct ChainReportArgs {
     #[arg(long, default_value_t = DEFAULT_CHUNK_BLOCKS)]
     chunk_blocks: u64,
 
-    /// Publish a count no canary could prove, for a chain quiet enough to have
-    /// no logs to anchor on (a localnet). Without it such a scan is REFUSED:
-    /// an endpoint that has pruned this era's logs answers with an empty list
-    /// exactly like a quiet chain does, and the number it would print is a
-    /// zero indistinguishable from a quiet trial.
+    /// Publish a count whose canary probes came back empty at one or both ends
+    /// of the scan — your assertion that those blocks really are log-free.
+    /// Without it such a scan is REFUSED, because an endpoint that has pruned
+    /// this era's logs answers with an empty list exactly like a quiet chain
+    /// does, and the number it would print is a zero indistinguishable from a
+    /// quiet trial. It does NOT cover an endpoint whose probes errored: that
+    /// is a fault in the endpoint, and it is refused either way.
     #[arg(long)]
     allow_uncorroborated: bool,
 }
@@ -146,7 +148,17 @@ enum ChainReportCommand {
 }
 
 /// Entry point for the short-circuit in [`crate::cli::run`].
+///
+/// Installs its own subscriber writing to **stderr**, unlike the stdout default
+/// every other subcommand gets. This command's stdout carries the report — and
+/// under `--json`, nothing but the report: the reconnect notice below fires on
+/// exactly the runs a script is most likely to be piping through `jq`, and a
+/// WARN line ahead of the JSON object would break it.
 pub async fn run_standalone() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
     let cli = ChainReportCli::parse();
     let ChainReportCommand::ChainReport(args) = cli.command;
     cmd_chain_report(args, cli.json).await
@@ -412,11 +424,11 @@ fn print_report(report: &ChainReport, json: bool) -> Result<()> {
         println!("  outcomes through: block {}", report.outcomes_to_block);
         if !report.corroborated {
             println!(
-                "  NOTE: --allow-uncorroborated was passed and no corroboration canary could \
-                 be anchored (no logs near block {}), so these counts are UNPROVEN: an empty log \
+                "  NOTE: --allow-uncorroborated was passed and this scan could not be anchored \
+                 at both ends of blocks {}-{}, so these counts are UNPROVEN: an empty log \
                  response could not be told apart from an RPC backend that does not hold these \
                  blocks' logs.",
-                report.from_block
+                report.from_block, report.outcomes_to_block
             );
         }
     }
