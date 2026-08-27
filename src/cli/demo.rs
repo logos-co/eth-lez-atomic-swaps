@@ -40,7 +40,12 @@ pub struct DemoArgs {
 }
 
 pub async fn cmd_demo(args: DemoArgs) -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .try_init();
 
     println!();
     println!("=== Atomic Swap Demo (LEZ + Ethereum) ===");

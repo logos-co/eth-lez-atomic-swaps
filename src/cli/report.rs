@@ -72,13 +72,15 @@ pub struct ChainReportArgs {
     #[arg(long, default_value_t = DEFAULT_CHUNK_BLOCKS)]
     chunk_blocks: u64,
 
-    /// Publish a count whose canary probes came back empty at one or both ends
-    /// of the scan — your assertion that those blocks really are log-free.
-    /// Without it such a scan is REFUSED, because an endpoint that has pruned
-    /// this era's logs answers with an empty list exactly like a quiet chain
-    /// does, and the number it would print is a zero indistinguishable from a
-    /// quiet trial. It does NOT cover an endpoint whose probes errored: that
-    /// is a fault in the endpoint, and it is refused either way.
+    /// Publish a count whose canary probes were ANSWERED at one or both ends of
+    /// the scan and reported no logs — your assertion that those blocks really
+    /// are log-free. Without it such a scan is REFUSED, because an endpoint
+    /// that has pruned this era's logs answers with an empty list exactly like
+    /// a quiet chain does, and the number it would print is a zero
+    /// indistinguishable from a quiet trial. It has nothing to bear on a walk
+    /// the endpoint never answered at all — every probe errored, or was
+    /// throttled, or any mix — because nothing about the chain was observed
+    /// there; that is refused either way.
     #[arg(long)]
     allow_uncorroborated: bool,
 }
@@ -159,9 +161,19 @@ enum ChainReportCommand {
 /// under `--json`, nothing but the report: the reconnect notice below fires on
 /// exactly the runs a script is most likely to be piping through `jq`, and a
 /// WARN line ahead of the JSON object would break it.
+///
+/// `RUST_LOG` still applies, defaulting to INFO. The `debug!` trail in
+/// [`crate::eth::report`] — which end missed, what each canary scored, why a
+/// chunk was retried — exists to diagnose the load-balanced-endpoint flakiness
+/// this whole command is built around, and is worthless if it cannot be turned
+/// on.
 pub async fn run_standalone() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
         .try_init()
         .ok();
     let cli = ChainReportCli::parse();
@@ -172,6 +184,39 @@ pub async fn run_standalone() -> Result<()> {
 // ---------------------------------------------------------------------------
 // The command
 // ---------------------------------------------------------------------------
+
+/// Whether an opening-handshake failure is worth redrawing a backend for.
+///
+/// Only a transport fault is. A version skew ([`SwapError::EthAbiMismatch`]) is
+/// a verdict the endpoint already delivered — the deployment will still be the
+/// wrong era on the next connection, and retrying it five times would blunt the
+/// loud, immediate startup refusal `eth::client` is built around. Same for a
+/// config error: nothing about it changes on a reconnect.
+fn is_retryable_handshake_failure(err: &SwapError) -> bool {
+    matches!(err, SwapError::EthRpc(_))
+}
+
+/// The three RPCs a run needs before it can even name its window: the era
+/// handshake, the chain id, and the head.
+///
+/// The handshake is the same one every client runs, and for the same reason: a
+/// wrong-era contract does not error on a log query, it matches nothing. A
+/// report that silently prints zeroes is worse than one that refuses to run.
+async fn opening_handshake(
+    provider: &alloy::providers::DynProvider,
+    address: Address,
+) -> Result<(u64, u64, u64)> {
+    let interface_version = verify_interface_version(provider, address).await?;
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .map_err(|e| SwapError::EthRpc(format!("eth_chainId failed: {e}")))?;
+    let head = provider
+        .get_block_number()
+        .await
+        .map_err(|e| SwapError::EthRpc(format!("eth_blockNumber failed: {e}")))?;
+    Ok((interface_version, chain_id, head))
+}
 
 /// The oldest block a window may start at, for the venue actually being
 /// measured.
@@ -231,21 +276,30 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
         )));
     }
 
-    let provider = connect(&args.eth_rpc_url).await?;
-
-    // The same startup handshake every client runs, and for the same reason: a
-    // wrong-era contract does not error on a log query, it matches nothing. A
-    // report that silently prints zeroes is worse than one that refuses to run.
-    let interface_version = verify_interface_version(&provider, address).await?;
-
-    let chain_id = provider
-        .get_chain_id()
-        .await
-        .map_err(|e| SwapError::EthRpc(format!("eth_chainId failed: {e}")))?;
-    let head = provider
-        .get_block_number()
-        .await
-        .map_err(|e| SwapError::EthRpc(format!("eth_blockNumber failed: {e}")))?;
+    // The opening RPCs get the same fresh-connection retry the scan does. They
+    // run against the same load-balanced endpoint, and a 429 on the very first
+    // eth_call is documented expected behaviour there — dying on it while an
+    // uncorroborated scan gets five backends would be arbitrary.
+    let mut attempt = 1usize;
+    let (provider, interface_version, chain_id, head) = loop {
+        let provider = connect(&args.eth_rpc_url).await?;
+        match opening_handshake(&provider, address).await {
+            Ok((version, chain_id, head)) => break (provider, version, chain_id, head),
+            Err(e) if !is_retryable_handshake_failure(&e) => return Err(e),
+            Err(e) if attempt < MAX_SCAN_ATTEMPTS => {
+                warn!(
+                    attempt,
+                    %e,
+                    "chain-report: reconnecting to reach a different RPC backend"
+                );
+                attempt += 1;
+            }
+            Err(SwapError::EthRpc(msg)) => {
+                return Err(SwapError::EthRpc(exhausted_message(&msg)));
+            }
+            Err(e) => return Err(e),
+        }
+    };
 
     let default_from = search_floor(is_pinned_venue, args.from_block);
     let from_block = match args.since {
@@ -764,6 +818,12 @@ mod tests {
                 !msg.contains("Redeploy"),
                 "nothing established anything about the deployment: {msg}"
             );
+            // ...and it was retried on a fresh connection each time, exactly as
+            // an uncorroborated scan is, rather than dying on the first RPC.
+            assert!(
+                msg.contains("fresh connection") && msg.contains(&MAX_SCAN_ATTEMPTS.to_string()),
+                "a transport fault on the opening handshake must redraw a backend: {msg}"
+            );
         }
     }
 
@@ -894,6 +954,33 @@ mod tests {
             assert!(msg.contains(&MAX_SCAN_ATTEMPTS.to_string()));
             assert!(msg.contains("fresh connection"));
         }
+    }
+
+    // Reconnecting redraws a backend, which can only help a fault that a
+    // different backend would not have. A wrong-era contract is not one of
+    // those: it is a verdict the endpoint already delivered, and retrying it
+    // five times would blunt the immediate startup refusal it is meant to be.
+    #[test]
+    fn only_a_transport_fault_earns_a_reconnect() {
+        assert!(is_retryable_handshake_failure(&SwapError::EthRpc(
+            "HTTP error 429 with body: {\"error\":{\"code\":-32005}}".into()
+        )));
+        assert!(is_retryable_handshake_failure(&SwapError::EthRpc(
+            "connection refused".into()
+        )));
+
+        assert!(
+            !is_retryable_handshake_failure(&SwapError::EthAbiMismatch(
+                "reports INTERFACE_VERSION 1, but this app build speaks 2".into()
+            )),
+            "a version skew is the same on every backend"
+        );
+        assert!(!is_retryable_handshake_failure(&SwapError::InvalidConfig(
+            "--eth-rpc-url must be an http:// or https:// endpoint".into()
+        )));
+        assert!(!is_retryable_handshake_failure(
+            &SwapError::EthLogsUncorroborated("blocks 1-2: ...".into())
+        ));
     }
 
     #[tokio::test]

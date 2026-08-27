@@ -46,7 +46,12 @@ fn spawn_anvil_log_forwarder(stdout: std::process::ChildStdout) {
 // ── Main command ───────────────────────────────────────────────────
 
 pub async fn cmd_infra() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 
     println!();
     println!("\x1b[1m=== Atomic Swap Infrastructure ===\x1b[0m");

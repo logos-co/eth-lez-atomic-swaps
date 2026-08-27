@@ -592,9 +592,11 @@ pub enum Anchoring {
         /// What its probes actually did.
         miss: ProbeMiss,
     },
-    /// Neither end anchored. Either the chain really is that quiet (a localnet)
-    /// or the endpoint cannot serve this era's logs at all, and nothing in the
-    /// responses tells the two apart, so a count taken here is unproven.
+    /// Neither end anchored. What that means depends on whether the probes were
+    /// answered at all (see [`ProbeMiss::answered_successfully`]): answered and
+    /// empty leaves "the chain is quiet" and "this endpoint has no index for
+    /// this era" indistinguishable, while a walk that was only errored or only
+    /// throttled established neither. Either way the count is unproven.
     Unanchored { oldest: ProbeMiss, newest: ProbeMiss },
 }
 
