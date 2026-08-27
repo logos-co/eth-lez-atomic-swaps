@@ -1,10 +1,28 @@
 # Offer-publisher sidecar
 
 A **headless Node.js daemon** — not a website — spawned and supervised by the
-liquidity bot (`swap-cli maker --loop`). It connects once to the logos.dev
-delivery fleet (cluster 2, over raw TCP via `@libp2p/tcp`) and **republishes the
-maker's offer** every `OFFER_HEARTBEAT_SECS` seconds with fresh absolute
-timelocks.
+liquidity bot (`swap-cli maker --loop`). It connects once to a delivery fleet
+(over raw TCP via `@libp2p/tcp`) and **republishes the maker's offer** every
+`OFFER_HEARTBEAT_SECS` seconds with fresh absolute timelocks.
+
+## Which fleet: `SWAP_FLEET`
+
+| `SWAP_FLEET` | fleet | cluster | pubsub topic |
+| --- | --- | --- | --- |
+| unset (default) or `logos.dev` | logos.dev | 3 | `/waku/2/rs/3/7` |
+| `logos.test` | logos.test | 2 | `/waku/2/rs/2/7` |
+
+Every script here honours it (`publish-offer.mjs`, `watch-offers.mjs`,
+`smoke.mjs`, `smoke-rfq.mjs`) and prints the fleet it chose on startup. Any
+other value — including an empty one — **aborts at import**; there is no
+fallback, because a maker on the wrong fleet publishes into the void while
+logging success. `fleet.test.mjs` pins both tables and that failure.
+
+The live market and the shipped app are on **logos.dev**; `logos.test` exists
+so a maker can be pointed at the migration fleet ahead of the app-side switch
+(PR #125), which is what makes that migration provable end-to-end. One process
+serves one fleet — dual-homing means running one publisher per fleet. Wiring
+for the container case: `deploy/docker-compose.multi.yml`.
 
 ## Why a separate Node process (and not pure Rust)
 
@@ -47,11 +65,13 @@ uses with `--publisher-script` / `OFFER_PUBLISHER_SCRIPT`.
 Connectivity smoke test (publish -> fleet -> subscribe round-trip):
 
 ```sh
-npm run smoke
+npm run smoke                        # logos.dev (default)
+SWAP_FLEET=logos.test npm run smoke  # the migration fleet
 ```
 
 ## Files
 
 - `publish-offer.mjs` — the heartbeat sidecar (spawned by `swap-cli maker --loop`).
-- `fleet.mjs` — logos.dev fleet constants + TCP node/dial helpers (Node.js only).
+- `fleet.mjs` — the `SWAP_FLEET` fleet table (logos.dev / logos.test) + TCP node/dial helpers (Node.js only).
+- `fleet.test.mjs` — contract tests for that table and the selector (`node fleet.test.mjs`, no network).
 - `smoke.mjs` — standalone fleet-connectivity check (`npm run smoke`).

@@ -208,7 +208,8 @@ NODE_PREFLIGHT_TESTS := \
 	tests/offer-filter.test.mjs \
 	tests/maker-balance-refresh-contract.test.mjs \
 	tests/basecamp-ui-process-match.test.mjs \
-	offer-publisher/rfq.test.mjs
+	offer-publisher/rfq.test.mjs \
+	offer-publisher/fleet.test.mjs
 
 preflight-node-tests:
 	@for f in $(NODE_PREFLIGHT_TESTS); do \

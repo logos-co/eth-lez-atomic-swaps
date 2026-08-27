@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // External liveness check: subscribes to /atomic-swaps/1/offers/json on the
-// logos.dev fleet and prints each offer as it arrives, with its age since
-// the offer's own `lez_timelock`/`eth_timelock` fields imply it was minted.
+// fleet selected by SWAP_FLEET (default logos.dev; SWAP_FLEET=logos.test
+// watches the migration fleet) and prints each offer as it arrives, with its
+// age since the offer's own `lez_timelock`/`eth_timelock` fields imply it was
+// minted.
 //
 // Run this from OUTSIDE the machine hosting the maker (your laptop, not the
 // VPS) — that is the actual proof the fleet is relaying the maker's
@@ -9,12 +11,18 @@
 // The fleet runs store=false: nothing is retained, so an offer this script
 // never sees never reached anyone either.
 //
-// Usage: node watch-offers.mjs [--timeout-secs N]
+// Usage: [SWAP_FLEET=logos.test] node watch-offers.mjs [--timeout-secs N]
 //   (no timeout by default — Ctrl-C to stop)
 
 import { createDecoder, bytesToUtf8 } from "@waku/sdk";
 import { createRoutingInfo } from "@waku/utils";
-import { OFFERS_CONTENT_TOPIC, NETWORK_CONFIG, createFleetNode, dialFleet } from "./fleet.mjs";
+import {
+  OFFERS_CONTENT_TOPIC,
+  NETWORK_CONFIG,
+  FLEET_NAME,
+  createFleetNode,
+  dialFleet,
+} from "./fleet.mjs";
 
 const log = (msg) => console.log(`[watch-offers] ${msg}`);
 
@@ -23,6 +31,7 @@ const timeoutSecs =
   timeoutArgIdx !== -1 ? Number(process.argv[timeoutArgIdx + 1]) : null;
 
 const routingInfo = createRoutingInfo(NETWORK_CONFIG, { contentTopic: OFFERS_CONTENT_TOPIC });
+log(`fleet ${FLEET_NAME}`);
 log(`content topic ${OFFERS_CONTENT_TOPIC}`);
 log(
   `cluster ${NETWORK_CONFIG.clusterId}, ${NETWORK_CONFIG.numShardsInCluster} shards -> pubsub topic ${routingInfo.pubsubTopic}`

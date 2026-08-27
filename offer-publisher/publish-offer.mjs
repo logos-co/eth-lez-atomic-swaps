@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Offer publisher — long-lived sidecar spawned by `swap-cli maker --loop`.
-// Connects once to the logos.dev fleet (TCP, Node.js) and makes the maker's
-// offer visible two ways (the fleet runs store=false, so an offer is only
-// visible while it is being (re)published):
+// Connects once to the delivery fleet selected by SWAP_FLEET (TCP, Node.js;
+// default logos.dev — see fleet.mjs) and makes the maker's offer visible two
+// ways (the fleet runs store=false, so an offer is only visible while it is
+// being (re)published):
 //
 //  1. RFQ responder (the accelerator): filter-subscribes to the anonymous
 //     offer-requests topic and, when a taker asks, publishes the current offer
@@ -32,6 +33,11 @@
 //                                falls back to the legacy OFFER_HEARTBEAT_SECS
 //                                that swap-cli still sets, else 30)
 //   RESPONSE_COOLDOWN_SECS       min seconds between RFQ responses (default 8)
+//   SWAP_FLEET                   which fleet to publish on: unset/logos.dev
+//                                (default) or logos.test. An unknown value
+//                                aborts at startup — see fleet.mjs. One
+//                                publisher serves ONE fleet; dual-homing a
+//                                maker means running one per fleet.
 
 import { createDecoder, createEncoder, utf8ToBytes } from "@waku/sdk";
 import { createRoutingInfo } from "@waku/utils";
@@ -39,6 +45,7 @@ import {
   OFFERS_CONTENT_TOPIC,
   OFFER_REQUESTS_CONTENT_TOPIC,
   NETWORK_CONFIG,
+  FLEET_NAME,
   createFleetNode,
   dialFleet,
 } from "./fleet.mjs";
@@ -96,9 +103,12 @@ const routingInfo = createRoutingInfo(NETWORK_CONFIG, {
 });
 const encoder = createEncoder({ contentTopic: OFFERS_CONTENT_TOPIC, routingInfo });
 
+// Name the fleet and its pubsub topic up front: an offer published on the
+// wrong fleet looks exactly like a healthy one in every later log line.
 log(
-  `connecting to logos.dev fleet ` +
-    `(fallback heartbeat ${cfg.fallbackHeartbeatSecs}s, ` +
+  `connecting to ${FLEET_NAME} fleet ` +
+    `(cluster ${NETWORK_CONFIG.clusterId} -> ${routingInfo.pubsubTopic}, ` +
+    `fallback heartbeat ${cfg.fallbackHeartbeatSecs}s, ` +
     `RFQ response cooldown ${cfg.responseCooldownSecs}s)...`
 );
 const node = await createFleetNode();

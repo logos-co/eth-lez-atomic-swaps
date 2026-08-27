@@ -1,17 +1,20 @@
 #!/usr/bin/env node
-// Smoke test: prove Node.js @waku/sdk connectivity to the logos.dev fleet on
-// the offers channel. Connects over TCP (browser transport is WSS — see the
-// BLOCKED note in README.md), subscribes via filter, publishes a canary offer
-// via lightpush, and asserts the canary comes back through the filter
-// subscription (full publish -> fleet -> subscribe round-trip).
+// Smoke test: prove Node.js @waku/sdk connectivity to the fleet selected by
+// SWAP_FLEET (default logos.dev) on the offers channel. Connects over TCP
+// (browser transport is WSS — see the BLOCKED note in README.md), subscribes
+// via filter, publishes a canary offer via lightpush, and asserts the canary
+// comes back through the filter subscription (full publish -> fleet ->
+// subscribe round-trip). It publishes on the REAL offers topic of whichever
+// fleet is selected.
 //
-// Usage: node smoke.mjs            (exit 0 = round-trip verified)
+// Usage: [SWAP_FLEET=logos.test] node smoke.mjs   (exit 0 = round-trip verified)
 
 import { createDecoder, createEncoder, utf8ToBytes, bytesToUtf8, waitForRemotePeer, Protocols } from "@waku/sdk";
 import { createRoutingInfo } from "@waku/utils";
 import {
   OFFERS_CONTENT_TOPIC,
   NETWORK_CONFIG,
+  FLEET_NAME,
   createFleetNode,
   dialFleet,
 } from "./fleet.mjs";
@@ -30,6 +33,7 @@ const timeout = (ms, label) =>
 const routingInfo = createRoutingInfo(NETWORK_CONFIG, {
   contentTopic: OFFERS_CONTENT_TOPIC,
 });
+log(`fleet ${FLEET_NAME}`);
 log(`content topic ${OFFERS_CONTENT_TOPIC}`);
 log(`cluster ${NETWORK_CONFIG.clusterId}, ${NETWORK_CONFIG.numShardsInCluster} shards -> pubsub topic ${routingInfo.pubsubTopic}`);
 
