@@ -247,8 +247,9 @@ alongside the original. A suggested spread (the original `maker` sits at
 The maker binary runs exactly one offer per loop, and each offer must be
 backed by a distinct escrow account: a distinct `ETH_RECIPIENT_ADDRESS` and
 its own LEZ signing account holding that offer's inventory. So N offers = N
-instances. They share only the immutable bits — the image, the fleet config
-baked into `offer-publisher/fleet.mjs`, and the public testnet endpoints.
+instances. They share only the immutable bits — the image, the fleet tables in
+`offer-publisher/fleet.mjs` (which fleet each instance publishes on is
+per-container, `SWAP_FLEET` — see step 4), and the public testnet endpoints.
 
 > **HARD INVARIANT — distinct `ETH_RECIPIENT_ADDRESS` per maker, fleet-wide.**
 > The maker matches an incoming ETH lock purely by `recipient ==
