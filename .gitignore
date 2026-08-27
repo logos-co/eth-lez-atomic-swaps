@@ -79,3 +79,7 @@ result-basecamp
 
 # Basecamp-native UI smoke-test diagnostics
 /artifacts/basecamp-ui-smoke/
+
+# Python bytecode (e.g. from running .github/scripts locally)
+__pycache__/
+*.pyc

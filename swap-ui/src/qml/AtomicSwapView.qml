@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
 import SwapFormat
+import SwapCopy
 
 // The app shell: navigation, the account strip, and the content stack.
 //
@@ -201,6 +202,58 @@ Item {
             if (swapBackend.refundsLoading) root.noticeError = ""
         }
     }
+
+    // The same failure, twice, on one screen. handleTakerFinished() writes
+    // takerResultJson (the "Your swap" receipt card) and then calls
+    // setResultStatus(), which writes errorMessage (this strip) — one backend
+    // event, two surfaces. On 0.4.4 that put the raw JSON-RPC insufficient-funds
+    // text on screen in both places; #157 translated both into the same plain
+    // sentence, which still reads as two separate problems ~200px apart.
+    //
+    // The receipt card is the better home for a failure that finished a run:
+    // it is attached to the swap that failed, HistoryView re-renders the
+    // identical card for the archived copy, and an error receipt has nothing
+    // else in it (every evidence row is hidden behind !isError) — take the
+    // sentence out and it is a bare "ERROR" box.
+    //
+    // So the GLOBAL notice stands down while the tab that owns that receipt is
+    // the one being read, and returns the moment the user navigates away —
+    // which is precisely when a global notice earns its place, since the copy
+    // sends them to the Setup tab. Nothing else changes: noticeError still
+    // latches, dismissal still works, and every failure that produces no
+    // receipt (start failures, config, balances, refunds) is untouched.
+    //
+    // Both helpers are PURE — everything they need is an argument — so
+    // tests/insufficient-eth-guard.test.mjs evaluates them straight out of this
+    // file rather than restating the rule in JavaScript.
+    function resultError(resultJson) {
+        if (!resultJson) return ""
+        // Mirrors ReceiptCard's own parse, including its fallback of treating
+        // unparseable JSON as the error text itself.
+        try {
+            var parsed = JSON.parse(resultJson)
+            return parsed && parsed.error !== undefined ? String(parsed.error) : ""
+        } catch (e) {
+            return resultJson
+        }
+    }
+
+    function noticeDuplicatesReceipt(noticeText, currentTabIndex, receiptTabIndex,
+                                     receiptHeadline) {
+        if (noticeText === "") return false
+        if (currentTabIndex !== receiptTabIndex) return false
+        return receiptHeadline !== "" && receiptHeadline === noticeText
+    }
+
+    // Only the taker receipt can duplicate: MakerView's ReceiptCard is built
+    // from loopReceipt (completed sales only) and RefundView's ResultCard shows
+    // the raw error, not this sentence.
+    readonly property bool noticeOnReceipt:
+        root.noticeDuplicatesReceipt(
+            root.noticeError,
+            tabBar.currentIndex,
+            root.indexOfTab("swap"),
+            Copy.friendlyError(root.resultError(swapBackend.takerResultJson)))
 
     Connections {
         target: swapBackend
@@ -474,7 +527,7 @@ Item {
         Rectangle {
             id: errorStrip
             Layout.fillWidth: true
-            visible: root.noticeError !== ""
+            visible: root.noticeError !== "" && !root.noticeOnReceipt
             implicitHeight: visible ? errorRow.implicitHeight + Theme.spacingNormal : 0
             color: Qt.rgba(Theme.toneProblem.r, Theme.toneProblem.g,
                            Theme.toneProblem.b, 0.12)
