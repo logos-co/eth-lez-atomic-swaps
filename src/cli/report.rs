@@ -196,19 +196,20 @@ fn is_retryable_handshake_failure(err: &SwapError) -> bool {
     matches!(err, SwapError::EthRpc(_))
 }
 
-/// How long to wait before redrawing a backend after a retryable handshake
-/// failure.
+/// How long to wait before retrying `err`, for every request this command
+/// makes outside `eth::report`'s own scan loop.
 ///
 /// A 429 is the endpoint asking for FEWER requests (see
-/// [`report::RpcFailure`]), so reconnecting immediately fires the next
-/// `eth_call` within milliseconds — the same burst shape that provoked the
-/// throttle, which would spend all five attempts making it worse. Every other
-/// transport fault gets a different backend by reconnecting, and waiting buys
-/// nothing.
+/// [`report::RpcFailure`]), so retrying immediately fires the next request
+/// within milliseconds — the same burst shape that provoked the throttle. Every
+/// other transport fault is answered by drawing a different backend, and
+/// waiting buys nothing, so this returns zero and the caller decides.
 ///
-/// The schedule is the one `scan_range` already applies to a throttled chunk,
-/// doubling per attempt rather than inventing a second policy.
-fn handshake_retry_backoff(err: &SwapError, attempt: usize) -> std::time::Duration {
+/// A zero duration therefore reads as "not a throttle". Both callers rely on
+/// that, which is what keeps this the single rate-limit policy on the path
+/// rather than one per call site. The schedule is the one `scan_range` already
+/// applies to a throttled chunk.
+fn throttle_backoff(err: &SwapError, attempt: usize) -> std::time::Duration {
     match err {
         SwapError::EthRpc(msg)
             if report::classify_rpc_failure(msg) == report::RpcFailure::RateLimited =>
@@ -216,6 +217,44 @@ fn handshake_retry_backoff(err: &SwapError, attempt: usize) -> std::time::Durati
             report::RATE_LIMIT_BACKOFF * 2u32.pow((attempt as u32).saturating_sub(1).min(6))
         }
         _ => std::time::Duration::ZERO,
+    }
+}
+
+/// Fetch one block's timestamp, waiting out a throttle rather than dying on it.
+///
+/// The `--since`/`--until` binary searches issue up to ~17 serial
+/// `eth_getBlockByNumber` calls per bound over the pinned venue's history —
+/// exactly the burst the endpoint answers with a 429. Retrying the SAME block
+/// is right here: unlike a scan, there is no other backend to prefer and
+/// nothing to re-anchor, only a request the endpoint asked us to slow down.
+/// Anything that is not a throttle propagates on the first failure.
+///
+/// Generic over the fetch for the same reason the searches above it are: a
+/// throttled endpoint is the one thing a unit test cannot get from a real one.
+async fn block_timestamp_paced<F, Fut>(block: u64, fetch: F) -> Result<u64>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<u64>>,
+{
+    let mut attempt = 1usize;
+    loop {
+        let err = match fetch().await {
+            Ok(timestamp) => return Ok(timestamp),
+            Err(e) => e,
+        };
+        let backoff = throttle_backoff(&err, attempt);
+        if backoff.is_zero() || attempt as u32 > report::MAX_RATE_LIMIT_RETRIES {
+            return Err(err);
+        }
+        warn!(
+            block,
+            attempt,
+            ?backoff,
+            %err,
+            "chain-report: endpoint throttled the window search, backing off before retrying"
+        );
+        tokio::time::sleep(backoff).await;
+        attempt += 1;
     }
 }
 
@@ -310,13 +349,14 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
             Ok((version, chain_id, head)) => break (provider, version, chain_id, head),
             Err(e) if !is_retryable_handshake_failure(&e) => return Err(e),
             Err(e) if attempt < MAX_SCAN_ATTEMPTS => {
-                let backoff = handshake_retry_backoff(&e, attempt);
-                warn!(
-                    attempt,
-                    ?backoff,
-                    %e,
+                let backoff = throttle_backoff(&e, attempt);
+                let doing = if backoff.is_zero() {
                     "chain-report: reconnecting to reach a different RPC backend"
-                );
+                } else {
+                    "chain-report: endpoint throttled the opening handshake, backing off before \
+                     retrying"
+                };
+                warn!(attempt, ?backoff, %e, "{doing}");
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
             }
@@ -327,11 +367,12 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
         }
     };
 
+    let rpc = &provider;
     let default_from = search_floor(is_pinned_venue, args.from_block);
     let from_block = match args.since {
         Some(ts) => {
             match report::first_block_at_or_after(default_from, head, ts, |b| {
-                report::block_timestamp(&provider, b)
+                block_timestamp_paced(b, move || report::block_timestamp(rpc, b))
             })
             .await?
             {
@@ -346,7 +387,7 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
     let to_block = match args.until {
         Some(ts) => {
             match report::last_block_at_or_before(from_block.min(head), head, ts, |b| {
-                report::block_timestamp(&provider, b)
+                block_timestamp_paced(b, move || report::block_timestamp(rpc, b))
             })
             .await?
             {
@@ -1010,11 +1051,12 @@ mod tests {
     }
 
     // Reconnecting is what gets past a pruned backend, but it is the wrong
-    // answer to a 429: the next eth_call goes out within milliseconds, which is
+    // answer to a 429: the next request goes out within milliseconds, which is
     // the burst that provoked the throttle in the first place. A throttled
-    // handshake must wait; anything else should redraw a backend promptly.
+    // request must wait; anything else should be retried or surfaced promptly.
+    // Both throttled call sites on this path read the same zero/non-zero answer.
     #[test]
-    fn only_a_throttled_handshake_waits_before_redrawing_a_backend() {
+    fn only_a_throttled_request_waits_before_being_retried() {
         let throttled = SwapError::EthRpc(
             "HTTP error 429 with body: {\"error\":{\"code\":-32005,\"message\":\"Rate limit \
              exceeded\"}}"
@@ -1022,18 +1064,18 @@ mod tests {
         );
         // The schedule `scan_range` already uses for a throttled chunk.
         assert_eq!(
-            handshake_retry_backoff(&throttled, 1),
+            throttle_backoff(&throttled, 1),
             report::RATE_LIMIT_BACKOFF
         );
         assert_eq!(
-            handshake_retry_backoff(&throttled, 2),
+            throttle_backoff(&throttled, 2),
             report::RATE_LIMIT_BACKOFF * 2
         );
         assert_eq!(
-            handshake_retry_backoff(&throttled, 3),
+            throttle_backoff(&throttled, 3),
             report::RATE_LIMIT_BACKOFF * 4
         );
-        assert!(handshake_retry_backoff(&throttled, 1) > std::time::Duration::ZERO);
+        assert!(throttle_backoff(&throttled, 1) > std::time::Duration::ZERO);
 
         // A different backend fixes these, so waiting buys nothing.
         for err in [
@@ -1042,11 +1084,64 @@ mod tests {
             SwapError::EthAbiMismatch("reports INTERFACE_VERSION 1".into()),
         ] {
             assert_eq!(
-                handshake_retry_backoff(&err, 1),
+                throttle_backoff(&err, 1),
                 std::time::Duration::ZERO,
                 "{err:?} is not a throttle"
             );
         }
+    }
+
+    // The window search is ~17 serial eth_getBlockByNumber calls per bound over
+    // the pinned venue's history, which is the burst shape this endpoint answers
+    // with a 429. It must wait that out rather than abort the run — but only for
+    // a throttle; anything else has nothing to gain from asking again.
+    #[tokio::test(start_paused = true)]
+    async fn the_window_search_waits_out_a_throttle_but_not_other_failures() {
+        let calls = std::cell::Cell::new(0usize);
+        let ts = block_timestamp_paced(11_417_462, || {
+            let n = calls.get() + 1;
+            calls.set(n);
+            async move {
+                if n <= 2 {
+                    Err(SwapError::EthRpc(
+                        "HTTP error 429 with body: {\"error\":{\"code\":-32005}}".into(),
+                    ))
+                } else {
+                    Ok(1_787_270_400)
+                }
+            }
+        })
+        .await
+        .expect("a throttle is waited out, not fatal");
+        assert_eq!(ts, 1_787_270_400);
+        assert_eq!(calls.get(), 3, "both throttled replies were retried");
+
+        // Not a throttle: surfaced on the first failure, unchanged.
+        let calls = std::cell::Cell::new(0usize);
+        let err = block_timestamp_paced(11_417_462, || {
+            calls.set(calls.get() + 1);
+            async { Err(SwapError::EthRpc("block 11417462 not found".into())) }
+        })
+        .await
+        .expect_err("a non-throttle failure is not retried");
+        assert!(matches!(err, SwapError::EthRpc(ref m) if m.contains("not found")));
+        assert_eq!(calls.get(), 1, "asking the same node again buys nothing");
+
+        // A throttle that never clears still gives up rather than spinning.
+        let calls = std::cell::Cell::new(0usize);
+        assert!(
+            block_timestamp_paced(11_417_462, || {
+                calls.set(calls.get() + 1);
+                async { Err(SwapError::EthRpc("429 Too Many Requests".into())) }
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            calls.get() as u32,
+            report::MAX_RATE_LIMIT_RETRIES + 1,
+            "bounded by the module's own retry budget"
+        );
     }
 
     #[tokio::test]
