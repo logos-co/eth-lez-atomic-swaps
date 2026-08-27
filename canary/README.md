@@ -210,6 +210,7 @@ network):
 | Script | Role |
 |--------|------|
 | `canary/canary-content-scan.py` | Local-file twin of `leg-release-content.sh`: byte-scans a built `.lgx` against the module's highest `release-content-expectations.json` markers, over **every variant present** (a single-platform canary carries one). Gates the publish. |
+| `canary/check-expectations-coverage.py` | Asserts `release-content-expectations.json` has an **exact** entry for the version each `metadata.json` declares (issue #165: the map froze at 0.4.2 while 0.4.3–0.4.5 shipped, so every release was graded against stale markers). Runs in CI (`rust-checks`), `make preflight`, and before each canary-channel build. |
 | `canary/canary-index.py` | `emit-entry` turns one `.lgx` + its URL into an index fragment; `assemble` groups fragments into a full schemaV2 `canary-index.json`. |
 
 **First-run limitation:** `workflow_dispatch` only lists a workflow that exists

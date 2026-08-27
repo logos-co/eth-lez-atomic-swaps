@@ -234,6 +234,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Issue #165: the scan below grades against the HIGHEST map entry.
+          # Refuse to treat an older version's markers as this build's
+          # description — the map must cover the version being built.
+          python3 .canary-tools/canary/check-expectations-coverage.py
           python3 .canary-tools/canary/canary-content-scan.py \
             --lgx "${{ steps.build.outputs.lgx }}" \
             --module "${{ matrix.logical }}" \

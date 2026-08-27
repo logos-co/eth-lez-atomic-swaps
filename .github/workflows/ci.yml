@@ -63,6 +63,12 @@ jobs:
       - name: Validate public-feedback evidence boundary
         run: node tests/check-feedback-evidence.mjs
 
+      # Issue #165: the version in each metadata.json must have an exact entry
+      # in canary/release-content-expectations.json, so a release always
+      # asserts its own content instead of an older version's stale markers.
+      - name: Verify release-content expectations cover metadata.json versions
+        run: python3 canary/check-expectations-coverage.py
+
       # Dependency-free (node builtins only, no Waku node, no network). Guards
       # the maker's fleet parameters, whose failure mode is silent: a wrong
       # cluster id or peer-id publishes into the void and still logs success.
