@@ -119,23 +119,68 @@ fn version_mismatch_message(verdict: VersionVerdict, address: Address) -> String
     }
 }
 
+/// Whether a failed `INTERFACE_VERSION` call is the DEPLOYMENT answering "no
+/// such getter", as opposed to the endpoint failing to answer at all.
+///
+/// The distinction is the whole point: only the first says anything about which
+/// version the address speaks. A 429, a 502 or a dropped connection establishes
+/// nothing about the contract, and reporting it as an unversioned deployment
+/// tells the operator to redeploy the venue over a transient RPC hiccup.
+///
+/// Erring towards "not a verdict" is the safe direction — a revert misreported
+/// as an RPC fault still refuses to start and still quotes what the node said,
+/// while an RPC fault misreported as a verdict is a false diagnosis.
+fn reads_as_missing_getter(err: &alloy::contract::Error) -> bool {
+    use alloy::contract::Error;
+    match err {
+        // The node answered `0x`, or answered with data this ABI cannot
+        // decode: an address with no code, or not this EthHTLC.
+        Error::ZeroData(..) | Error::AbiError(..) => true,
+        // The node answered with a JSON-RPC error. Only an execution revert is
+        // the contract speaking; every other code is the endpoint.
+        Error::TransportError(e) => e.as_error_resp().is_some_and(|resp| {
+            resp.as_revert_data().is_some()
+                || resp
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("execution reverted")
+        }),
+        _ => false,
+    }
+}
+
 /// Read `INTERFACE_VERSION` once and refuse to proceed on a skew. Called from
 /// [`EthClient::new`] — i.e. before any watcher starts waiting and before any
 /// funds move. One free `eth_call`; no key, no gas, no state dependency.
-pub async fn verify_interface_version<P: Provider>(provider: &P, address: Address) -> Result<()> {
+///
+/// Returns the version the contract actually reported, so a caller that
+/// records it as provenance (`swap-cli chain-report`) publishes the reading
+/// rather than the constant it was checked against — the two can only drift if
+/// the handshake is ever relaxed to accept a range, which is exactly when the
+/// difference would start to matter.
+pub async fn verify_interface_version<P: Provider>(provider: &P, address: Address) -> Result<u64> {
     let contract = EthHTLC::new(address, provider);
-    // A revert / empty returndata means "no such getter" — an unversioned
-    // (pre-v2) deployment, or not an EthHTLC at all. Both are fatal here, and
-    // both get the same actionable remedy.
-    let reported = contract
-        .INTERFACE_VERSION()
-        .call()
-        .await
-        .ok()
-        .map(|v| v.saturating_to::<u64>());
+    let reported = match contract.INTERFACE_VERSION().call().await {
+        Ok(v) => Some(v.saturating_to::<u64>()),
+        // A revert / empty returndata means "no such getter" — an unversioned
+        // (pre-v2) deployment, or not an EthHTLC at all. Both are fatal here,
+        // and both get the same actionable remedy.
+        Err(e) if reads_as_missing_getter(&e) => None,
+        // The endpoint never answered, so this call established nothing about
+        // the deployment. Saying it predates v2 would be a diagnosis the
+        // handshake did not make.
+        Err(e) => {
+            return Err(SwapError::EthRpc(format!(
+                "could not read INTERFACE_VERSION from the contract at {address}: {e}. That is a \
+                 failure to reach the endpoint, not a verdict about the deployment — until the \
+                 call is answered, this build cannot tell which interface version {address} \
+                 speaks. Check ETH_RPC_URL is reachable and try again."
+            )));
+        }
+    };
 
     match version_verdict(reported) {
-        VersionVerdict::Match => Ok(()),
+        VersionVerdict::Match => Ok(reported.expect("a matched verdict carries a version")),
         other => Err(SwapError::EthAbiMismatch(version_mismatch_message(
             other, address,
         ))),
@@ -300,6 +345,56 @@ impl EthClient {
 mod tests {
     use super::*;
     use alloy::sol_types::{SolCall as _, SolEvent as _};
+
+    // Only the deployment's own answer may become a verdict about the
+    // deployment. Telling an operator to redeploy the pinned public-trial venue
+    // because one eth_call was rate-limited is a diagnosis the handshake never
+    // made — and the pinned endpoint answers bursts with 429 by design.
+    #[test]
+    fn only_the_contracts_own_answer_reads_as_a_missing_getter() {
+        use alloy::transports::{RpcError, TransportErrorKind};
+
+        // Built from the wire JSON a node actually sends, so the shapes under
+        // test are the ones the endpoint produces rather than a hand-made enum.
+        let resp = |json: &str| {
+            alloy::contract::Error::TransportError(RpcError::ErrorResp(
+                serde_json::from_str(json).expect("a JSON-RPC error payload"),
+            ))
+        };
+
+        // The contract spoke: a revert is "this ABI has no such function".
+        assert!(reads_as_missing_getter(&resp(
+            r#"{"code":3,"message":"execution reverted"}"#
+        )));
+        // Undecodable returndata is likewise an answer — just not this ABI's.
+        assert!(reads_as_missing_getter(&alloy::contract::Error::AbiError(
+            alloy::sol_types::Error::Overrun.into()
+        )));
+
+        // The endpoint spoke, and it said nothing about the contract. These are
+        // the exact shapes the pinned endpoint produces under load.
+        assert!(!reads_as_missing_getter(&resp(
+            r#"{"code":-32005,"message":"Rate limit exceeded. To obtain higher limits, please request a personal token"}"#
+        )));
+        assert!(!reads_as_missing_getter(&resp(
+            r#"{"code":-32603,"message":"Internal error"}"#
+        )));
+        assert!(!reads_as_missing_getter(&resp(
+            r#"{"code":-32000,"message":"header not found"}"#
+        )));
+
+        // Nothing answered at all.
+        assert!(!reads_as_missing_getter(
+            &alloy::contract::Error::TransportError(RpcError::Transport(
+                TransportErrorKind::BackendGone
+            ))
+        ));
+        assert!(!reads_as_missing_getter(
+            &alloy::contract::Error::TransportError(TransportErrorKind::custom_str(
+                "connection refused"
+            ))
+        ));
+    }
 
     // The handshake's whole job is to tell "the contract I speak" apart from
     // "the contract that would make my watcher silently deaf".

@@ -17,6 +17,16 @@ pub enum SwapError {
     #[error("EthHTLC ABI mismatch: {0}")]
     EthAbiMismatch(String),
 
+    /// A log query came back empty from an RPC backend that could not be shown
+    /// to hold the log data for the blocks asked about. Load-balanced public
+    /// endpoints mix full-history nodes with pruned ones, and a pruned node
+    /// answers `[]` rather than erroring — so counting that answer would
+    /// silently under-report. Raised by the read-only chain report, which
+    /// refuses to publish a number it cannot corroborate; see
+    /// `crate::eth::report::Canary`.
+    #[error("uncorroborated Ethereum logs: {0}")]
+    EthLogsUncorroborated(String),
+
     // --- LEZ ---
     #[error("LEZ sequencer error: {0}")]
     LezSequencer(String),

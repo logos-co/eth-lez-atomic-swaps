@@ -116,8 +116,13 @@ jobs:
       #   eth_integration — lock/claim/refund, the Locked event's
       #                    takerLezAccount round trip, swapId distinctness for
       #                    one hashlock, and the INTERFACE_VERSION handshake.
+      #   chain_report   — the public-trial swap count decoded from real
+      #                    Locked/Claimed/Refunded logs over real block ranges.
+      #                    A decode or windowing regression here reads as zero
+      #                    attempts, which is indistinguishable from a quiet
+      #                    trial (docs/counting-the-campaign.md).
       - name: cargo test (anvil integration)
-        run: cargo test --locked --test taker_binding --test eth_integration
+        run: cargo test --locked --test taker_binding --test eth_integration --test chain_report
 
   basecamp-ui-runtime:
     name: basecamp-ui-runtime (real Basecamp, linux-amd64)
