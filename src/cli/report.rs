@@ -171,8 +171,7 @@ pub async fn run_standalone() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .try_init()
         .ok();
@@ -921,7 +920,10 @@ mod tests {
         );
         assert_eq!(to_http_url("ws://127.0.0.1:8545"), "http://127.0.0.1:8545");
         assert_eq!(to_http_url("WS://127.0.0.1:8545"), "http://127.0.0.1:8545");
-        assert_eq!(to_http_url("Wss://Host.Example/Path"), "https://Host.Example/Path");
+        assert_eq!(
+            to_http_url("Wss://Host.Example/Path"),
+            "https://Host.Example/Path"
+        );
 
         // Already HTTP: left exactly as given, host case and all.
         for url in [
@@ -1072,10 +1074,7 @@ mod tests {
                 .into(),
         );
         // The schedule `scan_range` already uses for a throttled chunk.
-        assert_eq!(
-            throttle_backoff(&throttled, 1),
-            report::RATE_LIMIT_BACKOFF
-        );
+        assert_eq!(throttle_backoff(&throttled, 1), report::RATE_LIMIT_BACKOFF);
         assert_eq!(
             throttle_backoff(&throttled, 2),
             report::RATE_LIMIT_BACKOFF * 2

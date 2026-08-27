@@ -643,7 +643,10 @@ pub enum Anchoring {
     /// empty leaves "the chain is quiet" and "this endpoint has no index for
     /// this era" indistinguishable, while a walk that was only errored or only
     /// throttled established neither. Either way the count is unproven.
-    Unanchored { oldest: ProbeMiss, newest: ProbeMiss },
+    Unanchored {
+        oldest: ProbeMiss,
+        newest: ProbeMiss,
+    },
 }
 
 impl Anchoring {
@@ -819,7 +822,10 @@ pub fn refusal_message(from: u64, to: u64, anchoring: &Anchoring) -> Option<Stri
 /// — indistinguishable to the caller.
 pub async fn probe_canaries<P: Provider>(provider: &P, from: u64, to: u64) -> Result<Anchoring> {
     let forward: Vec<u64> = (from..=to).take(CANARY_PROBE_BLOCKS as usize).collect();
-    let backward: Vec<u64> = (from..=to).rev().take(CANARY_PROBE_BLOCKS as usize).collect();
+    let backward: Vec<u64> = (from..=to)
+        .rev()
+        .take(CANARY_PROBE_BLOCKS as usize)
+        .collect();
 
     let oldest = anchor_in(provider, &forward).await;
     let newest = anchor_in(provider, &backward).await;
@@ -1757,7 +1763,10 @@ mod tests {
         let unanswered = [
             ("all errored", failed_miss(80)),
             ("all throttled", rate_limited_miss(80)),
-            ("throttled and errored, never answered", throttled_and_failed(40, 40)),
+            (
+                "throttled and errored, never answered",
+                throttled_and_failed(40, 40),
+            ),
         ];
         for (label, miss) in unanswered {
             assert!(miss.never_answered(), "{label}");
@@ -1857,7 +1866,10 @@ mod tests {
         // endpoint-at-fault branch: something actually failed.
         let both = refusal_message(1, 2, &partial(ScanEnd::Oldest, throttled_and_failed(4, 76)))
             .expect("a refusal");
-        assert!(both.contains("did not answer a single anchor probe"), "{both}");
+        assert!(
+            both.contains("did not answer a single anchor probe"),
+            "{both}"
+        );
         assert!(both.contains("4 were rate-limited"), "{both}");
         assert!(both.contains("76 failed"), "{both}");
         assert!(!both.contains("localnet"), "{both}");

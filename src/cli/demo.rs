@@ -42,8 +42,7 @@ pub struct DemoArgs {
 pub async fn cmd_demo(args: DemoArgs) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .try_init();
 
@@ -124,14 +123,7 @@ async fn run_demo() -> Result<()> {
 
             tokio::time::sleep(Duration::from_secs(3)).await;
             eprintln!("  [taker] Locking ETH");
-            run_taker(
-                &config,
-                &eth,
-                &lez,
-                Some(preimage),
-                Some(taker_progress_tx),
-            )
-            .await
+            run_taker(&config, &eth, &lez, Some(preimage), Some(taker_progress_tx)).await
         })
     };
 

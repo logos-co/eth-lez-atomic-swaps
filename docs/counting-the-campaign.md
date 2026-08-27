@@ -619,7 +619,7 @@ public tester has filed one yet. This count will only ever go up when
 someone chooses to file; it is a real, exact, chain-checkable-if-they-
 include-evidence number, but it is a **self-selected sample**, never a
 denominator. Use it for qualitative color ("what confused people," "did
-anyone report a bug") next to the ops ledger's quantitative attempt/success
+anyone report a bug") next to the on-chain report's quantitative attempt/success
 counts.
 
 ---

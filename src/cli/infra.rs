@@ -48,8 +48,7 @@ fn spawn_anvil_log_forwarder(stdout: std::process::ChildStdout) {
 pub async fn cmd_infra() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 

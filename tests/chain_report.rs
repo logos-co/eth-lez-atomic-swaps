@@ -476,7 +476,10 @@ async fn a_scan_without_an_anchor_is_refused_until_the_operator_opts_in() {
     let scan = collect_tally(venue.reader(), venue.address, &window, CHUNK, true)
         .await
         .expect("--allow-uncorroborated downgrades the refusal");
-    assert!(!scan.corroborated, "an unanchored count is never corroborated");
+    assert!(
+        !scan.corroborated,
+        "an unanchored count is never corroborated"
+    );
     assert_eq!(scan.tally.counts().attempted, 0);
 }
 
