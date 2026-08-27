@@ -25,9 +25,14 @@ use crate::eth::report::{
 pub const COMMAND_NAME: &str = "chain-report";
 
 /// How many times the whole scan is retried on a **fresh connection** when the
-/// endpoint could not corroborate it. Each reconnect is a fresh draw from the
-/// provider's backend pool, which is the only way past a sticky WebSocket
-/// connection pinned to a node with a pruned log index.
+/// endpoint could not corroborate it.
+///
+/// A fresh [`connect`] builds a new provider with its own reqwest connection
+/// pool, so its requests open a new TCP connection rather than reusing the
+/// keep-alive one the previous attempt was pinned to. A pool that load-balances
+/// per connection therefore routes the retry to a different backend — which is
+/// the only thing that can get past one whose log index has been pruned, since
+/// retrying over the established connection just asks the same node again.
 const MAX_SCAN_ATTEMPTS: usize = 5;
 
 #[derive(Args, Debug)]
@@ -327,12 +332,8 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
         }
     }
     let Some(scan) = scan else {
-        return Err(SwapError::EthLogsUncorroborated(format!(
-            "{last_uncorroborated} Reconnected {MAX_SCAN_ATTEMPTS} times without reaching a \
-             backend that covers the whole range, so no count is reported rather than a count \
-             that reads low. Point --eth-rpc-url at an endpoint that serves historical logs \
-             consistently (an archive/full-history provider), or narrow the window with \
-             --from-block/--since to blocks the endpoint still retains."
+        return Err(SwapError::EthLogsUncorroborated(exhausted_message(
+            &last_uncorroborated,
         )));
     };
 
@@ -352,15 +353,44 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What terminates a run whose every reconnect ended the same way: the
+/// refusal that was reached, plus how many times it was reached.
+///
+/// Deliberately says nothing about WHY. The remedy differs by what the probes
+/// actually observed — a throttled endpoint and one that never answered want
+/// opposite advice — and `eth::report::refusal_message` has already branched on
+/// that. Appending a fixed diagnosis here would contradict it in the same
+/// breath, on the one sentence that ends every failed run.
+fn exhausted_message(refusal: &str) -> String {
+    format!(
+        "{refusal} This was retried {MAX_SCAN_ATTEMPTS} times, on a fresh connection each time so \
+         that a load-balanced endpoint had a chance to route it to a different backend, and every \
+         attempt ended the same way. No count is published."
+    )
+}
+
 /// Rewrite a `wss://`/`ws://` endpoint to `https://`/`http://`, same host.
-/// Anything else is passed through unchanged. See [`connect`] for why.
+/// Anything else is passed through unchanged, for [`connect`] to accept or
+/// refuse. Schemes are matched case-insensitively: URL schemes are
+/// case-insensitive by spec, and alloy lowercases before dispatching on them,
+/// so a `WSS://` this rewrite skipped would still reach the WebSocket
+/// transport. See [`connect`] for why that matters.
 fn to_http_url(url: &str) -> String {
     match url.split_once("://") {
-        Some(("wss", rest)) => format!("https://{rest}"),
-        Some(("ws", rest)) => format!("http://{rest}"),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("wss") => format!("https://{rest}"),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("ws") => format!("http://{rest}"),
         _ => url.to_string(),
     }
 }
+
+/// The lowercased scheme of `url`, or `None` when it carries none.
+fn url_scheme(url: &str) -> Option<String> {
+    url.split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+}
+
+/// Transports whose JSON-RPC batch reaches one backend as one request.
+const BATCHING_SCHEMES: [&str; 2] = ["http", "https"];
 
 /// Connect read-only over HTTP, reusing the configured `ETH_RPC_URL` — the same
 /// host, switched from `wss://` to `https://`.
@@ -381,6 +411,25 @@ fn to_http_url(url: &str) -> String {
 /// rather than subscribing, for its own reasons.
 async fn connect(url: &str) -> Result<alloy::providers::DynProvider> {
     let http = to_http_url(url);
+    let scheme = url_scheme(&http);
+    if !scheme
+        .as_deref()
+        .is_some_and(|s| BATCHING_SCHEMES.contains(&s))
+    {
+        let got = match &scheme {
+            Some(s) => format!("scheme '{s}'"),
+            None => "no scheme".to_string(),
+        };
+        return Err(SwapError::InvalidConfig(format!(
+            "--eth-rpc-url must be an http:// or https:// endpoint, but this one has {got}. Every \
+             count this report publishes is proven by batching each eth_getLogs with canary \
+             queries, and that proof only holds when the JSON-RPC batch reaches ONE backend as \
+             ONE request — which only the HTTP transport does. A wss:// or ws:// URL is rewritten \
+             to the same host over https:// or http:// automatically; any other transport would \
+             let the canary and the query it vouches for be answered by different nodes, so it is \
+             refused rather than counted as proven."
+        )));
+    }
     Ok(ProviderBuilder::new()
         .connect(&http)
         .await
@@ -699,6 +748,135 @@ mod tests {
                 !matches!(err, SwapError::InvalidConfig(_)),
                 "the era guard fired even though the era was stated: {err:?}"
             );
+        }
+    }
+
+    // The corroboration proof rests entirely on the batch reaching one backend,
+    // and only the HTTP transport sends one. URL schemes are case-insensitive
+    // and alloy lowercases before dispatching, so a `WSS://` this rewrite
+    // skipped would still land on the WebSocket transport, where alloy-pubsub
+    // splits the batch into separate sends — the canary and the query it
+    // vouches for answered by different nodes.
+    #[test]
+    fn every_websocket_spelling_is_rewritten_to_http() {
+        assert_eq!(
+            to_http_url("wss://ethereum-sepolia-rpc.publicnode.com"),
+            "https://ethereum-sepolia-rpc.publicnode.com"
+        );
+        assert_eq!(
+            to_http_url("WSS://ethereum-sepolia-rpc.publicnode.com"),
+            "https://ethereum-sepolia-rpc.publicnode.com"
+        );
+        assert_eq!(to_http_url("ws://127.0.0.1:8545"), "http://127.0.0.1:8545");
+        assert_eq!(to_http_url("WS://127.0.0.1:8545"), "http://127.0.0.1:8545");
+        assert_eq!(to_http_url("Wss://Host.Example/Path"), "https://Host.Example/Path");
+
+        // Already HTTP: left exactly as given, host case and all.
+        for url in [
+            "http://127.0.0.1:8545",
+            "https://Host.Example/v1/KEY",
+            "HTTPS://Host.Example",
+        ] {
+            assert_eq!(to_http_url(url), url);
+        }
+    }
+
+    // The rewrite is a convenience; this check is what makes the proof safe. A
+    // scheme the rewrite does not know about must be a loud refusal, not a
+    // count published with `corroborated: true` behind a split batch.
+    #[tokio::test]
+    async fn a_transport_that_cannot_batch_is_refused_before_connecting() {
+        for url in [
+            "ipc:///tmp/anvil.ipc",
+            "file:///tmp/anvil.ipc",
+            "127.0.0.1:8545",
+            "/tmp/anvil.ipc",
+        ] {
+            let err = connect(url)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("'{url}' cannot carry a JSON-RPC batch"));
+            let SwapError::InvalidConfig(msg) = err else {
+                panic!("expected an InvalidConfig refusal for '{url}', got: {err:?}");
+            };
+            assert!(
+                msg.contains("http:// or https://"),
+                "the refusal must name the transport it needs: {msg}"
+            );
+            assert!(
+                msg.contains("ONE backend as ONE request"),
+                "and why it needs it: {msg}"
+            );
+        }
+
+        // A WebSocket URL is not refused — it is rewritten to the same host
+        // over HTTP, in every spelling.
+        for url in ["wss://example.invalid", "WSS://example.invalid"] {
+            assert!(
+                connect(url).await.is_ok(),
+                "'{url}' rewrites to https:// and must be accepted"
+            );
+        }
+    }
+
+    // The sentence that terminates every failed run. The remedy differs by what
+    // the probes saw, and `refusal_message` has already branched on it — so
+    // this wrapper must not append a diagnosis that contradicts it.
+    #[test]
+    fn the_exhausted_retry_message_adds_no_diagnosis_of_its_own() {
+        let throttled = report::refusal_message(
+            100,
+            200,
+            &report::Anchoring::Unanchored {
+                oldest: report::ProbeMiss {
+                    rate_limited: 128,
+                    ..Default::default()
+                },
+                newest: report::ProbeMiss {
+                    rate_limited: 128,
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("a throttled scan is a refusal");
+        let final_throttled = exhausted_message(&throttled);
+        assert!(final_throttled.contains("asked for fewer requests"));
+        assert!(final_throttled.contains("No count is published."));
+        assert!(
+            !final_throttled.contains("archive"),
+            "a rate limit is not fixed by a different provider: {final_throttled}"
+        );
+        assert!(
+            !final_throttled.contains("covers the whole range"),
+            "no probe answered, so coverage was never established: {final_throttled}"
+        );
+
+        let broken = report::refusal_message(
+            100,
+            200,
+            &report::Anchoring::Unanchored {
+                oldest: report::ProbeMiss {
+                    failed_requests: 80,
+                    last_error: Some("connection reset by peer".into()),
+                    ..Default::default()
+                },
+                newest: report::ProbeMiss {
+                    failed_requests: 80,
+                    last_error: Some("connection reset by peer".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("an errored scan is a refusal");
+        let final_broken = exhausted_message(&broken);
+        assert!(final_broken.contains("did not answer a single anchor probe"));
+        assert!(final_broken.contains("serves historical logs reliably"));
+        assert!(final_broken.contains("No count is published."));
+
+        // What the wrapper itself contributes is true in both.
+        for msg in [&final_throttled, &final_broken] {
+            assert!(msg.contains(&MAX_SCAN_ATTEMPTS.to_string()));
+            assert!(msg.contains("fresh connection"));
         }
     }
 

@@ -403,11 +403,13 @@ const CANARY_PROBE_ATTEMPTS: usize = 5;
 const CANARY_RATE_LIMIT_RETRIES: u32 = 3;
 
 /// How many times one chunk may come back uncorroborated before the scan gives
-/// up. Kept modest on purpose: over WebSocket a connection is sticky to one
-/// backend, so retrying on the same connection cannot escape a pruned node —
-/// the caller's job is to reconnect and rescan (see
-/// `cli::report::MAX_SCAN_ATTEMPTS`), and this only has to ride out the
-/// per-request flakiness of a pool that does rebalance.
+/// up. Kept modest on purpose: these retries go out over the connection that is
+/// already established, and a keep-alive connection to a pool that balances per
+/// connection keeps landing on the same backend — so retrying here cannot
+/// escape a pruned node. Getting a different one is the caller's job, by
+/// reconnecting and rescanning (see `cli::report::MAX_SCAN_ATTEMPTS`); this
+/// only has to ride out the per-request flakiness of a pool that does
+/// rebalance mid-connection.
 const MAX_CORROBORATION_ATTEMPTS: usize = 6;
 
 const CORROBORATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
