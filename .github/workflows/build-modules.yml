@@ -599,30 +599,32 @@ jobs:
       # with no build or test failure.
       #
       # REPORTED, NOT ASSERTED, and that is a deliberate difference from the
-      # sibling repo. `swap` is known to build unstamped today, and the fix needs
-      # a coordinated logos-module-builder + delivery_module migration. Failing
-      # here would gate every PR on someone else's release. The value is that the
-      # answer is printed on every run, so the day it changes is visible.
+      # sibling repo. `swap` is known to build unstamped today, and the fix is
+      # NOT the one-line repin it looks like: every logos-module-builder rev that
+      # stamps also needs swap-module migrated onto the cdylib glue, and the revs
+      # that stamp the 0.2.0 swap_ui already carries need a coordinated
+      # delivery_module bump on top. .github/scripts/check-protocol-stamp.py
+      # records that measurement rev by rev. Failing here would gate every PR on
+      # that migration. The value is that the answer is printed on every run, so
+      # the day it changes is visible.
+      #
+      # WHEN THE STAMP IS FIXED: drop `--report-only` below. The script already
+      # fails on an unstamped plugin and on a protocol SKEW between the two
+      # modules; report-only is the only thing holding it to a notice.
+      #
+      # The check moved out of an inline heredoc into that script because the
+      # inline version was wrong: `logos_protocol_version.(\d+\.\d+\.\d+)`
+      # matches the field NAME anywhere in the binary, including inside linked
+      # liblogos code, so it could report a stamp on a module that has none. The
+      # script anchors on the CBOR text-string header moc writes for the key.
       - name: Protocol version stamp (reported)
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$LOGOS_MODULES_DIR/swap/swap_plugin.so" \
-                    "$LOGOS_UI_PLUGINS_DIR/swap_ui/swap_ui_plugin.so" <<'PY'
-          import re, sys
-
-          pattern = re.compile(rb"logos_protocol_version.(\d+\.\d+\.\d+)")
-          for path in sys.argv[1:]:
-              with open(path, "rb") as handle:
-                  match = pattern.search(handle.read())
-              if match is None:
-                  print(f"::notice::{path.rsplit('/', 1)[-1]} carries no "
-                        "logos_protocol_version stamp — this host loads it only "
-                        "permissively (pre-protocol build)")
-              else:
-                  print(f"{path}: logos_protocol_version "
-                        f"{match.group(1).decode()}")
-          PY
+          python3 .github/scripts/check-protocol-stamp.py --report-only \
+            --plugin "$LOGOS_MODULES_DIR/swap/swap_plugin.so" \
+            --plugin "$LOGOS_UI_PLUGINS_DIR/swap_ui/swap_ui_plugin.so" \
+            --label "installed plugins (${{ matrix.variant }})"
 
       # The real host. logoscore scans the same directory lgpm installed into,
       # resolves modules through logos-liblogos, applies the protocol gate and
