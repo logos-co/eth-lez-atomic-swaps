@@ -196,6 +196,29 @@ fn is_retryable_handshake_failure(err: &SwapError) -> bool {
     matches!(err, SwapError::EthRpc(_))
 }
 
+/// How long to wait before redrawing a backend after a retryable handshake
+/// failure.
+///
+/// A 429 is the endpoint asking for FEWER requests (see
+/// [`report::RpcFailure`]), so reconnecting immediately fires the next
+/// `eth_call` within milliseconds — the same burst shape that provoked the
+/// throttle, which would spend all five attempts making it worse. Every other
+/// transport fault gets a different backend by reconnecting, and waiting buys
+/// nothing.
+///
+/// The schedule is the one `scan_range` already applies to a throttled chunk,
+/// doubling per attempt rather than inventing a second policy.
+fn handshake_retry_backoff(err: &SwapError, attempt: usize) -> std::time::Duration {
+    match err {
+        SwapError::EthRpc(msg)
+            if report::classify_rpc_failure(msg) == report::RpcFailure::RateLimited =>
+        {
+            report::RATE_LIMIT_BACKOFF * 2u32.pow((attempt as u32).saturating_sub(1).min(6))
+        }
+        _ => std::time::Duration::ZERO,
+    }
+}
+
 /// The three RPCs a run needs before it can even name its window: the era
 /// handshake, the chain id, and the head.
 ///
@@ -287,11 +310,14 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
             Ok((version, chain_id, head)) => break (provider, version, chain_id, head),
             Err(e) if !is_retryable_handshake_failure(&e) => return Err(e),
             Err(e) if attempt < MAX_SCAN_ATTEMPTS => {
+                let backoff = handshake_retry_backoff(&e, attempt);
                 warn!(
                     attempt,
+                    ?backoff,
                     %e,
                     "chain-report: reconnecting to reach a different RPC backend"
                 );
+                tokio::time::sleep(backoff).await;
                 attempt += 1;
             }
             Err(SwapError::EthRpc(msg)) => {
@@ -981,6 +1007,46 @@ mod tests {
         assert!(!is_retryable_handshake_failure(
             &SwapError::EthLogsUncorroborated("blocks 1-2: ...".into())
         ));
+    }
+
+    // Reconnecting is what gets past a pruned backend, but it is the wrong
+    // answer to a 429: the next eth_call goes out within milliseconds, which is
+    // the burst that provoked the throttle in the first place. A throttled
+    // handshake must wait; anything else should redraw a backend promptly.
+    #[test]
+    fn only_a_throttled_handshake_waits_before_redrawing_a_backend() {
+        let throttled = SwapError::EthRpc(
+            "HTTP error 429 with body: {\"error\":{\"code\":-32005,\"message\":\"Rate limit \
+             exceeded\"}}"
+                .into(),
+        );
+        // The schedule `scan_range` already uses for a throttled chunk.
+        assert_eq!(
+            handshake_retry_backoff(&throttled, 1),
+            report::RATE_LIMIT_BACKOFF
+        );
+        assert_eq!(
+            handshake_retry_backoff(&throttled, 2),
+            report::RATE_LIMIT_BACKOFF * 2
+        );
+        assert_eq!(
+            handshake_retry_backoff(&throttled, 3),
+            report::RATE_LIMIT_BACKOFF * 4
+        );
+        assert!(handshake_retry_backoff(&throttled, 1) > std::time::Duration::ZERO);
+
+        // A different backend fixes these, so waiting buys nothing.
+        for err in [
+            SwapError::EthRpc("connection refused".into()),
+            SwapError::EthRpc("eth_chainId failed: 502 Bad Gateway".into()),
+            SwapError::EthAbiMismatch("reports INTERFACE_VERSION 1".into()),
+        ] {
+            assert_eq!(
+                handshake_retry_backoff(&err, 1),
+                std::time::Duration::ZERO,
+                "{err:?} is not a throttle"
+            );
+        }
     }
 
     #[tokio::test]

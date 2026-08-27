@@ -108,7 +108,7 @@ const CHUNK_PACING: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// Backoff schedule when the endpoint says "slow down": doubles from this, up
 /// to [`MAX_RATE_LIMIT_RETRIES`] times, on the SAME span.
-const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+pub const RATE_LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 const MAX_RATE_LIMIT_RETRIES: u32 = 6;
 
 /// How the scan should react to a failed `eth_getLogs`.
