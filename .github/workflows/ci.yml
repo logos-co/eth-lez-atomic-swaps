@@ -63,6 +63,12 @@ jobs:
       - name: Validate public-feedback evidence boundary
         run: node tests/check-feedback-evidence.mjs
 
+      # Dependency-free (node builtins only, no Waku node, no network). Guards
+      # the maker's fleet parameters, whose failure mode is silent: a wrong
+      # cluster id or peer-id publishes into the void and still logs success.
+      - name: Verify maker fleet selection (SWAP_FLEET)
+        run: node offer-publisher/fleet.test.mjs
+
       # Installs the toolchain pinned in rust-toolchain.toml (1.93.0).
       # Must run before rust-cache so the cache key sees the right rustc.
       - name: Install pinned Rust toolchain

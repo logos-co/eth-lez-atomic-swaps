@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Live RFQ smoke test against the logos.dev fleet. Proves the on-demand model
-// end-to-end with two LIGHT nodes (lightpush + filter only, no relay), exactly
-// the maker/taker topology in production:
+// Live RFQ smoke test against the fleet selected by SWAP_FLEET (default
+// logos.dev). Proves the on-demand model end-to-end with two LIGHT nodes
+// (lightpush + filter only, no relay), exactly the maker/taker topology in
+// production:
 //
 //   * maker node  : filter-subscribes to the offer-requests topic and, on a
 //                   valid request, lightpushes an offer (tagged with a unique
@@ -15,7 +16,7 @@
 //   2. the maker responds within ~1 round-trip (latency printed);
 //   3. a burst of requests inside the cooldown is COALESCED to one response.
 //
-// Usage: node smoke-rfq.mjs         (exit 0 = all three verified)
+// Usage: [SWAP_FLEET=logos.test] node smoke-rfq.mjs  (exit 0 = all three verified)
 
 import { createDecoder, createEncoder, utf8ToBytes, bytesToUtf8, waitForRemotePeer, Protocols } from "@waku/sdk";
 import { createRoutingInfo } from "@waku/utils";
@@ -23,6 +24,7 @@ import {
   OFFERS_CONTENT_TOPIC,
   OFFER_REQUESTS_CONTENT_TOPIC,
   NETWORK_CONFIG,
+  FLEET_NAME,
   createFleetNode,
   dialFleet,
 } from "./fleet.mjs";
@@ -53,6 +55,7 @@ const offersEncoder = createEncoder({ contentTopic: OFFERS_CONTENT_TOPIC, routin
 const requestsDecoder = createDecoder(OFFER_REQUESTS_CONTENT_TOPIC, requestsRouting);
 const requestsEncoder = createEncoder({ contentTopic: OFFER_REQUESTS_CONTENT_TOPIC, routingInfo: requestsRouting });
 
+log(`fleet ${FLEET_NAME}`);
 log(`requests topic ${OFFER_REQUESTS_CONTENT_TOPIC} -> pubsub ${requestsRouting.pubsubTopic}`);
 
 async function connect(label) {

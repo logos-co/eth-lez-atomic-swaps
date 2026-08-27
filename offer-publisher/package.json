@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Headless maker offer-publisher sidecar for the LEZ<->ETH liquidity bot (swap-cli maker --loop). Republishes the offer to the logos.dev fleet (cluster 2, TCP) because the fleet runs store=false.",
+  "description": "Headless maker offer-publisher sidecar for the LEZ<->ETH liquidity bot (swap-cli maker --loop). Republishes the offer to the delivery fleet selected by SWAP_FLEET (default logos.dev, TCP) because the fleet runs store=false.",
   "scripts": {
     "test": "node --test",
     "smoke": "node smoke.mjs",

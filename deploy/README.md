@@ -151,11 +151,21 @@ that the maker process is alive):
 ```bash
 cd offer-publisher
 npm ci
-node watch-offers.mjs
+node watch-offers.mjs                        # logos.dev — where the market is
+SWAP_FLEET=logos.test node watch-offers.mjs  # the migration fleet
 ```
 
 Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 45s) showing
-the maker's LEZ/ETH amounts and `age=0s` on arrival.
+the maker's LEZ/ETH amounts and `age=0s` on arrival. The first log line names
+the fleet being watched — check it before concluding a board is empty.
+
+### Which fleet a maker publishes on (`SWAP_FLEET`)
+
+Unset, every maker publishes on **logos.dev**, exactly as today. Setting
+`SWAP_FLEET=logos.test` re-points one maker's publisher at the
+stability-guaranteed fleet the app migrates to in PR #125 — see
+"Dual-homing the market onto logos.test" below. An unrecognized value aborts
+the publisher at startup instead of quietly picking a fleet.
 
 ## Health & status (issue #93)
 
@@ -340,7 +350,29 @@ their volumes, so this brings the new makers up (and lets you `restart` / `down`
 them) without ever recreating the live `eth-lez-maker`. Each logs
 `offer published (N peer(s))` once the fleet accepts its heartbeat.
 
-### 4. Verify the market from outside
+### 4. Dual-homing the market onto logos.test (optional, off by default)
+
+The app's fleet is compiled into its binary, so the app can only move to
+logos.test in a release; a maker moves with a container restart. Pointing one
+maker at logos.test therefore puts a live publisher on the fleet **before** the
+app switches, which is what lets the migration be proven end-to-end (its
+runtime CI check asserts an offer arrives) instead of after it ships.
+
+Per-container, durable across `up -d`:
+
+```bash
+# in deploy/ (.env is gitignored)
+echo 'MAKER_5_FLEET=logos.test' >> .env
+docker compose -f docker-compose.multi.yml up -d maker-5   # recreates ONLY maker-5
+docker logs eth-lez-maker-5 | head -5                      # "connecting to logos.test fleet (cluster 2 -> /waku/2/rs/2/7 ...)"
+```
+
+Set `MAKER_<n>_FLEET` in `deploy/.env` or the shell — **not** in `maker-<n>.env`:
+compose `environment` beats `env_file`, so a `SWAP_FLEET` line there is silently
+ignored. Keep the clear majority of makers on logos.dev until the app migrates:
+a taker on today's app only sees logos.dev offers.
+
+### 5. Verify the market from outside
 
 From your own machine (not the VPS), watch the fleet relay every maker's
 offer — you should see all five distinct `maker_lez_account`s cycle through:
@@ -348,3 +380,7 @@ offer — you should see all five distinct `maker_lez_account`s cycle through:
 ```bash
 cd ../offer-publisher && npm ci && node watch-offers.mjs
 ```
+
+If a maker was dual-homed above, it publishes on logos.test only, so it will
+NOT appear here — watch it with
+`SWAP_FLEET=logos.test node watch-offers.mjs` instead.

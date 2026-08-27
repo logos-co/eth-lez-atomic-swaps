@@ -58,6 +58,30 @@
 # with no responder and no rfq.mjs at all, so a fleet.mjs-only mount would run
 # the stale heartbeat-only publisher.
 #
+# FLEET SELECTION — `SWAP_FLEET`, per container. Each maker below passes
+# SWAP_FLEET to its offer-publisher sidecar (offer-publisher/fleet.mjs) from a
+# per-maker host variable, defaulting to `logos.dev`: with nothing set, every
+# maker publishes exactly where it publishes today.
+#
+# To dual-home the market — keep the board full on logos.dev while warming
+# logos.test so the app-side migration (PR #125) can be proven end-to-end
+# before it ships — point ONE maker at the other fleet, e.g. maker-5:
+#
+#   echo 'MAKER_5_FLEET=logos.test' >> .env      # deploy/.env, gitignored
+#   docker compose -f docker-compose.multi.yml up -d maker-5
+#   SWAP_FLEET=logos.test node ../offer-publisher/watch-offers.mjs   # from OUTSIDE
+#
+# Put it in `deploy/.env` (or export it), NOT in maker-5.env: compose
+# `environment` overrides `env_file`, so a SWAP_FLEET line in the env file
+# would be silently ignored — and a maker on the wrong fleet looks perfectly
+# healthy from the inside. A value that names no known fleet aborts the
+# publisher at startup rather than falling back (fleet.mjs); the container's
+# healthcheck then fails, which is the intended loud failure.
+#
+# One publisher serves ONE fleet, so "dual-homed" here means the FLEET has a
+# maker on each fleet, not that a single container publishes twice. Keep a
+# clear majority on logos.dev until the app migrates.
+#
 # No ports are published: the maker and its offer-publisher sidecar make only
 # OUTBOUND connections (Sepolia RPC, the LEZ sequencer, the fleet over TCP),
 # so there is nothing to listen on and nothing to port-shift per instance.
@@ -96,6 +120,9 @@ services:
     container_name: eth-lez-maker-2
     env_file:
       - maker-2.env
+    environment:
+      # Fleet this maker publishes on; unset -> logos.dev (see the header).
+      SWAP_FLEET: ${MAKER_2_FLEET:-logos.dev}
     volumes:
       - maker-2-state:/app/state
       - *fleet-mount
@@ -108,6 +135,9 @@ services:
     container_name: eth-lez-maker-3
     env_file:
       - maker-3.env
+    environment:
+      # Fleet this maker publishes on; unset -> logos.dev (see the header).
+      SWAP_FLEET: ${MAKER_3_FLEET:-logos.dev}
     volumes:
       - maker-3-state:/app/state
       - *fleet-mount
@@ -120,6 +150,9 @@ services:
     container_name: eth-lez-maker-4
     env_file:
       - maker-4.env
+    environment:
+      # Fleet this maker publishes on; unset -> logos.dev (see the header).
+      SWAP_FLEET: ${MAKER_4_FLEET:-logos.dev}
     volumes:
       - maker-4-state:/app/state
       - *fleet-mount
@@ -132,6 +165,9 @@ services:
     container_name: eth-lez-maker-5
     env_file:
       - maker-5.env
+    environment:
+      # Fleet this maker publishes on; unset -> logos.dev (see the header).
+      SWAP_FLEET: ${MAKER_5_FLEET:-logos.dev}
     volumes:
       - maker-5-state:/app/state
       - *fleet-mount
