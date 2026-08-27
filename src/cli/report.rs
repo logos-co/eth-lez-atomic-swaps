@@ -102,7 +102,8 @@ pub struct ChainReport {
     /// a load-balanced endpoint whose backends have pruned their log index. A
     /// run that could not anchor a canary is refused outright, so `false` only
     /// ever appears when the operator passed `--allow-uncorroborated` to
-    /// accept an unproven count (or the window selected no blocks at all).
+    /// accept an unproven count. A window that selects no blocks queried
+    /// nothing, so nothing went unproven and this stays `true`.
     pub corroborated: bool,
     #[serde(flatten)]
     pub counts: SwapCounts,
@@ -319,9 +320,7 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
              backend that covers the whole range, so no count is reported rather than a count \
              that reads low. Point --eth-rpc-url at an endpoint that serves historical logs \
              consistently (an archive/full-history provider), or narrow the window with \
-             --from-block/--since to blocks the endpoint still retains. On a chain that \
-             genuinely has no logs to anchor on (a quiet localnet), --allow-uncorroborated \
-             accepts an unproven count instead."
+             --from-block/--since to blocks the endpoint still retains."
         )));
     };
 

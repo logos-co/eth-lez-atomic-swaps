@@ -47,11 +47,13 @@
 //! retention, and a node without the index answers `eth_getLogs` with an empty
 //! list rather than an error (see [`Canary`]). So every response is batched
 //! with anchor queries that prove the backend holds the scanned range, and a
-//! scan whose anchor probes ALL came back empty proves nothing: it is refused
-//! ([`ScanDecision::Refuse`]) rather than published, because its most likely
-//! wrong answer is a zero indistinguishable from a quiet trial. A chain that
-//! genuinely has no logs to anchor on is a real case — a localnet — but it is
-//! the operator's to assert, with `--allow-uncorroborated`.
+//! scan that could not be anchored is refused ([`ScanDecision::Refuse`])
+//! rather than published, because its most likely wrong answer is a zero
+//! indistinguishable from a quiet trial. Two kinds of miss are told apart: a
+//! backend that anchored ONE end and not the other has demonstrated a partial
+//! log index and is always refused, while a scan where no probe anchored
+//! anywhere may still be a chain that genuinely has no logs — a localnet —
+//! which is the operator's to assert, with `--allow-uncorroborated`.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -379,8 +381,8 @@ pub struct Canary {
 
 /// Blocks to walk inward from each end of a scan looking for one with logs to
 /// anchor on. Sepolia blocks are essentially never empty, so this succeeds on
-/// the first try there; when every probe comes back empty [`probe_canaries`]
-/// reports [`Anchoring::Unproven`] rather than an anchor.
+/// the first try there; an end whose whole walk produces nothing is reported
+/// by [`probe_canaries`] as a miss, with what the probes actually did.
 const CANARY_PROBE_BLOCKS: u64 = 16;
 
 /// Attempts per candidate anchor block. A backend without the log index
@@ -401,10 +403,11 @@ const CORROBORATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from
 /// answered as `(observed, expected)`.
 ///
 /// An empty slice only ever reaches here on the caller's explicit
-/// `--allow-uncorroborated` opt-in (see [`ScanDecision`]): there are then no
-/// anchors to verify against, so the answer is taken and the report says it
-/// was uncorroborated. Without that opt-in an unanchored scan is refused
-/// before any of this runs.
+/// `--allow-uncorroborated` opt-in over a scan where NO probe anchored (see
+/// [`ScanDecision`]): there are then no anchors to verify against, so the
+/// answer is taken and the report says it was uncorroborated. Without that
+/// opt-in — and always, when one end anchored and the other did not — the scan
+/// is refused before any of this runs.
 ///
 /// Note what is deliberately *not* here: "a non-empty answer needs no proof".
 /// It is not sound. A backend whose log index starts inside the queried chunk
@@ -415,23 +418,101 @@ pub fn is_corroborated(canaries: &[(usize, usize)]) -> bool {
         .all(|(observed, expected)| observed >= expected)
 }
 
+/// Which end of a scan a probe walk started from.
+///
+/// Worth naming in a refusal, because the two ends fail for different reasons:
+/// a backend that has pruned old receipts misses the oldest end, while one
+/// whose index has not caught up misses the newest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanEnd {
+    Oldest,
+    Newest,
+}
+
+impl ScanEnd {
+    fn label(self) -> &'static str {
+        match self {
+            ScanEnd::Oldest => "oldest",
+            ScanEnd::Newest => "newest",
+        }
+    }
+
+    fn opposite(self) -> Self {
+        match self {
+            ScanEnd::Oldest => ScanEnd::Newest,
+            ScanEnd::Newest => ScanEnd::Oldest,
+        }
+    }
+}
+
+/// Why one end's probe walk produced no anchor.
+///
+/// The two counts are kept apart rather than summarised as "found nothing":
+/// "the endpoint answered, and those blocks hold no logs" and "the endpoint
+/// never answered at all" are different facts about it, and a refusal that
+/// reports the second as the first sends the operator after the wrong thing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProbeMiss {
+    /// Requests the endpoint answered with an empty log list.
+    pub empty_responses: usize,
+    /// Requests that errored, and never produced an answer at all.
+    pub failed_requests: usize,
+    /// The last error seen, for the operator to act on.
+    pub last_error: Option<String>,
+}
+
+impl ProbeMiss {
+    fn describe(&self) -> String {
+        let last = self.last_error.as_deref().unwrap_or("unknown");
+        match (self.empty_responses, self.failed_requests) {
+            (0, 0) => "no probe request was made".to_string(),
+            (empty, 0) => format!("{empty} probe requests came back with an empty log list"),
+            (0, failed) => {
+                format!("all {failed} probe requests failed (last error: {last})")
+            }
+            (empty, failed) => format!(
+                "{empty} probe requests came back with an empty log list and {failed} failed \
+                 (last error: {last})"
+            ),
+        }
+    }
+}
+
+/// What one end's probe walk produced.
+#[derive(Debug, Clone)]
+enum ProbeOutcome {
+    Anchored(Box<Canary>),
+    Missed(ProbeMiss),
+}
+
 /// What the anchor probes established about the backend serving this scan.
 ///
 /// The distinction this type draws is the whole reason it exists: an **empty**
 /// probe response proves nothing, because a backend that has pruned this era's
 /// log index answers `[]` exactly like a genuinely quiet chain does. Only a
 /// successful, **non-empty** probe response is evidence that the backend
-/// actually holds these blocks' logs.
+/// actually holds these blocks' logs. Both ends are always probed, so which of
+/// the three outcomes below applies is a fact about the whole scan and not
+/// about whichever end happened to be tried first.
 #[derive(Debug, Clone)]
 pub enum Anchoring {
     /// Both ends of the scan anchored on a block whose logs this endpoint
     /// served, so every response in the scan can be proven against them.
     Anchored(Vec<Canary>),
-    /// No probe at either end ever produced an anchor — every one came back
-    /// empty or errored. Either the chain really is that quiet (a localnet) or
-    /// the endpoint cannot serve this era's logs at all, and nothing in the
+    /// One end anchored and the other did not. Unlike the case below this is
+    /// not ambiguous: the endpoint demonstrably HAS logs for one end of the
+    /// range and demonstrably would not produce any for the other, which is
+    /// what a partial log index looks like. No opt-in can make that countable.
+    PartiallyAnchored {
+        /// The end that produced no anchor.
+        missing: ScanEnd,
+        /// What its probes actually did.
+        miss: ProbeMiss,
+    },
+    /// Neither end anchored. Either the chain really is that quiet (a localnet)
+    /// or the endpoint cannot serve this era's logs at all, and nothing in the
     /// responses tells the two apart, so a count taken here is unproven.
-    Unproven,
+    Unanchored { oldest: ProbeMiss, newest: ProbeMiss },
 }
 
 /// Whether a scan may be counted, given what its probes established.
@@ -440,16 +521,19 @@ pub enum Anchoring {
 /// answer is *zero*, and a zero that came from a pruned backend is
 /// indistinguishable from a quiet trial — the exact failure this whole
 /// corroboration apparatus exists to prevent. A localnet with no logs to
-/// anchor on is a real case, but it is the operator's to assert.
+/// anchor on is a real case, but it is the operator's to assert — and only
+/// that case: a half-anchored scan has already proven the chain has logs, so
+/// the opt-in has nothing left to assert and does not apply to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanDecision {
     /// Anchored: every response is batched with a canary, and one that cannot
     /// be corroborated is retried rather than counted.
     Corroborated,
-    /// Unproven, but the caller explicitly opted in: count it, and report
-    /// `corroborated: false` so the reader knows which kind of number it is.
+    /// Nothing anchored anywhere, but the caller explicitly opted in: count it,
+    /// and report `corroborated: false` so the reader knows which kind of
+    /// number it is.
     ProceedUnproven,
-    /// Unproven with no opt-in: publish nothing.
+    /// Publish nothing.
     Refuse,
 }
 
@@ -458,66 +542,114 @@ pub enum ScanDecision {
 pub fn scan_decision(anchoring: &Anchoring, allow_uncorroborated: bool) -> ScanDecision {
     match (anchoring, allow_uncorroborated) {
         (Anchoring::Anchored(_), _) => ScanDecision::Corroborated,
-        (Anchoring::Unproven, true) => ScanDecision::ProceedUnproven,
-        (Anchoring::Unproven, false) => ScanDecision::Refuse,
+        // Deliberately ignores the opt-in: this endpoint has already shown it
+        // holds part of the range and not the rest.
+        (Anchoring::PartiallyAnchored { .. }, _) => ScanDecision::Refuse,
+        (Anchoring::Unanchored { .. }, true) => ScanDecision::ProceedUnproven,
+        (Anchoring::Unanchored { .. }, false) => ScanDecision::Refuse,
     }
 }
 
-/// Why a scan was refused, in terms an operator can act on: the endpoint
-/// problem it most likely is, and the opt-in for the case where it is not.
-fn unproven_scan_message(from: u64, to: u64) -> String {
-    format!(
-        "blocks {from}-{to}: no canary anchor could be found at either end of this scan — every \
-         probe came back empty — so nothing shows that the RPC backend serving this connection \
-         holds these blocks' logs at all. A backend whose log index does not cover them answers \
-         with an empty list rather than an error, so a count taken here could read zero on a \
-         busy venue. Point --eth-rpc-url at a full-history endpoint, or narrow the window to \
-         blocks it still retains. If this really is a chain with no logs to anchor on (a quiet \
-         localnet), pass --allow-uncorroborated to accept an unproven count."
-    )
+/// Why a scan was refused, in terms an operator can act on. `None` for an
+/// anchoring that is not a refusal.
+///
+/// Pure, and separate from the probing, because the wording is load-bearing:
+/// pointing an operator at `--allow-uncorroborated` for a half-anchored scan
+/// on a public endpoint is what would walk them into publishing the silent
+/// under-count this apparatus exists to prevent.
+pub fn refusal_message(from: u64, to: u64, anchoring: &Anchoring) -> Option<String> {
+    match anchoring {
+        Anchoring::Anchored(_) => None,
+        Anchoring::PartiallyAnchored { missing, miss } => {
+            let (missing_end, anchored_end) = (missing.label(), missing.opposite().label());
+            let detail = miss.describe();
+            Some(format!(
+                "blocks {from}-{to}: the {anchored_end} end of this scan anchored, but the \
+                 {missing_end} end did not — {detail}. That is positive evidence of a PARTIAL \
+                 log index: this RPC backend holds logs for one end of the range and would not \
+                 produce any for the other, so a count taken from it would silently be missing \
+                 whatever it cannot see. Reconnecting draws a different backend from the pool; \
+                 if it keeps happening, point --eth-rpc-url at a full-history endpoint, or \
+                 narrow the window to blocks this one retains. --allow-uncorroborated does not \
+                 apply here: it is for a chain with no logs at all, and this chain demonstrably \
+                 has some."
+            ))
+        }
+        Anchoring::Unanchored { oldest, newest } => {
+            let (o, n) = (oldest.describe(), newest.describe());
+            Some(format!(
+                "blocks {from}-{to}: neither end of this scan could be anchored — at the oldest \
+                 end {o}, at the newest end {n} — so nothing shows that the RPC backend serving \
+                 this connection holds these blocks' logs at all. A backend whose log index does \
+                 not cover them answers with an empty list rather than an error, so a count \
+                 taken here could read zero on a busy venue. Point --eth-rpc-url at a \
+                 full-history endpoint, or narrow the window to blocks it still retains. If this \
+                 really is a chain with no logs to anchor on (a quiet localnet), pass \
+                 --allow-uncorroborated to accept an unproven count."
+            ))
+        }
+    }
 }
 
 /// Find the anchors for a scan: one as close as possible to `from`, one as
 /// close as possible to `to`, so a backend that answers both provably covers
-/// everything between them (see [`Canary`]).
+/// the interval between them (see [`Canary`]).
 ///
-/// Reports [`Anchoring::Unproven`] when either end cannot be anchored: without
-/// both, there is no contiguity argument, and a half-proof is not a proof.
+/// BOTH ends are always probed, whatever the first one does. Stopping at the
+/// first miss would throw away an anchor that was found and leave the two
+/// genuinely different failures — a partial log index and a chain with no logs
+/// — indistinguishable to the caller.
 pub async fn probe_canaries<P: Provider>(provider: &P, from: u64, to: u64) -> Result<Anchoring> {
-    let mut out: Vec<Canary> = Vec::new();
+    let forward: Vec<u64> = (from..=to).take(CANARY_PROBE_BLOCKS as usize).collect();
+    let backward: Vec<u64> = (from..=to).rev().take(CANARY_PROBE_BLOCKS as usize).collect();
 
-    let forward = (from..=to).take(CANARY_PROBE_BLOCKS as usize);
-    let backward = (from..=to).rev().take(CANARY_PROBE_BLOCKS as usize);
+    let oldest = anchor_in(provider, &forward).await;
+    let newest = anchor_in(provider, &backward).await;
 
-    for (end, candidates) in [
-        ("oldest", forward.collect::<Vec<_>>()),
-        ("newest", backward.collect::<Vec<_>>()),
-    ] {
-        match anchor_in(provider, &candidates).await {
-            Some(canary) => {
-                if !out.iter().any(|c| c.filter == canary.filter) {
-                    debug!(end, expected = canary.expected, block = ?canary.filter.get_from_block(), "chain-report: canary anchored");
-                    out.push(canary);
-                }
+    for (end, outcome) in [(ScanEnd::Oldest, &oldest), (ScanEnd::Newest, &newest)] {
+        match outcome {
+            ProbeOutcome::Anchored(c) => {
+                debug!(end = end.label(), expected = c.expected, block = ?c.filter.get_from_block(), "chain-report: canary anchored")
             }
-            None => {
+            ProbeOutcome::Missed(miss) => {
                 debug!(
-                    end,
+                    end = end.label(),
+                    detail = miss.describe(),
                     "chain-report: no canary anchor found near this end of the scan"
-                );
-                // One missing end means no contiguity argument is available, so
-                // do not pretend a half-proof is a proof.
-                return Ok(Anchoring::Unproven);
+                )
             }
         }
     }
 
-    Ok(Anchoring::Anchored(out))
+    Ok(match (oldest, newest) {
+        (ProbeOutcome::Anchored(a), ProbeOutcome::Anchored(b)) => {
+            let mut out = vec![*a];
+            if !out.iter().any(|c| c.filter == b.filter) {
+                out.push(*b);
+            }
+            Anchoring::Anchored(out)
+        }
+        (ProbeOutcome::Anchored(_), ProbeOutcome::Missed(miss)) => Anchoring::PartiallyAnchored {
+            missing: ScanEnd::Newest,
+            miss,
+        },
+        (ProbeOutcome::Missed(miss), ProbeOutcome::Anchored(_)) => Anchoring::PartiallyAnchored {
+            missing: ScanEnd::Oldest,
+            miss,
+        },
+        (ProbeOutcome::Missed(oldest), ProbeOutcome::Missed(newest)) => {
+            Anchoring::Unanchored { oldest, newest }
+        }
+    })
 }
 
 /// First block in `candidates` that has any logs, anchored on whichever address
 /// logged least in it (so the canary stays a couple of hundred bytes).
-async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> Option<Canary> {
+///
+/// On a miss it reports what the probes did rather than just that they failed:
+/// empty answers and failed requests say different things about the endpoint.
+async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> ProbeOutcome {
+    let mut miss = ProbeMiss::default();
     for &block in candidates {
         let whole_block = Filter::new().from_block(block).to_block(block);
         for attempt in 0..CANARY_PROBE_ATTEMPTS {
@@ -536,10 +668,13 @@ async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> Option<Cana
                         tokio::time::sleep(RATE_LIMIT_BACKOFF).await;
                     }
                     debug!(%msg, block, "chain-report: canary probe request failed");
+                    miss.failed_requests += 1;
+                    miss.last_error = Some(msg);
                     continue;
                 }
             };
             if logs.is_empty() {
+                miss.empty_responses += 1;
                 continue;
             }
             let mut per_address: BTreeMap<Address, usize> = BTreeMap::new();
@@ -550,23 +685,24 @@ async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> Option<Cana
                 .into_iter()
                 .min_by_key(|&(_, n)| n)
                 .expect("logs is non-empty");
-            return Some(Canary {
+            return ProbeOutcome::Anchored(Box::new(Canary {
                 filter: Filter::new()
                     .address(anchor)
                     .from_block(block)
                     .to_block(block),
                 expected,
-            });
+            }));
         }
     }
-    None
+    ProbeOutcome::Missed(miss)
 }
 
 /// One scan's result: the tally, plus whether every response it counted came
 /// with a canary proof (see [`Canary`]). `corroborated: false` is only ever
 /// reachable through the caller's explicit opt-in (see [`ScanDecision`]), and
 /// the flag is reported rather than hidden so a reader can tell an unproven
-/// count from a proven one.
+/// count from a proven one. A scan that queried nothing at all is vacuously
+/// corroborated: no response went unproven, because there was no response.
 #[derive(Debug, Clone)]
 pub struct Scan {
     pub tally: SwapTally,
@@ -591,12 +727,14 @@ pub async fn collect_tally<P: Provider>(
     let refunded = EthHTLC::Refunded::SIGNATURE_HASH;
 
     // An empty window selects no blocks, so nothing is queried and there is
-    // nothing to prove — not an unproven scan, a scan that never happened.
+    // nothing to prove — not an unproven scan, a scan that never happened. No
+    // response went uncorroborated because there was no response, so the flag
+    // stays `true` rather than reading as an unproven count to a script.
     let span_end = window.outcomes_to.max(window.locks_to);
     if span_end < window.locks_from {
         return Ok(Scan {
             tally,
-            corroborated: false,
+            corroborated: true,
         });
     }
 
@@ -607,14 +745,14 @@ pub async fn collect_tally<P: Provider>(
     let canaries = match scan_decision(&anchoring, allow_uncorroborated) {
         ScanDecision::Corroborated => match anchoring {
             Anchoring::Anchored(canaries) => canaries,
-            Anchoring::Unproven => unreachable!("an unproven scan is never corroborated"),
+            _ => unreachable!("only an anchored scan is corroborated"),
         },
         ScanDecision::ProceedUnproven => Vec::new(),
         ScanDecision::Refuse => {
-            return Err(SwapError::EthLogsUncorroborated(unproven_scan_message(
-                window.locks_from,
-                span_end,
-            )));
+            return Err(SwapError::EthLogsUncorroborated(
+                refusal_message(window.locks_from, span_end, &anchoring)
+                    .expect("a refused scan always has a reason"),
+            ));
         }
     };
 
@@ -1213,74 +1351,176 @@ mod tests {
         assert!(is_corroborated(&[]));
     }
 
+    fn canary_at(block: u64) -> Canary {
+        Canary {
+            filter: Filter::new().from_block(block).to_block(block),
+            expected: 1,
+        }
+    }
+
+    fn empty_miss(n: usize) -> ProbeMiss {
+        ProbeMiss {
+            empty_responses: n,
+            failed_requests: 0,
+            last_error: None,
+        }
+    }
+
+    fn failed_miss(n: usize) -> ProbeMiss {
+        ProbeMiss {
+            empty_responses: 0,
+            failed_requests: n,
+            last_error: Some("connection reset by peer".into()),
+        }
+    }
+
     // Refusing is the default, and the reason is the whole feature: probes that
     // ALL came back empty are exactly what a pruned backend produces, and the
     // count it would then publish is a zero that reads as a quiet trial.
     #[test]
     fn a_scan_no_probe_could_anchor_is_refused_unless_the_operator_opts_in() {
-        let anchored = Anchoring::Anchored(vec![Canary {
-            filter: Filter::new().from_block(7u64).to_block(7u64),
-            expected: 1,
-        }]);
+        let anchored = Anchoring::Anchored(vec![canary_at(7)]);
 
-        // Probes succeeded somewhere: corroboration proceeds, and the opt-in
+        // Probes anchored at both ends: corroboration proceeds, and the opt-in
         // flag does not weaken it.
         assert_eq!(scan_decision(&anchored, false), ScanDecision::Corroborated);
         assert_eq!(scan_decision(&anchored, true), ScanDecision::Corroborated);
 
-        // No probe ever produced an anchor: refuse by default...
-        assert_eq!(
-            scan_decision(&Anchoring::Unproven, false),
-            ScanDecision::Refuse
-        );
+        // No probe anywhere produced an anchor: refuse by default...
+        let unanchored = Anchoring::Unanchored {
+            oldest: empty_miss(80),
+            newest: empty_miss(80),
+        };
+        assert_eq!(scan_decision(&unanchored, false), ScanDecision::Refuse);
         // ...and only an explicit opt-in downgrades that to a flagged count.
         assert_eq!(
-            scan_decision(&Anchoring::Unproven, true),
+            scan_decision(&unanchored, true),
             ScanDecision::ProceedUnproven
         );
     }
 
-    // The refusal has to tell an operator what to do next, and the two things
-    // they can do are point at a different endpoint or assert the quiet chain.
+    // The case the opt-in must NOT reach: one end anchored, so this chain
+    // demonstrably has logs and this backend demonstrably would not serve them
+    // for the rest of the range. Publishing that count under
+    // `--allow-uncorroborated` is precisely the silent under-read the whole
+    // apparatus exists to prevent.
     #[test]
-    fn the_refusal_names_the_endpoint_problem_and_the_opt_in() {
-        let msg = unproven_scan_message(100, 200);
-        assert!(msg.contains("100-200"));
-        assert!(msg.contains("--eth-rpc-url"));
-        assert!(msg.contains("--allow-uncorroborated"));
+    fn a_half_anchored_scan_is_refused_even_with_the_opt_in() {
+        for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
+            let partial = Anchoring::PartiallyAnchored {
+                missing,
+                miss: empty_miss(80),
+            };
+            assert_eq!(
+                scan_decision(&partial, false),
+                ScanDecision::Refuse,
+                "a partial log index is never countable ({missing:?} end missing)"
+            );
+            assert_eq!(
+                scan_decision(&partial, true),
+                ScanDecision::Refuse,
+                "--allow-uncorroborated must not downgrade a partial log index"
+            );
+        }
     }
 
-    // Answering a rate limit by halving the span doubles the request rate —
-    // the one reaction guaranteed to make it worse. These are the phrasings
-    // actually seen from publicnode.
+    // The refusal has to tell an operator what to do next, and what to do
+    // differs by case — so the two must not share wording.
     #[test]
-    fn rate_limits_and_range_limits_are_told_apart() {
-        assert_eq!(
-            classify_rpc_failure(
-                "HTTP error 429 with body: {\"error\":{\"code\":-32005,\"message\":\"Rate limit \
-                 exceeded. To obtain higher limits, please request a personal token\"}}"
-            ),
-            RpcFailure::RateLimited
+    fn each_refusal_names_its_own_remedy() {
+        // Nothing anchored: the localnet opt-in is the honest suggestion.
+        let unanchored = refusal_message(
+            100,
+            200,
+            &Anchoring::Unanchored {
+                oldest: empty_miss(80),
+                newest: empty_miss(80),
+            },
+        )
+        .expect("an unanchored scan is a refusal");
+        assert!(unanchored.contains("100-200"));
+        assert!(unanchored.contains("--eth-rpc-url"));
+        assert!(unanchored.contains("--allow-uncorroborated"));
+        assert!(unanchored.contains("localnet"));
+
+        // Half anchored: name the end that failed, and do not send the operator
+        // to the opt-in — on a public endpoint that prints an under-count.
+        let partial = refusal_message(
+            100,
+            200,
+            &Anchoring::PartiallyAnchored {
+                missing: ScanEnd::Oldest,
+                miss: empty_miss(80),
+            },
+        )
+        .expect("a partial log index is a refusal");
+        assert!(partial.contains("oldest"));
+        assert!(
+            !partial.contains("localnet"),
+            "a half-anchored scan is not a quiet chain: {partial}"
         );
-        assert_eq!(
-            classify_rpc_failure("Too Many Requests"),
-            RpcFailure::RateLimited
+        assert!(
+            partial.contains("--allow-uncorroborated does not apply"),
+            "the opt-in must be ruled out explicitly: {partial}"
         );
 
-        assert_eq!(
-            classify_rpc_failure("exceed maximum block range: 50000"),
-            RpcFailure::RangeTooWide
-        );
-        assert_eq!(
-            classify_rpc_failure("query returned more than 10000 results"),
-            RpcFailure::RangeTooWide
+        let newest_missing = refusal_message(
+            1,
+            2,
+            &Anchoring::PartiallyAnchored {
+                missing: ScanEnd::Newest,
+                miss: empty_miss(80),
+            },
+        )
+        .unwrap();
+        assert!(newest_missing.contains("but the newest end did not"));
+
+        // An anchored scan is not a refusal at all.
+        assert!(refusal_message(1, 2, &Anchoring::Anchored(vec![canary_at(1)])).is_none());
+    }
+
+    // "Never answered" and "answered, and the blocks were empty" send an
+    // operator after different things, so a refusal must not report the first
+    // as the second.
+    #[test]
+    fn a_refusal_distinguishes_failed_requests_from_empty_answers() {
+        let errored = refusal_message(
+            1,
+            2,
+            &Anchoring::Unanchored {
+                oldest: failed_miss(80),
+                newest: failed_miss(80),
+            },
+        )
+        .unwrap();
+        assert!(errored.contains("failed"));
+        assert!(errored.contains("connection reset by peer"));
+
+        let empty = refusal_message(
+            1,
+            2,
+            &Anchoring::Unanchored {
+                oldest: empty_miss(80),
+                newest: empty_miss(80),
+            },
+        )
+        .unwrap();
+        assert!(empty.contains("empty log list"));
+        assert!(
+            !empty.contains("failed"),
+            "no request failed, so nothing may say one did: {empty}"
         );
 
-        // Anything unrecognised is surfaced, not silently retried forever.
-        assert_eq!(
-            classify_rpc_failure("connection reset by peer"),
-            RpcFailure::Other
-        );
+        // A walk that saw both must say both.
+        let mixed = ProbeMiss {
+            empty_responses: 40,
+            failed_requests: 40,
+            last_error: Some("504 gateway timeout".into()),
+        }
+        .describe();
+        assert!(mixed.contains("empty log list"));
+        assert!(mixed.contains("failed"));
+        assert!(mixed.contains("504 gateway timeout"));
     }
 
     // `scan_range` derives every `eth_getLogs` span from this helper, so these

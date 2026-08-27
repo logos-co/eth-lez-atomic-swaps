@@ -272,7 +272,12 @@ trial. So the report proves its answers instead of trusting them. Each query
 is batched with two tiny **canary** queries — one log at the oldest block of
 the scan, one at the newest. A JSON-RPC batch is answered by a single backend,
 and log retention is a contiguous block interval, so a backend that serves
-both ends provably covers everything between them. (This is also why the
+both anchors provably covers everything between *them*. Note the exact claim:
+the proven interval is `[oldest anchor, newest anchor]`, and each anchor is the
+first block *with logs* found walking inward from its end — up to
+`CANARY_PROBE_BLOCKS - 1` (15) blocks inside the scanned range. A pruning
+boundary landing in that 16-block margin at either end is the one gap this
+does not close. (This is also why the
 report talks HTTP rather than `wss://`: alloy's WebSocket transport splits a
 batch into separate sends, which would let the canary and the query it vouches
 for be answered by different nodes. Same host, same configured endpoint.)
@@ -284,19 +289,28 @@ explanation instead of printing a count**.
 The same applies when the anchors cannot be found in the first place. A probe
 that comes back **empty proves nothing**: it is what a chain with no logs looks
 like *and* what a backend that has pruned this era's log index looks like, and
-the response does not say which. So a run in which no probe at either end ever
-returned a log is **refused**, not printed — its most likely wrong answer is a
-zero, and a zero from a pruned backend reads exactly like a quiet trial. Only a
-successful, non-empty probe counts as evidence that the endpoint holds these
-blocks at all.
+the response does not say which. Only a successful, non-empty probe counts as
+evidence that the endpoint holds these blocks at all. Both ends are always
+probed, and the two ways that can fail are **not** the same thing:
 
-If you hit either refusal, point `--eth-rpc-url` at a full-history endpoint, or
-narrow the window to blocks it still retains. A chain that genuinely has no
-logs to anchor on — a localnet — is a real case, but it is yours to assert:
-`--allow-uncorroborated` downgrades the refusal to a printed `NOTE` and
-`"corroborated": false` in the JSON. That field is therefore never `false`
-unless someone passed that flag; without it, a published count is always a
-proven one.
+- **One end anchored, the other did not.** This is not ambiguous — the backend
+  demonstrably holds logs for one end of the range and demonstrably would not
+  produce any for the other, which is what a partial log index looks like. The
+  run is **always refused**, and `--allow-uncorroborated` does not apply to it:
+  the chain plainly has logs, so there is nothing for the operator to assert.
+  The refusal names which end failed.
+- **Neither end anchored.** Nothing was learned either way. The run is refused
+  by default for the same reason as above — its likeliest wrong answer is a
+  zero, and a zero from a pruned backend reads exactly like a quiet trial — but
+  this is the one case a localnet genuinely produces, so it is yours to assert
+  with `--allow-uncorroborated`, which downgrades the refusal to a printed
+  `NOTE` and `"corroborated": false` in the JSON.
+
+Either way, point `--eth-rpc-url` at a full-history endpoint, or narrow the
+window to blocks it still retains. `"corroborated"` is never `false` unless
+someone passed that flag; without it, a published count is always a proven one.
+(A window that selects no blocks — `--since` in the future — queried nothing,
+so nothing went unproven and the field stays `true` alongside its zeroes.)
 
 ---
 

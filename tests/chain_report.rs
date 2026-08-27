@@ -42,9 +42,20 @@ struct Venue {
     address: Address,
     /// Indexed by anvil key: 0 = deployer, 1..=2 = takers, 3..=4 = makers.
     providers: Vec<DynProvider>,
+    /// The read side, over HTTP — the transport `cli::report::connect` rewrites
+    /// `wss://` to before it runs a single query. The corroboration proof rests
+    /// on a JSON-RPC batch reaching one backend as ONE request, and alloy's
+    /// WebSocket transport splits a batch into separate sends, so a suite that
+    /// drove `collect_tally` over WS would be exercising a path production
+    /// never takes.
+    reader: DynProvider,
 }
 
 impl Venue {
+    fn reader(&self) -> &DynProvider {
+        &self.reader
+    }
+
     fn taker(&self, i: usize) -> &DynProvider {
         &self.providers[1 + i]
     }
@@ -82,10 +93,17 @@ async fn setup() -> Venue {
         .unwrap();
     let address = *contract.address();
 
+    let reader = ProviderBuilder::new()
+        .connect(&anvil.endpoint())
+        .await
+        .unwrap()
+        .erased();
+
     Venue {
         anvil,
         address,
         providers,
+        reader,
     }
 }
 
@@ -216,7 +234,7 @@ async fn counts_a_mixed_trial_from_logs_alone() {
         locks_to: to,
         outcomes_to: to,
     };
-    let counts = collect_tally(venue.taker(0), venue.address, &window, CHUNK, false)
+    let counts = collect_tally(venue.reader(), venue.address, &window, CHUNK, false)
         .await
         .unwrap()
         .tally
@@ -287,7 +305,7 @@ async fn a_block_window_bounds_the_attempt_count() {
     lock(&venue, venue.taker(1), m1, 0x13, 3_600).await;
 
     let counts = collect_tally(
-        venue.taker(0),
+        venue.reader(),
         venue.address,
         &ReportWindow {
             locks_from: window_from,
@@ -325,7 +343,7 @@ async fn outcomes_are_followed_past_the_end_of_the_attempt_window() {
 
     // Attempt window ends at the lock; outcomes followed to the head.
     let followed = collect_tally(
-        venue.taker(0),
+        venue.reader(),
         venue.address,
         &ReportWindow {
             locks_from: start,
@@ -346,7 +364,7 @@ async fn outcomes_are_followed_past_the_end_of_the_attempt_window() {
     // The same window with outcomes cut off at the lock: the swap was genuinely
     // still open as of that block, and the report says so rather than guessing.
     let truncated = collect_tally(
-        venue.taker(0),
+        venue.reader(),
         venue.address,
         &ReportWindow {
             locks_from: start,
@@ -379,7 +397,7 @@ async fn empty_window_is_zero_and_small_chunks_still_cover_the_range() {
     // One block per eth_getLogs call: the chunking must not drop or double-count
     // the block the lock landed in.
     let counts = collect_tally(
-        venue.taker(0),
+        venue.reader(),
         venue.address,
         &ReportWindow {
             locks_from: start,
@@ -395,9 +413,12 @@ async fn empty_window_is_zero_and_small_chunks_still_cover_the_range() {
     .counts();
     assert_eq!(counts.attempted, 1);
 
-    // An inverted/empty window is a no-op, not a query.
+    // An inverted/empty window is a no-op, not a query — and not an unproven
+    // count either: nothing went uncorroborated because nothing was asked. A
+    // script gating on `corroborated` must not read a future --since as a
+    // failed proof.
     let empty = collect_tally(
-        venue.taker(0),
+        venue.reader(),
         venue.address,
         &ReportWindow {
             locks_from: to + 1,
@@ -408,9 +429,12 @@ async fn empty_window_is_zero_and_small_chunks_still_cover_the_range() {
         false,
     )
     .await
-    .unwrap()
-    .tally
-    .counts();
+    .unwrap();
+    assert!(
+        empty.corroborated,
+        "a window that queried nothing is vacuously corroborated"
+    );
+    let empty = empty.tally.counts();
     assert_eq!(empty.attempted, 0);
     assert!(empty.by_maker.is_empty());
 }
@@ -433,7 +457,7 @@ async fn a_scan_without_an_anchor_is_refused_until_the_operator_opts_in() {
         outcomes_to: to,
     };
 
-    let refused = collect_tally(venue.taker(0), venue.address, &window, CHUNK, false)
+    let refused = collect_tally(venue.reader(), venue.address, &window, CHUNK, false)
         .await
         .expect_err("an unprovable scan must not produce a headline number");
     let SwapError::EthLogsUncorroborated(msg) = refused else {
@@ -445,7 +469,7 @@ async fn a_scan_without_an_anchor_is_refused_until_the_operator_opts_in() {
     );
 
     // The same scan, with the opt-in: it proceeds, and says it is unproven.
-    let scan = collect_tally(venue.taker(0), venue.address, &window, CHUNK, true)
+    let scan = collect_tally(venue.reader(), venue.address, &window, CHUNK, true)
         .await
         .expect("--allow-uncorroborated downgrades the refusal");
     assert!(!scan.corroborated, "an unanchored count is never corroborated");
@@ -472,7 +496,7 @@ async fn a_proven_zero_is_reported_rather_than_refused() {
     // These blocks demonstrably have logs, so the probes anchor — but they hold
     // none for THIS address, so its answer is genuinely empty.
     let quiet_venue = Address::from([0x5Au8; 20]);
-    let scan = collect_tally(venue.taker(0), quiet_venue, &window, CHUNK, false)
+    let scan = collect_tally(venue.reader(), quiet_venue, &window, CHUNK, false)
         .await
         .expect("an anchored scan reports its zero instead of refusing");
     assert!(
@@ -482,7 +506,7 @@ async fn a_proven_zero_is_reported_rather_than_refused() {
     assert_eq!(scan.tally.counts().attempted, 0);
 
     // And the same anchored window over the real venue is a proven one.
-    let real = collect_tally(venue.taker(0), venue.address, &window, CHUNK, false)
+    let real = collect_tally(venue.reader(), venue.address, &window, CHUNK, false)
         .await
         .unwrap();
     assert!(real.corroborated);
