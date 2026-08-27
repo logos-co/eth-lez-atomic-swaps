@@ -396,6 +396,12 @@ const CANARY_PROBE_BLOCKS: u64 = 16;
 /// answers `[]`, so a single empty answer does not yet mean the block is empty.
 const CANARY_PROBE_ATTEMPTS: usize = 5;
 
+/// Extra tries granted to a rate-limited probe, on top of
+/// [`CANARY_PROBE_ATTEMPTS`]. A 429 is the endpoint asking for fewer requests
+/// (see [`RpcFailure`]), not a refusal to answer, so it must not burn one of
+/// the attempts this block gets — but it cannot be retried forever either.
+const CANARY_RATE_LIMIT_RETRIES: u32 = 3;
+
 /// How many times one chunk may come back uncorroborated before the scan gives
 /// up. Kept modest on purpose: over WebSocket a connection is sticky to one
 /// backend, so retrying on the same connection cannot escape a pruned node —
@@ -454,17 +460,25 @@ impl ScanEnd {
 
 /// Why one end's probe walk produced no anchor.
 ///
-/// The two counts are kept apart rather than summarised as "found nothing":
-/// "the endpoint answered, and those blocks hold no logs" and "the endpoint
-/// never answered at all" are different facts about it, and a refusal that
-/// reports the second as the first sends the operator after the wrong thing.
+/// The counts are kept apart rather than summarised as "found nothing": "the
+/// endpoint answered, and those blocks hold no logs", "the endpoint asked us to
+/// slow down" and "the endpoint never answered at all" are different facts
+/// about it, and a refusal that reports one as another sends the operator after
+/// the wrong thing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProbeMiss {
     /// Requests the endpoint answered with an empty log list.
     pub empty_responses: usize,
-    /// Requests that errored, and never produced an answer at all.
+    /// Requests the endpoint answered with a rate limit. Tracked apart from
+    /// [`Self::failed_requests`] on purpose: the module treats a 429 as the
+    /// endpoint asking for fewer requests rather than as a fault (see
+    /// [`RpcFailure`]), and publicnode answering a burst that way is documented
+    /// expected behaviour — so it must not read as the endpoint being broken.
+    pub rate_limited: usize,
+    /// Requests that errored for some other reason, and never produced an
+    /// answer at all.
     pub failed_requests: usize,
-    /// The last error seen, for the operator to act on.
+    /// The last non-rate-limit error seen, for the operator to act on.
     pub last_error: Option<String>,
 }
 
@@ -472,28 +486,47 @@ impl ProbeMiss {
     /// Whether this walk produced *evidence about the endpoint*, as opposed to
     /// an ambiguous silence.
     ///
-    /// An empty log list is not evidence: [`Anchoring`] exists precisely
-    /// because a pruned backend and a log-free block range are
-    /// indistinguishable in it. A request that ERRORED is evidence — the
-    /// endpoint failed to answer, and no claim about how quiet the chain is
-    /// can explain that away. Only this side of the line refuses
-    /// unconditionally.
+    /// The bar is that the walk never got a successful answer at all. An empty
+    /// log list is not evidence — [`Anchoring`] exists precisely because a
+    /// pruned backend and a log-free block range are indistinguishable in it —
+    /// but it IS an answer, so a walk that saw one has watched this endpoint
+    /// serve a request and cannot conclude it is broken. Only a walk that was
+    /// answered by nothing but errors is on the other side of that line, and
+    /// only that side refuses unconditionally.
     pub fn endpoint_misbehaved(&self) -> bool {
-        self.failed_requests > 0
+        self.empty_responses == 0 && self.failed_requests > 0
     }
 
     fn describe(&self) -> String {
-        let last = self.last_error.as_deref().unwrap_or("unknown");
-        match (self.empty_responses, self.failed_requests) {
-            (0, 0) => "no probe request was made".to_string(),
-            (empty, 0) => format!("{empty} probe requests came back with an empty log list"),
-            (0, failed) => {
-                format!("all {failed} probe requests failed (last error: {last})")
+        let mut parts: Vec<String> = Vec::new();
+        if self.empty_responses > 0 {
+            parts.push(format!(
+                "{} probe requests came back with an empty log list",
+                self.empty_responses
+            ));
+        }
+        if self.rate_limited > 0 {
+            parts.push(format!("{} were rate-limited", self.rate_limited));
+        }
+        if self.failed_requests > 0 {
+            let last = self.last_error.as_deref().unwrap_or("unknown");
+            let alone = parts.is_empty();
+            parts.push(if alone {
+                format!(
+                    "all {} probe requests failed (last error: {last})",
+                    self.failed_requests
+                )
+            } else {
+                format!("{} failed (last error: {last})", self.failed_requests)
+            });
+        }
+        match parts.len() {
+            0 => "no probe request was made".to_string(),
+            1 => parts.swap_remove(0),
+            _ => {
+                let last = parts.pop().expect("more than one part");
+                format!("{} and {last}", parts.join(", "))
             }
-            (empty, failed) => format!(
-                "{empty} probe requests came back with an empty log list and {failed} failed \
-                 (last error: {last})"
-            ),
         }
     }
 }
@@ -637,19 +670,25 @@ pub fn scan_decision(anchoring: &Anchoring, allow_uncorroborated: bool) -> ScanD
 pub fn refusal_message(from: u64, to: u64, anchoring: &Anchoring) -> Option<String> {
     let misbehaving = anchoring.misbehaving_ends();
     if !misbehaving.is_empty() {
+        let ends = misbehaving
+            .iter()
+            .map(|(end, _)| end.label())
+            .collect::<Vec<_>>()
+            .join(" and ");
         let detail = misbehaving
             .iter()
             .map(|(end, miss)| format!("at the {} end {}", end.label(), miss.describe()))
             .collect::<Vec<_>>()
             .join(", ");
         return Some(format!(
-            "blocks {from}-{to}: the RPC endpoint did not answer the anchor probes for this scan \
-             — {detail}. A request that errors produces no evidence in either direction, so this \
-             scan cannot be proven against a backend that would not reply. Reconnecting draws a \
-             different backend from the pool; if it keeps happening, point --eth-rpc-url at an \
-             endpoint that serves historical logs reliably, or narrow the window. \
-             --allow-uncorroborated cannot cover this: it asserts that a range of blocks holds \
-             no logs, which says nothing about an endpoint that failed to respond."
+            "blocks {from}-{to}: the RPC endpoint did not answer a single anchor probe at the \
+             {ends} end of this scan — {detail}. Not one of those requests came back with a log \
+             list, so they produced no evidence in either direction, and this scan cannot be \
+             proven against a backend that would not reply. Reconnecting draws a different \
+             backend from the pool; if it keeps happening, point --eth-rpc-url at an endpoint \
+             that serves historical logs reliably, or narrow the window. --allow-uncorroborated \
+             cannot cover this: it asserts that a range of blocks holds no logs, which says \
+             nothing about an endpoint that failed to respond."
         ));
     }
 
@@ -752,10 +791,17 @@ pub async fn probe_canaries<P: Provider>(provider: &P, from: u64, to: u64) -> Re
 /// empty answers and failed requests say different things about the endpoint.
 async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> ProbeOutcome {
     let mut miss = ProbeMiss::default();
+    let mut first = true;
     for &block in candidates {
         let whole_block = Filter::new().from_block(block).to_block(block);
-        for attempt in 0..CANARY_PROBE_ATTEMPTS {
-            if attempt > 0 {
+        let mut attempt = 0usize;
+        let mut rate_limit_retries = 0u32;
+        while attempt < CANARY_PROBE_ATTEMPTS {
+            // Paced between candidate blocks as well as between attempts: this
+            // walk is up to CANARY_PROBE_BLOCKS * CANARY_PROBE_ATTEMPTS
+            // requests, which unpaced is exactly the burst shape a public
+            // endpoint answers with a 429.
+            if !std::mem::take(&mut first) {
                 tokio::time::sleep(CHUNK_PACING).await;
             }
             let logs = match provider.get_logs(&whole_block).await {
@@ -763,18 +809,28 @@ async fn anchor_in<P: Provider>(provider: &P, candidates: &[u64]) -> ProbeOutcom
                 // A probe failure is not fatal: the scan itself will surface any
                 // persistent transport problem with a better message. A rate
                 // limit is worth waiting out though — this probe is what the
-                // whole scan's trustworthiness rests on.
+                // whole scan's trustworthiness rests on — and it is the
+                // endpoint asking for fewer requests rather than failing to
+                // answer, so it neither burns an attempt nor counts as a fault.
                 Err(e) => {
                     let msg = e.to_string();
-                    if classify_rpc_failure(&msg) == RpcFailure::RateLimited {
-                        tokio::time::sleep(RATE_LIMIT_BACKOFF).await;
-                    }
                     debug!(%msg, block, "chain-report: canary probe request failed");
-                    miss.failed_requests += 1;
-                    miss.last_error = Some(msg);
+                    if classify_rpc_failure(&msg) == RpcFailure::RateLimited {
+                        miss.rate_limited += 1;
+                        if rate_limit_retries < CANARY_RATE_LIMIT_RETRIES {
+                            rate_limit_retries += 1;
+                            tokio::time::sleep(RATE_LIMIT_BACKOFF).await;
+                            continue;
+                        }
+                    } else {
+                        miss.failed_requests += 1;
+                        miss.last_error = Some(msg);
+                    }
+                    attempt += 1;
                     continue;
                 }
             };
+            attempt += 1;
             if logs.is_empty() {
                 miss.empty_responses += 1;
                 continue;
@@ -1458,16 +1514,31 @@ mod tests {
     fn empty_miss(n: usize) -> ProbeMiss {
         ProbeMiss {
             empty_responses: n,
-            failed_requests: 0,
-            last_error: None,
+            ..ProbeMiss::default()
         }
     }
 
     fn failed_miss(n: usize) -> ProbeMiss {
         ProbeMiss {
-            empty_responses: 0,
             failed_requests: n,
             last_error: Some("connection reset by peer".into()),
+            ..ProbeMiss::default()
+        }
+    }
+
+    fn mixed_miss(empty: usize, failed: usize) -> ProbeMiss {
+        ProbeMiss {
+            empty_responses: empty,
+            failed_requests: failed,
+            last_error: Some("connection reset by peer".into()),
+            ..ProbeMiss::default()
+        }
+    }
+
+    fn rate_limited_miss(n: usize) -> ProbeMiss {
+        ProbeMiss {
+            rate_limited: n,
+            ..ProbeMiss::default()
         }
     }
 
@@ -1524,9 +1595,84 @@ mod tests {
         }
     }
 
-    // A probe request that ERRORED is a fact about the endpoint, and no claim
-    // about how quiet the chain is bears on it. That refusal is not the
-    // operator's to override.
+    // The line is "this walk never got an answer at all", not "an error
+    // appeared somewhere in it". A walk that saw even one empty log list has
+    // watched the endpoint serve a request, so it cannot conclude the endpoint
+    // is broken — and on a public endpoint a stray 429 or timeout in an
+    // 80-request walk is ordinary, not evidence.
+    #[test]
+    fn a_walk_that_was_answered_at_all_stays_ambiguous_and_overridable() {
+        let mixed = mixed_miss(79, 1);
+        assert!(
+            !mixed.endpoint_misbehaved(),
+            "one error among answered requests is not a broken endpoint"
+        );
+        for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
+            assert_eq!(
+                scan_decision(&partial(missing, mixed_miss(79, 1)), true),
+                ScanDecision::ProceedUnproven
+            );
+            assert_eq!(
+                scan_decision(&partial(missing, mixed_miss(79, 1)), false),
+                ScanDecision::Refuse
+            );
+        }
+        assert_eq!(
+            scan_decision(
+                &Anchoring::Unanchored {
+                    oldest: mixed_miss(79, 1),
+                    newest: mixed_miss(79, 1),
+                },
+                true
+            ),
+            ScanDecision::ProceedUnproven
+        );
+
+        // And the message must match: a mixed walk keeps the ambiguous wording
+        // rather than asserting the endpoint never answered.
+        let msg = refusal_message(1, 2, &partial(ScanEnd::Oldest, mixed_miss(79, 1))).unwrap();
+        assert!(msg.contains("ambiguous"));
+        assert!(
+            !msg.contains("did not answer a single anchor probe"),
+            "79 requests were answered: {msg}"
+        );
+        assert!(msg.contains("pass --allow-uncorroborated"));
+    }
+
+    // A 429 is the endpoint asking for fewer requests, which the scan already
+    // models as expected behaviour on the pinned endpoint — not a fault, and
+    // not something an operator can be told to fix by changing endpoints.
+    #[test]
+    fn a_rate_limited_probe_is_not_endpoint_misbehaviour() {
+        let throttled = rate_limited_miss(12);
+        assert!(!throttled.endpoint_misbehaved());
+        assert_eq!(
+            scan_decision(&partial(ScanEnd::Oldest, rate_limited_miss(12)), true),
+            ScanDecision::ProceedUnproven
+        );
+
+        // It is still reported for what it was, not as an empty answer.
+        let described = throttled.describe();
+        assert!(described.contains("12 were rate-limited"));
+        assert!(!described.contains("empty log list"));
+        assert!(!described.contains("failed"));
+
+        // A walk that saw nothing but rate limits and real failures still names
+        // both, and the failure half is what makes it a hard refusal.
+        let both = ProbeMiss {
+            rate_limited: 4,
+            failed_requests: 76,
+            last_error: Some("connection reset by peer".into()),
+            ..ProbeMiss::default()
+        };
+        assert!(both.endpoint_misbehaved());
+        assert!(both.describe().contains("4 were rate-limited"));
+        assert!(both.describe().contains("76 failed"));
+    }
+
+    // A probe request that ERRORED with nothing else answered is a fact about
+    // the endpoint, and no claim about how quiet the chain is bears on it. That
+    // refusal is not the operator's to override.
     #[test]
     fn an_errored_probe_refuses_even_with_the_opt_in() {
         for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
@@ -1539,7 +1685,8 @@ mod tests {
             );
         }
 
-        // Same rule when neither end anchored and either end saw an error.
+        // Same rule when neither end anchored and either end was answered by
+        // nothing but errors.
         for (oldest, newest) in [
             (failed_miss(80), empty_miss(80)),
             (empty_miss(80), failed_miss(80)),
@@ -1613,7 +1760,11 @@ mod tests {
         let broken = refusal_message(100, 200, &partial(ScanEnd::Newest, failed_miss(80)))
             .expect("an errored probe is a refusal");
         assert!(broken.contains("newest"));
-        assert!(broken.contains("did not answer"));
+        assert!(broken.contains("did not answer a single anchor probe"));
+        assert!(
+            broken.contains("all 80 probe requests failed"),
+            "the assertion and the detail must agree: {broken}"
+        );
         assert!(
             broken.contains("--allow-uncorroborated cannot cover this"),
             "the override must be ruled out where it does not apply: {broken}"
@@ -1659,17 +1810,23 @@ mod tests {
             "no request failed, so nothing may say one did: {empty}"
         );
 
-        // A walk that saw both must say both.
+        // A walk that saw both must say both — and must not claim the endpoint
+        // never answered, because 40 requests did.
         let mixed = ProbeMiss {
             empty_responses: 40,
             failed_requests: 40,
             last_error: Some("504 gateway timeout".into()),
+            ..ProbeMiss::default()
         };
-        assert!(mixed.endpoint_misbehaved());
+        assert!(!mixed.endpoint_misbehaved());
         let described = mixed.describe();
         assert!(described.contains("empty log list"));
-        assert!(described.contains("failed"));
+        assert!(described.contains("40 failed"));
         assert!(described.contains("504 gateway timeout"));
+        assert!(
+            !described.contains("all 40 probe requests failed"),
+            "'all' is false when 40 were answered: {described}"
+        );
     }
 
     // `scan_range` derives every `eth_getLogs` span from this helper, so these

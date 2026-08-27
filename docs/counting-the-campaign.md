@@ -307,12 +307,19 @@ probed, and the two ways that can fail are **not** the same thing:
   and `"corroborated": false` in the JSON. Any anchor that WAS found is still
   batched with every query — overriding gives up the two-point interval proof,
   not the evidence that exists.
-- **The probes errored.** The endpoint did not answer at all. That is a fact
-  about the endpoint rather than an open question about the chain, so
-  `--allow-uncorroborated` does **not** cover it and the run is refused either
-  way — as is an anchor that was corroborating and then stopped mid-scan.
-  Point `--eth-rpc-url` at an endpoint that serves historical logs reliably, or
-  narrow the window.
+- **Nothing answered at all.** Every probe at that end of the scan errored —
+  not one came back with a log list. That is a fact about the endpoint rather
+  than an open question about the chain, so `--allow-uncorroborated` does
+  **not** cover it and the run is refused either way, as is an anchor that was
+  corroborating and then stopped mid-scan. Point `--eth-rpc-url` at an endpoint
+  that serves historical logs reliably, or narrow the window.
+
+  The bar really is *nothing*: a walk that got even one empty answer has
+  watched this endpoint serve a request, so a stray error among otherwise
+  answered probes stays in the ambiguous case above and remains overridable.
+  A rate limit (HTTP 429 / JSON-RPC `-32005`) never counts as a failure at all
+  — publicnode answers bursts that way by design, so the probe backs off and
+  retries rather than treating it as the endpoint being broken.
 
 `"corroborated"` is never `false` unless someone passed that flag; without it,
 a published count is always a proven one. (A window that selects no blocks —
