@@ -23,8 +23,8 @@ import SwapTheme
 //    them for layout purposes — exactly where they belong.
 //
 //   PageScaffold {
-//       title: "Get set up"
-//       subtitle: "Three steps. No keys to type."
+//       title: "Page title"
+//       subtitle: "One line of context."
 //       Card { ... }
 //       Timer { ... }        // safe: not a direct ScrollView child
 //   }

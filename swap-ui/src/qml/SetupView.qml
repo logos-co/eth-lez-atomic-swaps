@@ -24,7 +24,7 @@ PageScaffold {
     id: setupRoot
 
     title: "Get set up"
-    subtitle: "Four steps. No keys to type."
+    subtitle: "Four steps, then you're trading. No keys to type."
 
     // Emitted when the user is done and wants to head to the market. The host
     // (AtomicSwapView) owns tab navigation, so this view only signals intent
