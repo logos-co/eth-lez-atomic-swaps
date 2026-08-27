@@ -128,12 +128,15 @@ pub enum RpcFailure {
     Other,
 }
 
-/// Does `text` mention `token` as a whole number rather than as a run of digits
-/// inside a longer one?
+/// Does `text` mention `token` as a standalone number?
 ///
-/// `429` and `-32005` are the only two numbers this module reads as a verdict,
-/// and both are short enough to appear inside a block number (11429517) or a
-/// different JSON-RPC code (-324290). A leading `-` is part of the token: it is
+/// A token is a maximal run of ASCII alphanumerics, so `429` and `-32005` are
+/// only read as themselves when nothing alphanumeric abuts them. That is what
+/// keeps them from being found inside a block number (11429517), a different
+/// JSON-RPC code (-324290), or the hex of an address, tx hash or block hash
+/// (`0x…b429a…`) — the identifiers callers most often interpolate. Every
+/// phrasing an endpoint actually uses puts a space, `:` or `-` next to the
+/// number, so none of them loses. A leading `-` is part of the token: it is
 /// what separates the JSON-RPC code from an unrelated 32005.
 fn mentions_number(text: &str, token: &str) -> bool {
     let (signed, digits) = match token.strip_prefix('-') {
@@ -143,12 +146,12 @@ fn mentions_number(text: &str, token: &str) -> bool {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if !bytes[i].is_ascii_digit() {
+        if !bytes[i].is_ascii_alphanumeric() {
             i += 1;
             continue;
         }
         let start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
+        while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
             i += 1;
         }
         if (start > 0 && bytes[start - 1] == b'-') == signed && &text[start..i] == digits {
@@ -162,8 +165,18 @@ fn mentions_number(text: &str, token: &str) -> bool {
 /// dozen ways and share no error code for the range case, so this matches on
 /// the wording — pure, and unit-tested against the phrasings actually seen.
 ///
-/// The message must be the endpoint's own words. Callers add their own context
-/// (which block, which span) to what they display, not to what they classify.
+/// # What callers may pass
+///
+/// The endpoint's own words, ideally alone: `e.to_string()` on the provider
+/// error. Caller-formatted context — a block number, a contract address, a tx
+/// or block hash — is precisely what breaks a match on the wording, because
+/// `429` and `-32005` are short enough to occur inside one. Prefer classifying
+/// the raw error and adding context to what you DISPLAY.
+///
+/// [`mentions_number`] is the second line of defence for the callers that
+/// cannot: it reads a number only when no alphanumeric abuts it, so a `429`
+/// inside `11429517` or `0x…b429a…` is not one. A caller whose context is
+/// separated from the digits by a space or punctuation is still on its own.
 pub fn classify_rpc_failure(message: &str) -> RpcFailure {
     let m = message.to_ascii_lowercase();
     if m.contains("rate limit")
@@ -2029,6 +2042,13 @@ mod tests {
         for message in [
             "eth_getBlockByNumber(11429517) failed: connection reset",
             "block 11429517 not found",
+            // The handshake names the contract it could not read, so the
+            // address's own hex reaches the classifier ahead of the endpoint's
+            // words.
+            "could not read INTERFACE_VERSION from the contract at \
+             0x9f3c1b429ad4e7b2081ae5c6f0d4b8e3a7c25d16: connection refused. That is a failure \
+             to reach the endpoint, not a verdict about the deployment.",
+            "eth_getLogs failed: tx 0xb429a7c25d16 reverted",
             "eth_getLogs failed at block 1429: connection reset",
             "server returned an error response: error code -324290: unknown",
             "server returned an error response: error code -32000: header not found",

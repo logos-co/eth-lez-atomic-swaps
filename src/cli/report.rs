@@ -1153,6 +1153,33 @@ mod tests {
         );
     }
 
+    // Regression: the handshake names the contract it could not read, so the
+    // address's own hex reaches the throttle policy ahead of the endpoint's
+    // words. A `b429a` run inside it used to make a refused connection look
+    // like a 429 and put four escalating sleeps in front of each reconnect.
+    #[tokio::test(start_paused = true)]
+    async fn a_hex_address_containing_429_does_not_slow_the_handshake_retries() {
+        let args = args_for("0x9f3c1b429ad4e7b2081ae5c6f0d4b8e3a7c25d16", Some(0), None);
+        let started = tokio::time::Instant::now();
+        let err = cmd_chain_report(args, false)
+            .await
+            .expect_err("there is no RPC at 127.0.0.1:1");
+        let waited = started.elapsed();
+        assert!(
+            waited < report::RATE_LIMIT_BACKOFF,
+            "a refused connection is not a throttle to wait out, yet the run slept {waited:?}"
+        );
+
+        let SwapError::EthRpc(msg) = err else {
+            panic!("an unreachable endpoint must be an RPC error, got: {err:?}");
+        };
+        assert_eq!(
+            report::classify_rpc_failure(&msg),
+            report::RpcFailure::Other,
+            "the address's hex is not the endpoint asking for fewer requests: {msg}"
+        );
+    }
+
     // Regression: a block number is not the endpoint's words. Any block in
     // 11,429,xxx sits inside the pinned venue's history, and before the split a
     // plain connection reset there read as a 429 — six WARN lines claiming a
