@@ -320,13 +320,16 @@ async fn test_interface_version_handshake() {
     );
 
     // A contract WITHOUT the getter (here: an address with no code at all) must
-    // be rejected, not silently accepted.
+    // be rejected, not silently accepted — and rejected as a wrong-era
+    // deployment, which is what the node's empty answer actually shows. The
+    // endpoint answered here, so this must NOT read as a transport failure.
     let empty = alloy::primitives::Address::from([0x9Au8; 20]);
+    let verdict = swap_orchestrator::eth::client::verify_interface_version(&maker, empty)
+        .await
+        .expect_err("an unversioned/absent contract must fail the handshake");
     assert!(
-        swap_orchestrator::eth::client::verify_interface_version(&maker, empty)
-            .await
-            .is_err(),
-        "an unversioned/absent contract must fail the handshake"
+        matches!(verdict, swap_orchestrator::error::SwapError::EthAbiMismatch(_)),
+        "an answered call that shows no getter is a version verdict, got: {verdict:?}"
     );
     assert!(
         swap_orchestrator::eth::client::verify_interface_version(&maker, contract_addr)

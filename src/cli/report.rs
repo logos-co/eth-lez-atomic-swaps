@@ -748,6 +748,22 @@ mod tests {
                 !matches!(err, SwapError::InvalidConfig(_)),
                 "the era guard fired even though the era was stated: {err:?}"
             );
+            // Past the guard, the run dies on the interface-version handshake
+            // — and nothing is listening, so that must be reported as the
+            // transport failure it is. Reporting it as a verdict about the
+            // deployment ("no INTERFACE_VERSION getter, redeploy EthHTLC")
+            // would be a diagnosis no answered call ever made.
+            let SwapError::EthRpc(msg) = err else {
+                panic!("an unreachable endpoint must be an RPC error, got: {err:?}");
+            };
+            assert!(
+                msg.contains("ETH_RPC_URL"),
+                "the remedy is the endpoint, not the contract: {msg}"
+            );
+            assert!(
+                !msg.contains("Redeploy"),
+                "nothing established anything about the deployment: {msg}"
+            );
         }
     }
 
