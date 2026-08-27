@@ -306,8 +306,8 @@ def main():
     print()
     if failures:
         level = "notice" if args.report_only else "error"
-        print(f"{'REPORTED' if args.report_only else 'FAILED'}: {label} does not "
-              f"carry a usable {FIELD}")
+        print(f"{'REPORTED' if args.report_only else 'FAILED'}: {label} protocol "
+              f"stamp check")
         print()
         for failure in failures:
             print(f"  * {failure}")

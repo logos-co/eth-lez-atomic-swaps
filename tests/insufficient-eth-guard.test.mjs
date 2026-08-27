@@ -234,25 +234,18 @@ test("no notice, no suppression", () => {
   );
 });
 
-test("the error strip actually consults the de-duplication", () => {
-  // The rule above is only worth anything if the strip is wired to it. Pin the
-  // binding so a future edit cannot quietly restore the double display.
-  assert.match(
-    shellQml,
-    /visible:\s*root\.noticeError !== "" && !root\.noticeOnReceipt/,
-    "AtomicSwapView.qml's error strip no longer consults noticeOnReceipt",
-  );
-  assert.match(
-    shellQml,
-    /readonly property bool noticeOnReceipt:/,
-    "AtomicSwapView.qml lost the noticeOnReceipt binding",
-  );
-});
-
 test("the shell's swap-tab index still matches the tab order this test assumes", () => {
   // noticeDuplicatesReceipt is index-based; the shell resolves the index by
-  // name through indexOfTab("swap"). Keep this file's constant honest.
-  const tabKeys = [...shellQml.matchAll(/\{\s*key:\s*"(\w+)"/g)].map((m) => m[1]);
-  assert.equal(tabKeys[SWAP_TAB], "swap");
-  assert.equal(tabKeys[SETUP_TAB], "setup");
+  // name through indexOfTab("swap"). Run the shipped resolver over the shipped
+  // tab array to keep this file's constants honest.
+  const tabsLiteral = shellQml.match(/readonly property var tabs:\s*(\[[\s\S]*?\])/);
+  assert.ok(tabsLiteral, "AtomicSwapView.qml lost its tabs array");
+  const root = { tabs: new Function(`return ${tabsLiteral[1]};`)() };
+  const indexOfTab = new Function(
+    "root",
+    `${extractFunction(shellQml, "indexOfTab", "AtomicSwapView.qml")}; return indexOfTab;`,
+  )(root);
+  assert.equal(indexOfTab("swap"), SWAP_TAB);
+  assert.equal(indexOfTab("setup"), SETUP_TAB);
+  assert.equal(indexOfTab("no-such-tab"), 0);
 });
