@@ -69,6 +69,7 @@ public:
     void setupGenerateEthKey() override;
     void setupGenerateLezAccount() override;
     void setupStartFunding() override;
+    void setupInitializeAccount() override;
 
 private:
     QString configJson() const;

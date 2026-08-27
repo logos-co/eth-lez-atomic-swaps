@@ -5,6 +5,7 @@
 #include "logos_api.h"
 #include "logos_api_client.h"
 #include "offer_venue.h"
+#include "setup_flow.h"
 #include "swap_api.h"
 #include "timelock_math.h"
 
@@ -214,6 +215,22 @@ QString defaultEthHtlcAddress()
         : override;
 }
 
+// Hidden developer flag selecting the faucet-less taker Setup (issue #166).
+// SWAP_UI_LEZ_FAUCET_MODE=off makes Setup's step 3 initialize the LEZ account
+// on its own (free, one signed transaction — a taker needs zero LEZ because
+// LEZ v0.2.2 charges no fees) instead of initialize-and-claim-150 from
+// pinata; the seller's pinata claim moves under "Advanced settings". `on`,
+// unset, and ANY unrecognised value keep today's flow, byte-for-byte — the
+// parse (swap-ui/src/setup_flow.h, unit-tested) is deliberately fail-safe
+// rather than boolean-ish. Read once at startup, like the other overrides;
+// not a user-facing setting and not persisted. Exploratory: not a change of
+// default.
+bool defaultSetupFaucetless()
+{
+    return swap_ui::lezFaucetless(
+        qEnvironmentVariable(swap_ui::kLezFaucetModeEnv).toStdString());
+}
+
 } // namespace
 
 // Reset every config PROP back to its built-in default. Shared by the
@@ -329,6 +346,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setSetupBalance(QString{});
     setSetupTarget(QString{});
     setSetupClaims(0);
+    setSetupFaucetless(defaultSetupFaucetless());
+    setSetupInitialized(false);
 
     m_messagingPollTimer.setInterval(2000);
     connect(&m_messagingPollTimer, &QTimer::timeout,
@@ -1052,6 +1071,8 @@ void SwapUiPlugin::setupGenerateLezAccount()
         // account ID from it) — lezAccountId is the WALLET-mode field
         // (paired with lezWalletHome) and stays untouched here.
         setLezSigningKey(valueString(obj, QStringLiteral("signing_key")));
+        // A fresh key is a fresh, never-initialized account.
+        setSetupInitialized(false);
         // The FFI result already carries the derived base58 account ID, so
         // surface it immediately instead of waiting on fetchBalances' round
         // trip (which historically never ran on a fresh install because
@@ -1116,6 +1137,63 @@ void SwapUiPlugin::setupStartFunding()
             return;
         }
         setSetupJobId(jobIdFromResult(result));
+    });
+}
+
+// Faucet-less step 3 (SWAP_UI_LEZ_FAUCET_MODE=off, issue #166): initialize
+// the LEZ account and nothing else. This is the one step a taker cannot
+// skip — the sequencer silently drops actions against a never-initialized
+// account (src/lez/onboard.rs) — and it is free, so it gets its own path
+// instead of riding along inside startLezFundingJob's pinata claim. Reuses
+// the setupRunning/setupStep/setupError PROPs so SetupView's elapsed ticker
+// and error framing work unchanged; the outcome names are the same
+// Initialized/AlreadyInitialized steps the funding job reports, so
+// humanSetupStep needs no new entries. Not a job (no job id, no progress
+// events): lezEnsureInitialized is a single blocking call the generated
+// Async wrapper runs off the UI thread and answers once.
+void SwapUiPlugin::setupInitializeAccount()
+{
+    if (!m_swap || setupRunning()) {
+        return;
+    }
+    if (lezSequencerUrl().trimmed().isEmpty() || lezSigningKey().trimmed().isEmpty()) {
+        setSetupError(QStringLiteral("Generate or import a LEZ account before activating it"));
+        setStatus(setupError());
+        return;
+    }
+
+    setSetupRunning(true);
+    setSetupJobId(QString{});
+    setSetupError(QString{});
+    setSetupStep(QStringLiteral("Initializing"));
+    setSetupBalance(QString{});
+    setSetupClaims(0);
+    setStatus(QStringLiteral("Activating your LEZ account..."));
+
+    m_swap->lezEnsureInitializedAsync(lezSequencerUrl(), lezSigningKey(),
+                                      [this](QString result) {
+        setSetupRunning(false);
+        const auto error = jsonError(result);
+        if (!error.isEmpty()) {
+            setSetupError(error);
+            setStatus(QStringLiteral("LEZ account activation failed: %1").arg(error));
+            return;
+        }
+        const auto outcome = valueString(parseObject(result), QStringLiteral("outcome"));
+        if (outcome != QStringLiteral("Initialized")
+            && outcome != QStringLiteral("AlreadyInitialized")) {
+            // Never mark an account initialized on a shape we don't
+            // recognise: an uninitialized account fails LATER with a silent
+            // drop, which is far worse than an honest retry here.
+            setSetupError(QStringLiteral("Unexpected activation result: %1").arg(result));
+            setStatus(QStringLiteral("LEZ account activation failed"));
+            return;
+        }
+        setSetupStep(outcome);
+        setSetupInitialized(true);
+        setSetupError(QString{});
+        setStatus(QStringLiteral("LEZ account ready"));
+        fetchBalances();
     });
 }
 
@@ -1841,6 +1919,10 @@ void SwapUiPlugin::handleSetupFundingFinished(const QString& resultJson)
     }
     setSetupError(QString{});
     setSetupStep(QStringLiteral("Done"));
+    // The funding job initializes before it claims (startLezFundingJob's
+    // ordering guarantee), so a successful job also satisfies the
+    // faucet-less path's "account initialized" gate.
+    setSetupInitialized(true);
     setStatus(QStringLiteral("LEZ account ready"));
     // Refresh the header's ethAddress/lezAccount/lezBalance display now that
     // the account actually has funds — SetupView's own PROPs above only
@@ -2342,6 +2424,9 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         // from the same commit read, so the claims counter and the balance
         // readout can never contradict each other.
         setSetupStep(step);
+        if (step == QStringLiteral("Initialized") || step == QStringLiteral("AlreadyInitialized")) {
+            setSetupInitialized(true);
+        }
         if (data.contains(QStringLiteral("balance"))) {
             setSetupBalance(valueString(data, QStringLiteral("balance")));
         }

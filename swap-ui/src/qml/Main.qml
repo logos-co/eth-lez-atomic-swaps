@@ -130,6 +130,10 @@ Item {
         readonly property string setupBalance: root.backend ? root.backend.setupBalance : ""
         readonly property string setupTarget: root.backend ? root.backend.setupTarget : ""
         readonly property int setupClaims: root.backend ? root.backend.setupClaims : 0
+        // Hidden SWAP_UI_LEZ_FAUCET_MODE=off flag (issue #166) and the
+        // initialize-only step it enables; see swap_ui.rep.
+        readonly property bool setupFaucetless: root.backend ? root.backend.setupFaucetless : false
+        readonly property bool setupInitialized: root.backend ? root.backend.setupInitialized : false
 
         signal offersFetched(string offersJson)
         signal offerPublished(string resultJson)
@@ -245,6 +249,11 @@ Item {
         function setupStartFunding() {
             if (!root.ready) return
             root.watch(root.backend.setupStartFunding())
+        }
+
+        function setupInitializeAccount() {
+            if (!root.ready) return
+            root.watch(root.backend.setupInitializeAccount())
         }
     }
 

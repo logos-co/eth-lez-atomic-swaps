@@ -126,11 +126,16 @@ impl DemoEnv {
 
         // 5. Fund accounts + deploy LEZ HTLC program.
         report(5, "Deploying LEZ HTLC program", "");
-        // The taker only pays fees on LEZ, so one claim is enough. The maker
-        // must fund the DEMO_LEZ_AMOUNT escrow transfer in full, and a single
-        // pinata claim credits less than that, so claim in a bounded loop
-        // until the balance covers the lock (fresh localnet state starts all
-        // accounts at zero).
+        // LEZ charges no transaction fees (docs/testnet.md), so the taker
+        // needs no LEZ balance at all — only an INITIALIZED account, since
+        // the sequencer silently drops actions against a never-initialized
+        // one. The scaffold wallet's topup (a pinata claim) is simply the
+        // one localnet tool that initializes an account as a side effect,
+        // so one claim is enough here; the 150 LEZ it credits is surplus.
+        // The maker must fund the DEMO_LEZ_AMOUNT escrow transfer in full,
+        // and a single pinata claim credits less than that, so claim in a
+        // bounded loop until the balance covers the lock (fresh localnet
+        // state starts all accounts at zero).
         scaffold::wallet_topup(Some(&accounts[1].account_id_b58)).await?;
         let mut claims = 0;
         loop {

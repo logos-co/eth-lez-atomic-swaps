@@ -111,8 +111,14 @@ Beyond the endpoints, the Config tab needs your own identities before
 - **Taker account ID** (taker role) — the LEZ account that receives the
   maker's LEZ.
 
-Both LEZ accounts must be **initialized and funded on-chain** before a
-swap (see Funds below). See [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/master/docs/testnet.md) for the exact
+Both keys are stored unencrypted in the profile's `config.json` on this
+machine, which is fine for the testnet-only, throwaway accounts this
+software is meant for.
+
+Both LEZ accounts must be **initialized on-chain** before a swap. Only the
+maker's also needs to be **funded** (it locks the LEZ being sold); a taker
+needs no LEZ balance, because LEZ transactions are feeless and the taker only
+receives LEZ (see Funds below). See [`testnet.md`](https://github.com/logos-co/eth-lez-atomic-swaps/blob/master/docs/testnet.md) for the exact
 wallet-CLI commands.
 
 ## 4. Funds
@@ -123,8 +129,8 @@ wallet-CLI commands.
   amount of Sepolia ETH for HTLC funding + gas. Any standard ETH wallet
   key works; the module signs Sepolia transactions with the key you
   configure.
-- **LEZ testnet funds**: the public testnet's pinata faucet credits
-  150 LEZ per claim, permissionlessly:
+- **LEZ testnet funds** (makers only — a taker needs none): the public
+  testnet's pinata faucet credits 150 LEZ per claim, permissionlessly:
 
   ```
   wallet pinata claim --to <your-account-id>
