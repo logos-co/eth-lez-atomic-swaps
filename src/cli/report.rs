@@ -352,6 +352,16 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite a `wss://`/`ws://` endpoint to `https://`/`http://`, same host.
+/// Anything else is passed through unchanged. See [`connect`] for why.
+fn to_http_url(url: &str) -> String {
+    match url.split_once("://") {
+        Some(("wss", rest)) => format!("https://{rest}"),
+        Some(("ws", rest)) => format!("http://{rest}"),
+        _ => url.to_string(),
+    }
+}
+
 /// Connect read-only over HTTP, reusing the configured `ETH_RPC_URL` — the same
 /// host, switched from `wss://` to `https://`.
 ///
@@ -369,14 +379,6 @@ pub async fn cmd_chain_report(args: ChainReportArgs, json: bool) -> Result<()> {
 /// Nothing is lost by it: this command only ever issues log/block queries, and
 /// needs no subscription. `src/eth/watcher.rs` already polls `eth_getLogs`
 /// rather than subscribing, for its own reasons.
-fn to_http_url(url: &str) -> String {
-    match url.split_once("://") {
-        Some(("wss", rest)) => format!("https://{rest}"),
-        Some(("ws", rest)) => format!("http://{rest}"),
-        _ => url.to_string(),
-    }
-}
-
 async fn connect(url: &str) -> Result<alloy::providers::DynProvider> {
     let http = to_http_url(url);
     Ok(ProviderBuilder::new()

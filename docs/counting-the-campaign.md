@@ -307,19 +307,23 @@ probed, and the two ways that can fail are **not** the same thing:
   and `"corroborated": false` in the JSON. Any anchor that WAS found is still
   batched with every query — overriding gives up the two-point interval proof,
   not the evidence that exists.
-- **Nothing answered at all.** Every probe at that end of the scan errored —
-  not one came back with a log list. That is a fact about the endpoint rather
-  than an open question about the chain, so `--allow-uncorroborated` does
-  **not** cover it and the run is refused either way, as is an anchor that was
-  corroborating and then stopped mid-scan. Point `--eth-rpc-url` at an endpoint
-  that serves historical logs reliably, or narrow the window.
+- **Nothing answered at all.** Not one probe at that end of the scan came back
+  with a log list — every request errored, or was throttled, or some mix. The
+  chain was never observed, so there is no ambiguity for anyone to resolve:
+  `--allow-uncorroborated` does **not** cover this and the run is refused
+  either way, as is an anchor that was corroborating and then stopped
+  mid-scan.
 
-  The bar really is *nothing*: a walk that got even one empty answer has
-  watched this endpoint serve a request, so a stray error among otherwise
-  answered probes stays in the ambiguous case above and remains overridable.
-  A rate limit (HTTP 429 / JSON-RPC `-32005`) never counts as a failure at all
-  — publicnode answers bursts that way by design, so the probe backs off and
-  retries rather than treating it as the endpoint being broken.
+  The whole rule is that one question — *did the probes ever get a successful
+  answer?* — and not an enumeration of error kinds. A walk that got even one
+  empty answer has watched this endpoint serve a request, so a stray error or
+  429 among otherwise answered probes stays in the ambiguous case above and
+  remains overridable. The refusal still says which happened: an endpoint that
+  errored is named as unreliable (point `--eth-rpc-url` somewhere else), while
+  an endpoint that only ever asked for fewer requests (HTTP 429 / JSON-RPC
+  `-32005`, which publicnode answers bursts with by design) is named as
+  throttling — wait it out or narrow the window so the scan needs fewer probes.
+  Neither is described as a quiet chain, because neither observed one.
 
 `"corroborated"` is never `false` unless someone passed that flag; without it,
 a published count is always a proven one. (A window that selects no blocks —

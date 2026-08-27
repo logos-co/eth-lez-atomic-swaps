@@ -483,18 +483,32 @@ pub struct ProbeMiss {
 }
 
 impl ProbeMiss {
-    /// Whether this walk produced *evidence about the endpoint*, as opposed to
-    /// an ambiguous silence.
+    /// **The** question this whole surface turns on: did the walk ever get a
+    /// successful answer out of the endpoint?
     ///
-    /// The bar is that the walk never got a successful answer at all. An empty
-    /// log list is not evidence — [`Anchoring`] exists precisely because a
-    /// pruned backend and a log-free block range are indistinguishable in it —
-    /// but it IS an answer, so a walk that saw one has watched this endpoint
-    /// serve a request and cannot conclude it is broken. Only a walk that was
-    /// answered by nothing but errors is on the other side of that line, and
-    /// only that side refuses unconditionally.
-    pub fn endpoint_misbehaved(&self) -> bool {
-        self.empty_responses == 0 && self.failed_requests > 0
+    /// A walk only becomes a [`ProbeMiss`] when it found no anchor, so the only
+    /// successful answers it can hold are empty ones — which is exactly the
+    /// ambiguity [`Anchoring`] exists for: a pruned backend and a log-free
+    /// block range are indistinguishable in an empty log list. Ambiguous, but
+    /// it IS an observation of the chain, and an operator who knows their chain
+    /// is quiet can resolve it.
+    ///
+    /// `false` means nothing whatsoever was established — every probe errored,
+    /// or was throttled, or some mix. There is no ambiguity for the operator to
+    /// resolve because there is no observation, so no opt-in applies.
+    ///
+    /// Deliberately phrased over "was there a successful answer" rather than
+    /// over the kinds of failure: each past attempt to enumerate the failure
+    /// kinds (an error is a fault / a 429 is not) closed one hole and opened
+    /// its mirror image. This is the single place the rule lives.
+    pub fn answered_successfully(&self) -> bool {
+        self.empty_responses > 0
+    }
+
+    /// Negation of [`Self::answered_successfully`], for readability at the
+    /// call sites that care about the refusing direction.
+    pub fn never_answered(&self) -> bool {
+        !self.answered_successfully()
     }
 
     fn describe(&self) -> String {
@@ -565,7 +579,7 @@ pub enum Anchoring {
     /// its own: if the missing end's probes came back empty, those blocks may
     /// genuinely hold no logs *or* this backend may not hold them, and the
     /// responses look identical. Only an errored probe (see
-    /// [`ProbeMiss::endpoint_misbehaved`]) says something about the endpoint.
+    /// [`ProbeMiss::answered_successfully`]) leaves anything to resolve.
     PartiallyAnchored {
         /// The anchor the other end did produce. Kept, not discarded: an
         /// operator who overrides the refusal still gets their queries batched
@@ -598,10 +612,10 @@ impl Anchoring {
         }
     }
 
-    /// The ends whose probes produced evidence that the ENDPOINT is at fault
-    /// rather than the chain being quiet. Non-empty means the refusal stands
-    /// whatever the caller passes.
-    fn misbehaving_ends(&self) -> Vec<(ScanEnd, &ProbeMiss)> {
+    /// The ends whose probes never got a successful answer out of the endpoint
+    /// (see [`ProbeMiss::answered_successfully`]). Non-empty means nothing was
+    /// observed there, so the refusal stands whatever the caller passes.
+    fn unanswered_ends(&self) -> Vec<(ScanEnd, &ProbeMiss)> {
         let ends: Vec<(ScanEnd, &ProbeMiss)> = match self {
             Anchoring::Anchored(_) => Vec::new(),
             Anchoring::PartiallyAnchored { missing, miss, .. } => vec![(*missing, miss)],
@@ -610,7 +624,7 @@ impl Anchoring {
             }
         };
         ends.into_iter()
-            .filter(|(_, m)| m.endpoint_misbehaved())
+            .filter(|(_, m)| m.never_answered())
             .collect()
     }
 }
@@ -622,20 +636,21 @@ impl Anchoring {
 /// indistinguishable from a quiet trial — the exact failure this whole
 /// corroboration apparatus exists to prevent.
 ///
-/// The override is scoped by evidence, not by which end missed. Empty probe
-/// responses leave the question open, and an operator who knows the chain is
-/// quiet may answer it with `--allow-uncorroborated`. Probe requests that
-/// ERRORED are a fact about the endpoint, and no assertion about the chain
-/// bears on it, so that refusal is not overridable.
+/// The override is scoped by one question — did the probes ever get a
+/// successful answer (see [`ProbeMiss::answered_successfully`])? An empty log
+/// list leaves the question of *why* open, and an operator who knows the chain
+/// is quiet may answer it with `--allow-uncorroborated`. A walk that was never
+/// answered at all — errored, throttled, or both — established nothing for an
+/// assertion about the chain to bear on, so that refusal is not overridable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanDecision {
     /// Anchored at both ends: every response is batched with a canary, and one
     /// that cannot be corroborated is retried rather than counted.
     Corroborated,
-    /// Not anchored at both ends, but nothing said the endpoint was at fault
-    /// and the caller explicitly opted in: count it against whatever anchors
-    /// were found, and report `corroborated: false` so the reader knows which
-    /// kind of number it is.
+    /// Not anchored at both ends, but every end that missed was at least
+    /// answered, and the caller explicitly opted in: count it against whatever
+    /// anchors were found, and report `corroborated: false` so the reader knows
+    /// which kind of number it is.
     ProceedUnproven,
     /// Publish nothing.
     Refuse,
@@ -647,9 +662,9 @@ pub fn scan_decision(anchoring: &Anchoring, allow_uncorroborated: bool) -> ScanD
     if matches!(anchoring, Anchoring::Anchored(_)) {
         return ScanDecision::Corroborated;
     }
-    // An endpoint that failed to answer is not something the operator can
-    // vouch for, so the flag does not reach this case.
-    if !anchoring.misbehaving_ends().is_empty() {
+    // An end the endpoint never answered established nothing, so there is
+    // nothing for the operator to vouch for and the flag does not reach it.
+    if !anchoring.unanswered_ends().is_empty() {
         return ScanDecision::Refuse;
     }
     if allow_uncorroborated {
@@ -668,28 +683,46 @@ pub fn scan_decision(anchoring: &Anchoring, allow_uncorroborated: bool) -> ScanD
 /// was merely quiet when the endpoint is broken is how a silent under-count
 /// gets published.
 pub fn refusal_message(from: u64, to: u64, anchoring: &Anchoring) -> Option<String> {
-    let misbehaving = anchoring.misbehaving_ends();
-    if !misbehaving.is_empty() {
-        let ends = misbehaving
+    let unanswered = anchoring.unanswered_ends();
+    if !unanswered.is_empty() {
+        let ends = unanswered
             .iter()
             .map(|(end, _)| end.label())
             .collect::<Vec<_>>()
             .join(" and ");
-        let detail = misbehaving
+        let detail = unanswered
             .iter()
             .map(|(end, miss)| format!("at the {} end {}", end.label(), miss.describe()))
             .collect::<Vec<_>>()
             .join(", ");
-        return Some(format!(
-            "blocks {from}-{to}: the RPC endpoint did not answer a single anchor probe at the \
-             {ends} end of this scan — {detail}. Not one of those requests came back with a log \
-             list, so they produced no evidence in either direction, and this scan cannot be \
-             proven against a backend that would not reply. Reconnecting draws a different \
-             backend from the pool; if it keeps happening, point --eth-rpc-url at an endpoint \
-             that serves historical logs reliably, or narrow the window. --allow-uncorroborated \
-             cannot cover this: it asserts that a range of blocks holds no logs, which says \
-             nothing about an endpoint that failed to respond."
-        ));
+
+        // Neither branch may reach for the empty-log ambiguity or the quiet
+        // localnet: no probe here came back with a log list at all, so the
+        // chain was never observed and nothing about how quiet it is applies.
+        let only_throttled = unanswered.iter().all(|(_, m)| m.failed_requests == 0);
+        return Some(if only_throttled {
+            format!(
+                "blocks {from}-{to}: the RPC endpoint never answered an anchor probe at the \
+                 {ends} end of this scan — it asked for fewer requests instead ({detail}). \
+                 Nothing about the chain was established: not one probe came back with a log \
+                 list, empty or otherwise, so there is nothing for --allow-uncorroborated to \
+                 vouch for and it does not apply here. Wait for the throttle to clear and \
+                 re-run, or narrow the window with --from-block/--since so the scan needs fewer \
+                 probes."
+            )
+        } else {
+            format!(
+                "blocks {from}-{to}: the RPC endpoint did not answer a single anchor probe at \
+                 the {ends} end of this scan — {detail}. Not one of those requests came back \
+                 with a log list, so they produced no evidence in either direction, and this \
+                 scan cannot be proven against a backend that would not reply. Reconnecting \
+                 draws a different backend from the pool; if it keeps happening, point \
+                 --eth-rpc-url at an endpoint that serves historical logs reliably, or narrow \
+                 the window. --allow-uncorroborated cannot cover this: it asserts that a range \
+                 of blocks holds no logs, which says nothing about an endpoint that failed to \
+                 respond."
+            )
+        });
     }
 
     match anchoring {
@@ -1184,8 +1217,14 @@ pub fn parse_time_arg(s: &str) -> std::result::Result<u64, String> {
     let year: i64 = y.parse().map_err(|_| format!("invalid year in '{s}'"))?;
     let month: u32 = m.parse().map_err(|_| format!("invalid month in '{s}'"))?;
     let day: u32 = d.parse().map_err(|_| format!("invalid day in '{s}'"))?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return Err(format!("invalid date '{date}' in '{s}'"));
+    if !(1..=12).contains(&month) {
+        return Err(format!("invalid date '{date}' in '{s}': no month {month}"));
+    }
+    let last = days_in_month(year, month);
+    if !(1..=last).contains(&day) {
+        return Err(format!(
+            "invalid date '{date}' in '{s}': {year}-{month:02} has {last} days"
+        ));
     }
 
     let (mut hh, mut mm, mut ss) = (0u64, 0u64, 0u64);
@@ -1214,6 +1253,26 @@ pub fn parse_time_arg(s: &str) -> std::result::Result<u64, String> {
     let days = days_from_civil(year, month, day);
     let secs = days * 86_400 + (hh * 3600 + mm * 60 + ss) as i64;
     u64::try_from(secs).map_err(|_| format!("time '{s}' is before the Unix epoch"))
+}
+
+/// Whether `y` is a leap year in the proleptic Gregorian calendar.
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+/// Length of `month` in `year`. Guards [`days_from_civil`], which is pure
+/// arithmetic with no range check: fed an impossible day it happily returns the
+/// epoch day of a DIFFERENT date, so `--since 2026-02-30` would measure a
+/// window starting two days later than asked and print that as if it were what
+/// the operator wrote.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
 }
 
 /// Days since 1970-01-01 for a proleptic-Gregorian civil date (Howard
@@ -1542,6 +1601,23 @@ mod tests {
         }
     }
 
+    fn throttled_and_empty(empty: usize, throttled: usize) -> ProbeMiss {
+        ProbeMiss {
+            empty_responses: empty,
+            rate_limited: throttled,
+            ..ProbeMiss::default()
+        }
+    }
+
+    fn throttled_and_failed(throttled: usize, failed: usize) -> ProbeMiss {
+        ProbeMiss {
+            rate_limited: throttled,
+            failed_requests: failed,
+            last_error: Some("connection reset by peer".into()),
+            ..ProbeMiss::default()
+        }
+    }
+
     fn partial(missing: ScanEnd, miss: ProbeMiss) -> Anchoring {
         Anchoring::PartiallyAnchored {
             anchored: Box::new(canary_at(7)),
@@ -1595,84 +1671,111 @@ mod tests {
         }
     }
 
-    // The line is "this walk never got an answer at all", not "an error
-    // appeared somewhere in it". A walk that saw even one empty log list has
-    // watched the endpoint serve a request, so it cannot conclude the endpoint
-    // is broken — and on a public endpoint a stray 429 or timeout in an
-    // 80-request walk is ordinary, not evidence.
+    // The invariant, stated three ways. A walk that got even one successful
+    // answer — however many of its other requests errored or were throttled —
+    // has OBSERVED the chain, ambiguously, and that ambiguity is the
+    // operator's to resolve. A walk that got none observed nothing, and no
+    // assertion about how quiet the chain is can substitute for an
+    // observation, so no flag reaches it.
     #[test]
-    fn a_walk_that_was_answered_at_all_stays_ambiguous_and_overridable() {
-        let mixed = mixed_miss(79, 1);
-        assert!(
-            !mixed.endpoint_misbehaved(),
-            "one error among answered requests is not a broken endpoint"
-        );
-        for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
+    fn only_a_walk_that_was_answered_is_the_operators_to_override() {
+        let answered = [
+            ("all empty", empty_miss(80)),
+            ("mostly empty, one error", mixed_miss(79, 1)),
+            ("empty and throttled", throttled_and_empty(40, 40)),
+        ];
+        for (label, miss) in answered {
+            assert!(miss.answered_successfully(), "{label}");
+            for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
+                assert_eq!(
+                    scan_decision(&partial(missing, miss.clone()), false),
+                    ScanDecision::Refuse,
+                    "{label} is still unproven by default"
+                );
+                assert_eq!(
+                    scan_decision(&partial(missing, miss.clone()), true),
+                    ScanDecision::ProceedUnproven,
+                    "{label} is an observation, so the operator may resolve it"
+                );
+            }
+        }
+
+        let unanswered = [
+            ("all errored", failed_miss(80)),
+            ("all throttled", rate_limited_miss(80)),
+            ("throttled and errored, never answered", throttled_and_failed(40, 40)),
+        ];
+        for (label, miss) in unanswered {
+            assert!(miss.never_answered(), "{label}");
+            for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
+                assert_eq!(
+                    scan_decision(&partial(missing, miss.clone()), false),
+                    ScanDecision::Refuse,
+                    "{label}"
+                );
+                assert_eq!(
+                    scan_decision(&partial(missing, miss.clone()), true),
+                    ScanDecision::Refuse,
+                    "{label}: there is no observation for the flag to vouch for"
+                );
+            }
             assert_eq!(
-                scan_decision(&partial(missing, mixed_miss(79, 1)), true),
-                ScanDecision::ProceedUnproven
-            );
-            assert_eq!(
-                scan_decision(&partial(missing, mixed_miss(79, 1)), false),
-                ScanDecision::Refuse
+                scan_decision(
+                    &Anchoring::Unanchored {
+                        oldest: miss.clone(),
+                        newest: miss.clone(),
+                    },
+                    true
+                ),
+                ScanDecision::Refuse,
+                "{label}"
             );
         }
-        assert_eq!(
-            scan_decision(
-                &Anchoring::Unanchored {
-                    oldest: mixed_miss(79, 1),
-                    newest: mixed_miss(79, 1),
-                },
-                true
-            ),
-            ScanDecision::ProceedUnproven
-        );
-
-        // And the message must match: a mixed walk keeps the ambiguous wording
-        // rather than asserting the endpoint never answered.
-        let msg = refusal_message(1, 2, &partial(ScanEnd::Oldest, mixed_miss(79, 1))).unwrap();
-        assert!(msg.contains("ambiguous"));
-        assert!(
-            !msg.contains("did not answer a single anchor probe"),
-            "79 requests were answered: {msg}"
-        );
-        assert!(msg.contains("pass --allow-uncorroborated"));
     }
 
-    // A 429 is the endpoint asking for fewer requests, which the scan already
-    // models as expected behaviour on the pinned endpoint — not a fault, and
-    // not something an operator can be told to fix by changing endpoints.
+    // A walk answered by nothing but 429s established nothing about the chain,
+    // so it must not be told the chain might be quiet — that suggestion is what
+    // walks an operator into passing the flag against a throttling endpoint and
+    // publishing whatever a bare unbatched query happens to return.
     #[test]
-    fn a_rate_limited_probe_is_not_endpoint_misbehaviour() {
-        let throttled = rate_limited_miss(12);
-        assert!(!throttled.endpoint_misbehaved());
-        assert_eq!(
-            scan_decision(&partial(ScanEnd::Oldest, rate_limited_miss(12)), true),
-            ScanDecision::ProceedUnproven
-        );
-
-        // It is still reported for what it was, not as an empty answer.
-        let described = throttled.describe();
-        assert!(described.contains("12 were rate-limited"));
-        assert!(!described.contains("empty log list"));
-        assert!(!described.contains("failed"));
-
-        // A walk that saw nothing but rate limits and real failures still names
-        // both, and the failure half is what makes it a hard refusal.
-        let both = ProbeMiss {
-            rate_limited: 4,
-            failed_requests: 76,
-            last_error: Some("connection reset by peer".into()),
-            ..ProbeMiss::default()
-        };
-        assert!(both.endpoint_misbehaved());
-        assert!(both.describe().contains("4 were rate-limited"));
-        assert!(both.describe().contains("76 failed"));
+    fn a_throttled_walk_is_told_it_was_throttled_not_that_the_chain_is_quiet() {
+        for anchoring in [
+            partial(ScanEnd::Oldest, rate_limited_miss(128)),
+            Anchoring::Unanchored {
+                oldest: rate_limited_miss(128),
+                newest: rate_limited_miss(128),
+            },
+        ] {
+            let msg = refusal_message(100, 200, &anchoring).expect("a refusal");
+            assert!(msg.contains("128 were rate-limited"), "{msg}");
+            assert!(
+                msg.contains("asked for fewer requests"),
+                "the throttle must be named for what it is: {msg}"
+            );
+            assert!(
+                !msg.contains("localnet"),
+                "a throttled endpoint says nothing about a quiet chain: {msg}"
+            );
+            assert!(
+                !msg.contains("empty log list"),
+                "no probe came back with a log list at all: {msg}"
+            );
+            assert!(
+                !msg.contains("ambiguous"),
+                "nothing was observed, so nothing is ambiguous: {msg}"
+            );
+            assert!(
+                msg.contains("does not apply here"),
+                "the flag must be ruled out: {msg}"
+            );
+            // The advice must be about the throttle, not about a broken node.
+            assert!(msg.contains("narrow the window"), "{msg}");
+        }
     }
 
-    // A probe request that ERRORED with nothing else answered is a fact about
-    // the endpoint, and no claim about how quiet the chain is bears on it. That
-    // refusal is not the operator's to override.
+    // A probe walk that was never answered at all is a hard refusal, and the
+    // assertive endpoint wording belongs only to the branch where requests
+    // genuinely errored.
     #[test]
     fn an_errored_probe_refuses_even_with_the_opt_in() {
         for missing in [ScanEnd::Oldest, ScanEnd::Newest] {
@@ -1695,6 +1798,15 @@ mod tests {
             let unanchored = Anchoring::Unanchored { oldest, newest };
             assert_eq!(scan_decision(&unanchored, true), ScanDecision::Refuse);
         }
+
+        // A walk that saw both throttles and real errors is still the
+        // endpoint-at-fault branch: something actually failed.
+        let both = refusal_message(1, 2, &partial(ScanEnd::Oldest, throttled_and_failed(4, 76)))
+            .expect("a refusal");
+        assert!(both.contains("did not answer a single anchor probe"), "{both}");
+        assert!(both.contains("4 were rate-limited"), "{both}");
+        assert!(both.contains("76 failed"), "{both}");
+        assert!(!both.contains("localnet"), "{both}");
     }
 
     // A downgrade gives up the two-point interval proof, not the evidence: the
@@ -1744,6 +1856,7 @@ mod tests {
         // do NOT claim a partial log index — the probes cannot show that.
         let ambiguous = refusal_message(100, 200, &partial(ScanEnd::Oldest, empty_miss(80)))
             .expect("a half-anchored scan is a refusal");
+        assert!(ambiguous.contains("empty log list"));
         assert!(ambiguous.contains("oldest"));
         assert!(ambiguous.contains("ambiguous"));
         assert!(
@@ -1818,7 +1931,7 @@ mod tests {
             last_error: Some("504 gateway timeout".into()),
             ..ProbeMiss::default()
         };
-        assert!(!mixed.endpoint_misbehaved());
+        assert!(mixed.answered_successfully());
         let described = mixed.describe();
         assert!(described.contains("empty log list"));
         assert!(described.contains("40 failed"));
@@ -1956,6 +2069,43 @@ mod tests {
         );
         assert_eq!(parse_time_arg("1970-01-01").unwrap(), 0);
         assert_eq!(parse_time_arg(" 2026-08-21 ").unwrap(), 1_787_270_400);
+    }
+
+    // A date that does not exist must fail loudly. `days_from_civil` is pure
+    // arithmetic: fed 2026-02-30 it returns the epoch day of 2026-03-02, so an
+    // unguarded parse silently measures a different trial window and prints the
+    // shifted one as if it were what was asked for.
+    #[test]
+    fn parse_time_arg_rejects_impossible_calendar_dates() {
+        for bad in [
+            "2026-02-29", // 2026 is not a leap year
+            "2026-02-30",
+            "2026-04-31",
+            "2026-06-31",
+            "2026-09-31",
+            "2026-11-31",
+            "2026-02-31T12:00:00",
+        ] {
+            assert!(
+                parse_time_arg(bad).is_err(),
+                "'{bad}' is not a real date and must not parse"
+            );
+        }
+
+        // Real leap days still parse, and land where the calendar says.
+        assert_eq!(
+            parse_time_arg("2024-02-29").unwrap(),
+            parse_time_arg("2024-02-28").unwrap() + 86_400
+        );
+        assert_eq!(
+            parse_time_arg("2024-03-01").unwrap(),
+            parse_time_arg("2024-02-29").unwrap() + 86_400
+        );
+        // ...and a non-leap February ends where it should.
+        assert_eq!(
+            parse_time_arg("2026-03-01").unwrap(),
+            parse_time_arg("2026-02-28").unwrap() + 86_400
+        );
     }
 
     #[test]
