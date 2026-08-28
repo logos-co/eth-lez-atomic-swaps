@@ -388,6 +388,36 @@ PageScaffold {
             }
         }
 
+        // The LEZ side is unreachable (issue #169). This card and the default
+        // flow's "Fund LEZ" card are mutually exclusive (one `faucetless`, one
+        // `!faucetless`), so exactly one of these two rows can ever render —
+        // but BOTH need it. Without it here, a dead sequencer is completely
+        // silent during faucet-less Setup: this is the only LEZ step in that
+        // flow, and the shell's stale-balance strip deliberately stands down
+        // on the Setup tab because Setup is supposed to own the message.
+        // Silence is the one outcome #169 rules out. Here it also explains
+        // why Activate account is failing, since activation is exactly the
+        // thing that needs the sequencer.
+        RowLayout {
+            visible: setupRoot.lezUnreachable
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot {
+                status: "attention"
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                text: swapBackend.lezBalanceError
+                color: Theme.toneAttention
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+        }
+
         ColumnLayout {
             visible: swapBackend.setupError !== ""
             Layout.fillWidth: true
@@ -511,13 +541,17 @@ PageScaffold {
             }
         }
 
-        // The LEZ side is unreachable (issue #169). Step 3's "done" mark and
+        // The LEZ side is unreachable (issue #169). This step's "done" mark and
         // the confirmation line above both read from lezBalance, so while the
         // sequencer cannot be reached this step is showing a number it cannot
         // vouch for — say so here, in the step, instead of raising a global
         // banner for a background poll the user never triggered. Amber, not
         // red: nothing has failed, the app just cannot see right now, and this
         // clears itself on the first good read.
+        //
+        // Twin of the row in the faucet-less "Activate your LEZ account" card
+        // above; the two cards are mutually exclusive, so every LEZ step in
+        // every flow carries this. Change one, change both.
         RowLayout {
             visible: setupRoot.lezUnreachable
             Layout.fillWidth: true
