@@ -1172,11 +1172,18 @@ void SwapUiPlugin::setupInitializeAccount()
     setSetupClaims(0);
     setStatus(QStringLiteral("Activating your LEZ account..."));
 
-    m_swap->lezEnsureInitializedAsync(lezSequencerUrl(), lezSigningKey(),
-                                      [this](QString result) {
+    const QString activatedKey = lezSigningKey();
+    m_swap->lezEnsureInitializedAsync(lezSequencerUrl(), activatedKey,
+                                      [this, activatedKey](QString result) {
         setSetupRunning(false);
+        if (activatedKey != lezSigningKey()) {
+            setSetupStep(QString{});
+            setStatus(QStringLiteral("LEZ account changed during activation; press Activate account again"));
+            return;
+        }
         const auto error = jsonError(result);
         if (!error.isEmpty()) {
+            setSetupStep(QString{});
             setSetupError(error);
             setStatus(QStringLiteral("LEZ account activation failed: %1").arg(error));
             return;
@@ -1187,6 +1194,7 @@ void SwapUiPlugin::setupInitializeAccount()
             // Never mark an account initialized on a shape we don't
             // recognise: an uninitialized account fails LATER with a silent
             // drop, which is far worse than an honest retry here.
+            setSetupStep(QString{});
             setSetupError(QStringLiteral("Unexpected activation result: %1").arg(result));
             setStatus(QStringLiteral("LEZ account activation failed"));
             return;
