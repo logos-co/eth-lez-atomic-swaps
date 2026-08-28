@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
 import SwapFormat
+import "SetupSteps.js" as SetupSteps
 
 // The single place you set this app up.
 //
@@ -12,10 +13,19 @@ import SwapFormat
 // path is the answer, and the raw fields stay one click away for someone who
 // already has keys.
 //
-// Four steps, and the fourth is not optional: the app can fund LEZ but CANNOT
-// fund Sepolia gas, so a fresh account with LEZ and no ETH still fails its
-// first swap on "insufficient funds for gas". Readiness is gated on both sides
-// (see isReady) and nothing here says "ready" until both have landed.
+// The step order, numbering and count all come from SetupSteps.js (one
+// ordered list per mode) so the subtitle can never disagree with the cards.
+// The test-ETH step is not optional: the app can fund LEZ but CANNOT fund
+// Sepolia gas, so a fresh account with LEZ and no ETH still fails its first
+// swap on "insufficient funds for gas". Readiness is gated on both sides (see
+// isReady) and nothing here says "ready" until both have landed.
+//
+// Two flows share this page, selected once at startup by the hidden developer
+// flag SWAP_UI_LEZ_FAUCET_MODE (swapBackend.setupFaucetless; issue #166):
+//   * default (flag unset/"on"): step 3 initializes AND claims 150 LEZ.
+//   * "off": step 3 only ACTIVATES (initializes) the account — a taker needs
+//     zero LEZ because LEZ charges no fees — and the pinata claim moves under
+//     Advanced settings for sellers, who still need inventory.
 //
 // Shown first on a fresh install (AtomicSwapView jumps here once config
 // validation settles and the config turns out incomplete); reachable any time
@@ -24,7 +34,10 @@ PageScaffold {
     id: setupRoot
 
     title: "Get set up"
-    subtitle: "Four steps, then you're trading. No keys to type."
+    subtitle: SetupSteps.subtitle(setupRoot.faucetless)
+
+    // Which of the two flows this page runs. Fixed for the process lifetime.
+    readonly property bool faucetless: swapBackend.setupFaucetless
 
     // Emitted when the user is done and wants to head to the market. The host
     // (AtomicSwapView) owns tab navigation, so this view only signals intent
@@ -48,6 +61,13 @@ PageScaffold {
     // they clicked through a job again. NOT the same as "ready" — the
     // Ethereum side still needs gas (see hasEthBalance/isReady).
     readonly property bool lezFunded: swapBackend.setupStep === "Done" || setupRoot.hasLezBalance
+    // What step 3 needs to have delivered before the LEZ side counts as ready:
+    // a funded account in the default flow, an INITIALIZED one in the
+    // faucet-less flow. Never inferred from a balance in the faucet-less flow —
+    // a credit can land on a never-initialized account, which then fails its
+    // swap with a silent drop.
+    readonly property bool lezReady: setupRoot.faucetless ? swapBackend.setupInitialized
+                                                          : setupRoot.lezFunded
     // Ethereum side holds gas. ethBalance is a wei string from the shared
     // balance refresh; any positive value means the user has funded Sepolia.
     readonly property bool hasEthBalance: {
@@ -59,7 +79,7 @@ PageScaffold {
     // programmatic faucet — so a fresh account with 150 LEZ and 0 Sepolia ETH
     // still fails its first swap on "insufficient funds for gas" (every 0.4.3
     // tester hit this). Gate the final step and every "ready" claim on both.
-    readonly property bool isReady: lezFunded && hasEthBalance
+    readonly property bool isReady: lezReady && hasEthBalance
     readonly property bool anyRunning: swapBackend.makerRunning || swapBackend.takerRunning
                                        || swapBackend.autoAcceptRunning
 
@@ -183,7 +203,7 @@ PageScaffold {
                 Layout.alignment: Qt.AlignVCenter
             }
             SectionHeader {
-                label: "1. Ethereum key"
+                label: SetupSteps.stepLabel("ethKey", setupRoot.faucetless)
                 detail: setupRoot.hasEthKey ? "done" : ""
                 hairline: false
             }
@@ -226,7 +246,7 @@ PageScaffold {
                 Layout.alignment: Qt.AlignVCenter
             }
             SectionHeader {
-                label: "2. LEZ account"
+                label: SetupSteps.stepLabel("lezAccount", setupRoot.faucetless)
                 detail: setupRoot.hasLezAccount ? "done" : ""
                 hairline: false
             }
@@ -235,7 +255,10 @@ PageScaffold {
         Text {
             visible: !setupRoot.hasLezAccount
             Layout.fillWidth: true
-            text: "Where your LEZ arrives. Nothing goes on the network until step 3 funds it."
+            text: "Where your LEZ arrives. Nothing goes on the network until step "
+                  + SetupSteps.stepNumber(setupRoot.faucetless ? "activateLez" : "fundLez",
+                                          setupRoot.faucetless)
+                  + (setupRoot.faucetless ? " activates it." : " funds it.")
             color: Theme.textSecondary
             font.pixelSize: Theme.fontSmall
             horizontalAlignment: Text.AlignLeft
@@ -262,8 +285,113 @@ PageScaffold {
         }
     }
 
-    // --- Step 3: Fund LEZ ---
+    // --- Step 3 (faucet-less flow only): Activate the LEZ account ---
+    // Initialize and nothing else. One free signed transaction, idempotent
+    // (an already-set-up account answers "already set up" with no
+    // transaction). This is the one step a taker cannot skip: the network
+    // silently drops actions against a never-initialized account, so the
+    // gate stays on the real outcome (setupInitialized), never on a balance.
     Card {
+        visible: setupRoot.faucetless
+        tone: swapBackend.setupInitialized ? "done"
+                                           : (swapBackend.setupRunning ? "active" : "neutral")
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+            StatusDot {
+                status: swapBackend.setupInitialized ? "live"
+                                                     : (swapBackend.setupRunning ? "working" : "waiting")
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            SectionHeader {
+                label: SetupSteps.stepLabel("activateLez", setupRoot.faucetless)
+                detail: swapBackend.setupInitialized ? "done" : ""
+                hairline: false
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: "Registers your account on the LEZ network so it can receive the LEZ "
+                  + "you buy. It's free and takes one transaction — you don't need any LEZ "
+                  + "to trade; you'll get it from the market. Test-network blocks can be a "
+                  + "minute or more apart, so the timer below keeps counting while it works."
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSmall
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+
+        PrimaryButton {
+            text: swapBackend.setupRunning
+                  ? "Activating…"
+                  : (swapBackend.setupInitialized ? "Check again" : "Activate account")
+            enabled: setupRoot.hasLezAccount && !swapBackend.setupRunning
+                     && !setupRoot.anyRunning
+            Layout.fillWidth: true
+            Layout.preferredHeight: 42
+            onClicked: swapBackend.setupInitializeAccount()
+        }
+
+        RowLayout {
+            visible: swapBackend.setupRunning || swapBackend.setupStep !== ""
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot {
+                status: swapBackend.setupRunning ? "working" : "live"
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+                text: {
+                    var line = setupRoot.humanSetupStep(swapBackend.setupStep)
+                    if (swapBackend.setupRunning && setupRoot.setupStepElapsedSeconds > 0)
+                        line += " " + setupRoot.setupStepElapsedSeconds + "s"
+                    return line
+                }
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+            }
+        }
+
+        ColumnLayout {
+            visible: swapBackend.setupError !== ""
+            Layout.fillWidth: true
+            spacing: 4
+
+            Text {
+                Layout.fillWidth: true
+                text: "That didn't work. Your account is fine — nothing was lost. "
+                      + "You can press Activate account to try again."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: swapBackend.setupError
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.monoFont
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.Wrap
+            }
+        }
+    }
+
+    // --- Step 3 (default flow): Fund LEZ ---
+    // Hidden in the faucet-less flow, where the same claim is offered to
+    // sellers under Advanced settings instead (see sellerFunding below).
+    Card {
+        visible: !setupRoot.faucetless
         tone: setupRoot.lezFunded ? "done"
                                   : (swapBackend.setupRunning ? "active" : "neutral")
 
@@ -277,7 +405,7 @@ PageScaffold {
                 Layout.alignment: Qt.AlignVCenter
             }
             SectionHeader {
-                label: "3. Fund LEZ"
+                label: SetupSteps.stepLabel("fundLez", setupRoot.faucetless)
                 detail: setupRoot.lezFunded ? "done" : ""
                 hairline: false
             }
@@ -403,7 +531,7 @@ PageScaffold {
                 Layout.alignment: Qt.AlignVCenter
             }
             SectionHeader {
-                label: "4. Get test ETH"
+                label: SetupSteps.stepLabel("testEth", setupRoot.faucetless)
                 detail: setupRoot.hasEthBalance ? "done" : ""
                 hairline: false
             }
@@ -516,18 +644,22 @@ PageScaffold {
                 Layout.alignment: Qt.AlignVCenter
             }
             SectionHeader {
-                // Deliberately unnumbered: the subtitle promises "Four
-                // steps" and this card is not one of them — it is where you
-                // land once the four above are done (see the header comment).
-                label: "Start trading"
+                // Deliberately unnumbered: SetupSteps.stepsFor() lists only
+                // the steps you take, and this card is not one of them — it
+                // is where you land once those are done (see the header comment).
+                label: SetupSteps.TITLES.trade
                 hairline: false
             }
         }
         Text {
             Layout.fillWidth: true
-            text: setupRoot.isReady
-                  ? "You're set up — LEZ funded and gas in the tank. Head to the market to browse offers."
-                  : "Once both LEZ and test-ETH have landed, this is where you head to the market."
+            text: setupRoot.faucetless
+                  ? (setupRoot.isReady
+                     ? "You're set up — account active and gas in the tank. Head to the market to buy LEZ."
+                     : "Once your account is active and test-ETH has landed, this is where you head to the market.")
+                  : (setupRoot.isReady
+                     ? "You're set up — LEZ funded and gas in the tank. Head to the market to browse offers."
+                     : "Once both LEZ and test-ETH have landed, this is where you head to the market.")
             color: Theme.textSecondary
             font.pixelSize: Theme.fontSmall
             horizontalAlignment: Text.AlignLeft
@@ -583,6 +715,51 @@ PageScaffold {
             font.pixelSize: Theme.fontCaption
             horizontalAlignment: Text.AlignLeft
             wrapMode: Text.WordWrap
+        }
+
+        // Faucet-less flow only: the pinata claim, out of the numbered flow.
+        // A taker never needs it, but a maker still needs LEZ inventory to
+        // sell — that is the market's supply side — so the claim stays one
+        // click away here rather than as a step every new user walks through.
+        // Same job as the default flow's step 3 (initialize, then claim).
+        ColumnLayout {
+            id: sellerFunding
+            visible: setupRoot.faucetless
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.spacingSmall
+            spacing: Theme.spacingSmall
+
+            SectionHeader {
+                label: "Test LEZ for sellers"
+                hairline: false
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "Buying LEZ? You don't need this. Selling it? Claim free test LEZ, up to "
+                      + (swapBackend.setupTarget !== "" ? swapBackend.setupTarget : "150")
+                      + " per run, to have something to sell. Each claim solves a small puzzle "
+                      + "and then waits for the network."
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+            GhostButton {
+                text: swapBackend.setupRunning ? "Working…" : "Claim test LEZ"
+                enabled: setupRoot.hasLezAccount && !swapBackend.setupRunning
+                         && !setupRoot.anyRunning
+                Layout.preferredHeight: 38
+                onClicked: swapBackend.setupStartFunding()
+            }
+            Text {
+                visible: setupRoot.hasLezBalance
+                Layout.fillWidth: true
+                text: "Balance — " + swapBackend.lezBalance + " LEZ"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
         }
 
         ConfigForm {}

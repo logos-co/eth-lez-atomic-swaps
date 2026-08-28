@@ -69,6 +69,7 @@ public:
     void setupGenerateEthKey() override;
     void setupGenerateLezAccount() override;
     void setupStartFunding() override;
+    void setupInitializeAccount() override;
 
 private:
     QString configJson() const;
@@ -259,6 +260,7 @@ private:
     std::vector<std::function<void()>> m_pendingMessagingContinuations;
     int m_deliveryPortsShift = 0;
     QString m_loadedEnvPath;
+    QString m_setupFundingKey;
     BalanceRefreshCoordinator m_balanceRefreshCoordinator;
     QString m_coordinationRole;
     bool m_coordinationTakerPublished = false;

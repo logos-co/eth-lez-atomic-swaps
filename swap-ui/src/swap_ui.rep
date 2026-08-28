@@ -130,6 +130,20 @@ class SwapUi
     PROP(QString setupBalance READWRITE)
     PROP(QString setupTarget READWRITE)
     PROP(int setupClaims READWRITE)
+    // Hidden developer flag SWAP_UI_LEZ_FAUCET_MODE=off (issue #166): the
+    // faucet-less taker Setup, where step 3 only INITIALIZES the LEZ account
+    // (free, one signed transaction) instead of initialize-and-claim-150.
+    // Resolved once at startup from the environment (swap-ui/src/setup_flow.h);
+    // false — today's flow — unless the value is exactly "off".
+    PROP(bool setupFaucetless READWRITE)
+    // True once this session has seen the LEZ account initialized on-chain,
+    // by either path (setupInitializeAccount's outcome, or the funding job's
+    // Initialized/AlreadyInitialized progress step). In-memory only: it is
+    // reset when a different account is generated and NOT persisted, so a
+    // relaunch shows the (fast, idempotent) activate step again rather than
+    // guessing. A positive LEZ balance does NOT imply initialized — a credit
+    // lands on a never-initialized account too — so it is never inferred.
+    PROP(bool setupInitialized READWRITE)
 
     SLOT(void setRole(const QString& role))
     SLOT(void setConfigValue(const QString& key, const QString& value))
@@ -174,4 +188,10 @@ class SwapUi
     SLOT(void setupGenerateEthKey())
     SLOT(void setupGenerateLezAccount())
     SLOT(void setupStartFunding())
+    // Faucet-less step 3 (setupFaucetless): initialize the LEZ account on
+    // its own — SwapImpl::lezEnsureInitialized, no pinata claim — as a
+    // background call reported through the same setupRunning/setupStep/
+    // setupError PROPs. Idempotent: an already-initialized account reports
+    // AlreadyInitialized without a transaction.
+    SLOT(void setupInitializeAccount())
 }

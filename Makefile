@@ -143,6 +143,9 @@ swap-ui-unit:
 	@balance_gate_bin=$$(mktemp /tmp/atomic-swaps-balance-read-gate.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/balance_read_gate_test.cpp -o "$$balance_gate_bin"; \
 		"$$balance_gate_bin"
+	@setup_flow_bin=$$(mktemp /tmp/atomic-swaps-setup-flow.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/setup_flow_test.cpp -o "$$setup_flow_bin"; \
+		"$$setup_flow_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
@@ -209,6 +212,7 @@ NODE_PREFLIGHT_TESTS := \
 	tests/check-persistence-paths.mjs \
 	tests/amount-format.test.mjs \
 	tests/insufficient-eth-guard.test.mjs \
+	tests/setup-steps.test.mjs \
 	tests/offer-filter.test.mjs \
 	tests/maker-balance-refresh-contract.test.mjs \
 	tests/basecamp-ui-process-match.test.mjs \
