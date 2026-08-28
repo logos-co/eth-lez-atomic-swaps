@@ -348,6 +348,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setSetupClaims(0);
     setSetupFaucetless(defaultSetupFaucetless());
     setSetupInitialized(false);
+    connect(this, &SwapUiPlugin::lezSigningKeyChanged,
+            this, [this] { setSetupInitialized(false); });
 
     m_messagingPollTimer.setInterval(2000);
     connect(&m_messagingPollTimer, &QTimer::timeout,
