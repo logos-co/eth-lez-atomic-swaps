@@ -5,6 +5,7 @@
 #include "eth_funds_guard.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
+#include "lez_activation.h"
 #include "offer_venue.h"
 #include "setup_flow.h"
 #include "swap_api.h"
@@ -216,16 +217,20 @@ QString defaultEthHtlcAddress()
         : override;
 }
 
-// Hidden developer flag selecting the faucet-less taker Setup (issue #166).
-// SWAP_UI_LEZ_FAUCET_MODE=off makes Setup's step 3 initialize the LEZ account
-// on its own (free, one signed transaction — a taker needs zero LEZ because
-// LEZ v0.2.2 charges no fees) instead of initialize-and-claim-150 from
-// pinata; the seller's pinata claim moves under "Advanced settings". `on`,
-// unset, and ANY unrecognised value keep today's flow, byte-for-byte — the
-// parse (swap-ui/src/setup_flow.h, unit-tested) is deliberately fail-safe
-// rather than boolean-ish. Read once at startup, like the other overrides;
-// not a user-facing setting and not persisted. Exploratory: not a change of
-// default.
+// Which Setup flow to run (issue #166). The DEFAULT is faucet-less: step 3
+// initializes the LEZ account on its own (free, one signed transaction — a
+// taker needs zero LEZ because LEZ v0.2.2 charges no fees) and a new user
+// acquires LEZ by trading for it. The pinata claim is still offered in the
+// app, in its own "Get test LEZ without trading" section on the Setup page,
+// for sellers who need inventory.
+//
+// SWAP_UI_LEZ_FAUCET_MODE=on is a DEVELOPER override that restores the legacy
+// initialize-and-claim-150 step 3 byte-for-byte, for tooling and recorded demo
+// scripts. Unset, "off", and ANY unrecognised value give the shipped default —
+// the parse (swap-ui/src/setup_flow.h, unit-tested) is deliberately fail-safe
+// rather than boolean-ish, so a typo cannot ship a user an onboarding path we
+// did not choose. Read once at startup, like the other overrides; not a
+// user-facing setting and not persisted.
 bool defaultSetupFaucetless()
 {
     return swap_ui::lezFaucetless(
@@ -353,6 +358,17 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setSetupInitialized(false);
     connect(this, &SwapUiPlugin::lezSigningKeyChanged,
             this, [this] { setSetupInitialized(false); });
+
+    // Issue #171's visible waiting state: the activation call reports nothing
+    // until it answers, so this single shot moves the phase on once the wait
+    // is plainly a wait for the chain rather than for a submission.
+    m_lezActivateTimer.setSingleShot(true);
+    m_lezActivateTimer.setInterval(swap_ui::kActivationAwaitCommitMs);
+    connect(&m_lezActivateTimer, &QTimer::timeout, this, [this] {
+        if (setupRunning()) {
+            setSetupStep(QString::fromLatin1(swap_ui::kStepAwaitingCommit));
+        }
+    });
 
     m_messagingPollTimer.setInterval(2000);
     connect(&m_messagingPollTimer, &QTimer::timeout,
@@ -1150,17 +1166,23 @@ void SwapUiPlugin::setupStartFunding()
     });
 }
 
-// Faucet-less step 3 (SWAP_UI_LEZ_FAUCET_MODE=off, issue #166): initialize
-// the LEZ account and nothing else. This is the one step a taker cannot
-// skip — the sequencer silently drops actions against a never-initialized
-// account (src/lez/onboard.rs) — and it is free, so it gets its own path
-// instead of riding along inside startLezFundingJob's pinata claim. Reuses
-// the setupRunning/setupStep/setupError PROPs so SetupView's elapsed ticker
-// and error framing work unchanged; the outcome names are the same
-// Initialized/AlreadyInitialized steps the funding job reports, so
-// humanSetupStep needs no new entries. Not a job (no job id, no progress
-// events): lezEnsureInitialized is a single blocking call the generated
-// Async wrapper runs off the UI thread and answers once.
+// Faucet-less step 3 (the default flow, issue #166): initialize the LEZ
+// account and nothing else. This is the one step a taker cannot skip — the
+// sequencer silently drops actions against a never-initialized account
+// (src/lez/onboard.rs) — and it is free, so it gets its own path instead of
+// riding along inside startLezFundingJob's pinata claim. Reuses the
+// setupRunning/setupStep/setupError PROPs so SetupView's elapsed ticker and
+// error framing work unchanged. Not a job (no job id, no progress events):
+// lezEnsureInitialized is a single BLOCKING call the generated Async wrapper
+// runs off the UI thread and answers exactly once, up to five minutes later.
+//
+// That blocking is what made issue #171: the wrapper's default 20s Timeout
+// abandoned an activation that then succeeded on-chain, and the empty answer
+// read as an "Unexpected activation result: " failure with nothing after the
+// colon. runLezActivation() gives the call room for the whole commit wait,
+// gives the wait a visible phase, and routes every answer through
+// swap_ui::classifyActivation — which never calls anything failed without
+// asking again first, and never reports a failure with an empty detail.
 void SwapUiPlugin::setupInitializeAccount()
 {
     if (!m_swap || setupRunning()) {
@@ -1175,44 +1197,93 @@ void SwapUiPlugin::setupInitializeAccount()
     setSetupRunning(true);
     setSetupJobId(QString{});
     setSetupError(QString{});
-    setSetupStep(QStringLiteral("Initializing"));
     setSetupBalance(QString{});
     setSetupClaims(0);
     setStatus(QStringLiteral("Activating your LEZ account..."));
+    runLezActivation(false);
+}
 
+// One attempt at activating. `rechecked` marks the single extra attempt
+// classifyActivation asks for before anything may be called failed; it is
+// never true twice for one button press, so this cannot loop.
+void SwapUiPlugin::runLezActivation(bool rechecked)
+{
+    setSetupStep(rechecked ? QString::fromLatin1(swap_ui::kStepVerifying)
+                           : QStringLiteral("Initializing"));
+
+    // The call itself is silent until it answers. Move the visible phase on
+    // once the opening description stops being a fair one for a wait that can
+    // run five minutes, so the page reads as waiting on the chain rather than
+    // as hung. SetupView's per-phase elapsed ticker restarts on the step
+    // change. The re-check gets the same treatment: it re-reads ownership
+    // first, but if the account really was never initialized it goes on to
+    // submit and wait exactly like the first attempt.
+    m_lezActivateTimer.stop();
+    m_lezActivateTimer.start();
+
+    // Which account this attempt is about. Carried through the callback so an
+    // answer can never be applied to a DIFFERENT account than the one it was
+    // asked about — the user can generate a new LEZ account while this is in
+    // flight, and now that the call may run for minutes (issue #171) that
+    // window is much wider than it was.
     const QString activatedKey = lezSigningKey();
-    m_swap->lezEnsureInitializedAsync(lezSequencerUrl(), activatedKey,
-                                      [this, activatedKey](QString result) {
+    m_swap->lezEnsureInitializedAsync(
+        lezSequencerUrl(), activatedKey,
+        [this, activatedKey, rechecked](QString result) {
+            handleLezActivationResult(result, activatedKey, rechecked);
+        },
+        Timeout(swap_ui::kActivationTimeoutMs));
+}
+
+void SwapUiPlugin::handleLezActivationResult(const QString& result,
+                                             const QString& activatedKey,
+                                             bool rechecked)
+{
+    m_lezActivateTimer.stop();
+
+    if (activatedKey != lezSigningKey()) {
+        // The account changed under us. Say so plainly and stop — re-checking
+        // would ask about the NEW account, and reporting either way would
+        // attach this answer to the wrong one.
         setSetupRunning(false);
-        if (activatedKey != lezSigningKey()) {
-            setSetupStep(QString{});
-            setStatus(QStringLiteral("LEZ account changed during activation; press Activate account again"));
-            return;
-        }
-        const auto error = jsonError(result);
-        if (!error.isEmpty()) {
-            setSetupStep(QString{});
-            setSetupError(error);
-            setStatus(QStringLiteral("LEZ account activation failed: %1").arg(error));
-            return;
-        }
-        const auto outcome = valueString(parseObject(result), QStringLiteral("outcome"));
-        if (outcome != QStringLiteral("Initialized")
-            && outcome != QStringLiteral("AlreadyInitialized")) {
-            // Never mark an account initialized on a shape we don't
-            // recognise: an uninitialized account fails LATER with a silent
-            // drop, which is far worse than an honest retry here.
-            setSetupStep(QString{});
-            setSetupError(QStringLiteral("Unexpected activation result: %1").arg(result));
-            setStatus(QStringLiteral("LEZ account activation failed"));
-            return;
-        }
-        setSetupStep(outcome);
+        setSetupStep(QString{});
+        setStatus(QStringLiteral("LEZ account changed during activation; press Activate account again"));
+        return;
+    }
+
+    const auto obj = parseObject(result);
+    const auto decision = swap_ui::classifyActivation(
+        jsonError(result).toStdString(),
+        valueString(obj, QStringLiteral("outcome")).toStdString(),
+        result.toStdString(),
+        rechecked);
+
+    switch (decision.verdict) {
+    case swap_ui::ActivationVerdict::Succeeded:
+        setSetupRunning(false);
+        setSetupStep(QString::fromStdString(decision.outcome));
         setSetupInitialized(true);
         setSetupError(QString{});
         setStatus(QStringLiteral("LEZ account ready"));
         fetchBalances();
-    });
+        return;
+    case swap_ui::ActivationVerdict::Retry:
+        // Still running: the user pressed one button and this is still that
+        // one activation, so setupRunning stays true and the buttons stay
+        // disabled rather than flickering back to idle mid-flight.
+        setStatus(QStringLiteral("Checking whether your account activated..."));
+        runLezActivation(true);
+        return;
+    case swap_ui::ActivationVerdict::Failed:
+        break;
+    }
+
+    setSetupRunning(false);
+    setSetupStep(QString{});
+    // Guaranteed non-empty by classifyActivation — that guarantee is the
+    // point (issue #171's blank "Unexpected activation result: ").
+    setSetupError(QString::fromStdString(decision.detail));
+    setStatus(QStringLiteral("LEZ account activation failed"));
 }
 
 QString SwapUiPlugin::canonicalLezHtlcProgramId() const

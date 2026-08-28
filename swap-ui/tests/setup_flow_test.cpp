@@ -1,8 +1,12 @@
-// Standalone unit test for swap-ui/src/setup_flow.h — the hidden
-// SWAP_UI_LEZ_FAUCET_MODE flag that selects the faucet-less taker Setup
-// (issue #166). The load-bearing property is the DEFAULT: anything other
-// than an exact "off" must select today's flow, so a typo or an unrelated
-// value can never silently change the shipped onboarding.
+// Standalone unit test for swap-ui/src/setup_flow.h — the developer override
+// SWAP_UI_LEZ_FAUCET_MODE, which restores the legacy faucet Setup (issue
+// #166). The load-bearing property is the DEFAULT: the faucet-less flow now
+// ships, so anything other than an exact "on" must select it, and a typo or
+// an unrelated value can never silently hand a user the legacy onboarding.
+//
+// Note the fallback follows the default, and the default was inverted — so
+// these expectations are the mirror image of the ones this file first
+// carried. That is the change, not a regression: see setup_flow.h.
 //
 // Deliberately has zero Qt/logos/nix dependencies so it can be compiled and
 // run directly:
@@ -47,36 +51,42 @@ int main()
     expect("env var name is SWAP_UI_LEZ_FAUCET_MODE",
            std::strcmp(swap_ui::kLezFaucetModeEnv, "SWAP_UI_LEZ_FAUCET_MODE") == 0, true);
 
-    // --- Default: today's flow. ---
-    expect("unset (empty) -> On", parseLezFaucetMode("") == LezFaucetMode::On, true);
-    expect("whitespace only -> On", parseLezFaucetMode("  \t ") == LezFaucetMode::On, true);
-    expect("\"on\" -> On", parseLezFaucetMode("on") == LezFaucetMode::On, true);
-    expect("\"ON\" -> On", parseLezFaucetMode("ON") == LezFaucetMode::On, true);
-
-    // Unrecognised values are NOT a boolean-ish "off": they fall back to
-    // today's flow. This is the property that protects the default.
-    expect("\"0\" -> On (unrecognised)", parseLezFaucetMode("0") == LezFaucetMode::On, true);
-    expect("\"false\" -> On (unrecognised)", parseLezFaucetMode("false") == LezFaucetMode::On, true);
-    expect("\"no\" -> On (unrecognised)", parseLezFaucetMode("no") == LezFaucetMode::On, true);
-    expect("\"faucetless\" -> On (unrecognised)",
-           parseLezFaucetMode("faucetless") == LezFaucetMode::On, true);
-    expect("\"of\" -> On (unrecognised)", parseLezFaucetMode("of") == LezFaucetMode::On, true);
-    expect("\"off!\" -> On (unrecognised)", parseLezFaucetMode("off!") == LezFaucetMode::On, true);
-    expect("\"off off\" -> On (unrecognised)",
-           parseLezFaucetMode("off off") == LezFaucetMode::On, true);
-
-    // --- The one opt-in spelling, tolerant of case and surrounding space. ---
+    // --- Default: the shipped faucet-less flow. ---
+    expect("unset (empty) -> Off", parseLezFaucetMode("") == LezFaucetMode::Off, true);
+    expect("whitespace only -> Off", parseLezFaucetMode("  \t ") == LezFaucetMode::Off, true);
     expect("\"off\" -> Off", parseLezFaucetMode("off") == LezFaucetMode::Off, true);
     expect("\"OFF\" -> Off", parseLezFaucetMode("OFF") == LezFaucetMode::Off, true);
-    expect("\"Off\" -> Off", parseLezFaucetMode("Off") == LezFaucetMode::Off, true);
+
+    // Unrecognised values are NOT a boolean-ish "on": they fall back to the
+    // shipped default. This is the property that protects the default, and it
+    // now protects the faucet-LESS flow.
+    expect("\"1\" -> Off (unrecognised)", parseLezFaucetMode("1") == LezFaucetMode::Off, true);
+    expect("\"true\" -> Off (unrecognised)", parseLezFaucetMode("true") == LezFaucetMode::Off, true);
+    expect("\"yes\" -> Off (unrecognised)", parseLezFaucetMode("yes") == LezFaucetMode::Off, true);
+    expect("\"faucet\" -> Off (unrecognised)",
+           parseLezFaucetMode("faucet") == LezFaucetMode::Off, true);
+    expect("\"o\" -> Off (unrecognised)", parseLezFaucetMode("o") == LezFaucetMode::Off, true);
+    expect("\"on!\" -> Off (unrecognised)", parseLezFaucetMode("on!") == LezFaucetMode::Off, true);
+    expect("\"on on\" -> Off (unrecognised)",
+           parseLezFaucetMode("on on") == LezFaucetMode::Off, true);
+    // The value the pre-default-flip tooling and demo scripts pass. It still
+    // means faucet-less, so nothing that set it breaks.
     expect("\" off \" -> Off (trimmed)", parseLezFaucetMode(" off ") == LezFaucetMode::Off, true);
     expect("\"off\\n\" -> Off (trimmed)", parseLezFaucetMode("off\n") == LezFaucetMode::Off, true);
 
+    // --- The one opt-in spelling for the legacy flow, tolerant of case and
+    // surrounding space. ---
+    expect("\"on\" -> On", parseLezFaucetMode("on") == LezFaucetMode::On, true);
+    expect("\"ON\" -> On", parseLezFaucetMode("ON") == LezFaucetMode::On, true);
+    expect("\"On\" -> On", parseLezFaucetMode("On") == LezFaucetMode::On, true);
+    expect("\" on \" -> On (trimmed)", parseLezFaucetMode(" on ") == LezFaucetMode::On, true);
+    expect("\"on\\n\" -> On (trimmed)", parseLezFaucetMode("on\n") == LezFaucetMode::On, true);
+
     // --- The boolean the UI consumes mirrors the enum exactly. ---
-    expect("lezFaucetless(\"\") is false", lezFaucetless(""), false);
-    expect("lezFaucetless(\"on\") is false", lezFaucetless("on"), false);
-    expect("lezFaucetless(\"garbage\") is false", lezFaucetless("garbage"), false);
+    expect("lezFaucetless(\"\") is true (the default)", lezFaucetless(""), true);
     expect("lezFaucetless(\"off\") is true", lezFaucetless("off"), true);
+    expect("lezFaucetless(\"garbage\") is true", lezFaucetless("garbage"), true);
+    expect("lezFaucetless(\"on\") is false", lezFaucetless("on"), false);
 
     if (failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", failures);

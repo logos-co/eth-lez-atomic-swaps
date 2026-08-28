@@ -20,12 +20,22 @@ import "SetupSteps.js" as SetupSteps
 // swap on "insufficient funds for gas". Readiness is gated on both sides (see
 // isReady) and nothing here says "ready" until both have landed.
 //
-// Two flows share this page, selected once at startup by the hidden developer
-// flag SWAP_UI_LEZ_FAUCET_MODE (swapBackend.setupFaucetless; issue #166):
-//   * default (flag unset/"on"): step 3 initializes AND claims 150 LEZ.
-//   * "off": step 3 only ACTIVATES (initializes) the account — a taker needs
-//     zero LEZ because LEZ charges no fees — and the pinata claim moves under
-//     Advanced settings for sellers, who still need inventory.
+// The default flow is faucet-less (issue #166): step 3 only ACTIVATES
+// (initializes) the LEZ account. A taker needs zero LEZ to swap, because LEZ
+// charges no fees — so the way to GET LEZ is to buy it on the market, which is
+// what this app is for. Handing a new user 150 faucet LEZ before they have
+// traded for any teaches the wrong first move.
+//
+// The faucet is not gone, it is demoted: it lives on this page as its own
+// named, collapsed section (`otherWaysToGetLez` below), because a seller does
+// need LEZ inventory before they can offer any. That is a deliberate secondary
+// path, not a hidden switch — the user opens a section, they do not set an
+// environment variable.
+//
+// SWAP_UI_LEZ_FAUCET_MODE=on (swapBackend.setupFaucetless == false;
+// swap-ui/src/setup_flow.h) is a DEVELOPER override that restores the legacy
+// screens for recorded demo scripts and tooling. It is not how a user chooses
+// the faucet, and it is not on the path any user walks.
 //
 // Shown first on a fresh install (AtomicSwapView jumps here once config
 // validation settles and the config turns out incomplete); reachable any time
@@ -36,7 +46,9 @@ PageScaffold {
     title: "Get set up"
     subtitle: SetupSteps.subtitle(setupRoot.faucetless)
 
-    // Which of the two flows this page runs. Fixed for the process lifetime.
+    // Which of the two flows this page runs — true (faucet-less) unless the
+    // developer override SWAP_UI_LEZ_FAUCET_MODE=on is set. Fixed for the
+    // process lifetime.
     readonly property bool faucetless: swapBackend.setupFaucetless
 
     // Emitted when the user is done and wants to head to the market. The host
@@ -103,6 +115,15 @@ PageScaffold {
     // addresses.
     property string copiedKind: ""
 
+    // Which affordance started the job currently reflected in the shared
+    // setupRunning/setupStep/setupError PROPs: "activate" (step 3) or "claim"
+    // (the faucet section below). Both live on the same page in the
+    // faucet-less flow and the backend has one set of progress PROPs, so
+    // without this a faucet claim would render "Solving the faucet's puzzle…"
+    // and its errors inside step 3's card, under a heading that has nothing to
+    // do with either.
+    property string setupOrigin: ""
+
     // Bounded auto-poll for ETH arrival while the test-ETH step is active (see
     // the ethBalancePoll Timer): count of polls issued, capped so a user who
     // wanders off doesn't have the app hammer the RPC forever.
@@ -112,6 +133,14 @@ PageScaffold {
     function humanSetupStep(step) {
         var map = {
             "Initializing":       "Setting up your account on the network…",
+            // Issue #171: the activation call is silent for as long as it
+            // takes a block to commit — up to five minutes on this test
+            // network. These two say which kind of waiting is going on, so a
+            // long wait reads as the chain being slow rather than the app
+            // being stuck. Neither claims the transaction landed; only
+            // Initialized/AlreadyInitialized do that.
+            "AwaitingCommit":     "Waiting for the network to confirm — test-network blocks can be minutes apart.",
+            "Verifying":          "Checking whether it landed…",
             "AlreadyInitialized": "Account already set up",
             "Initialized":        "Account set up on the network",
             "CheckingBalance":    "Solving the faucet's puzzle…",
@@ -352,6 +381,27 @@ PageScaffold {
             wrapMode: Text.WordWrap
         }
 
+        // Whether an account is already registered is a fact on the network,
+        // and this app does not remember it between launches (see
+        // swap_ui.rep's setupInitialized). Rather than guess — guessing wrong
+        // means a swap the sequencer silently drops — say plainly what the
+        // button costs someone who is already set up: a read, a second, and
+        // no transaction. Without this line, anyone who set up under the old
+        // faucet flow opens Setup after updating, sees an unfinished step 3,
+        // and has nothing telling them it is a formality.
+        Text {
+            visible: !swapBackend.setupInitialized && !swapBackend.setupRunning
+                     && setupRoot.hasLezAccount
+            Layout.fillWidth: true
+            text: "If you set this up in an earlier session, press it anyway — it checks "
+                  + "the network first and confirms in about a second, without sending "
+                  + "anything."
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+
         PrimaryButton {
             text: swapBackend.setupRunning
                   ? "Activating…"
@@ -360,11 +410,15 @@ PageScaffold {
                      && !setupRoot.anyRunning
             Layout.fillWidth: true
             Layout.preferredHeight: 42
-            onClicked: swapBackend.setupInitializeAccount()
+            onClicked: {
+                setupRoot.setupOrigin = "activate"
+                swapBackend.setupInitializeAccount()
+            }
         }
 
         RowLayout {
-            visible: swapBackend.setupRunning || swapBackend.setupStep !== ""
+            visible: setupRoot.setupOrigin !== "claim"
+                     && (swapBackend.setupRunning || swapBackend.setupStep !== "")
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
 
@@ -389,14 +443,18 @@ PageScaffold {
         }
 
         ColumnLayout {
-            visible: swapBackend.setupError !== ""
+            visible: setupRoot.setupOrigin !== "claim" && swapBackend.setupError !== ""
             Layout.fillWidth: true
             spacing: 4
 
             Text {
                 Layout.fillWidth: true
-                text: "That didn't work. Your account is fine — nothing was lost. "
-                      + "You can press Activate account to try again."
+                // Deliberately does not say "that didn't work": after issue
+                // #171 an activation error can mean "we never found out",
+                // and the detail below says which. Both readings end with
+                // the same safe next move, so that is what this line says.
+                text: "Your account is fine — nothing was lost. Press Activate "
+                      + "account to try again; it checks before it sends anything."
                 color: Theme.textSecondary
                 font.pixelSize: Theme.fontSmall
                 horizontalAlignment: Text.AlignLeft
@@ -415,9 +473,9 @@ PageScaffold {
         }
     }
 
-    // --- Step 3 (default flow): Fund LEZ ---
-    // Hidden in the faucet-less flow, where the same claim is offered to
-    // sellers under Advanced settings instead (see sellerFunding below).
+    // --- Step 3 (legacy SWAP_UI_LEZ_FAUCET_MODE=on flow): Fund LEZ ---
+    // Hidden in the default faucet-less flow, where the same claim lives in
+    // the "Get test LEZ without trading" section instead (otherWaysToGetLez).
     Card {
         visible: !setupRoot.faucetless
         tone: setupRoot.lezFunded ? "done"
@@ -716,7 +774,9 @@ PageScaffold {
             text: setupRoot.faucetless
                   ? (setupRoot.isReady
                      ? "You're set up — account active and gas in the tank. Head to the market to buy LEZ."
-                     : "Once your account is active and test-ETH has landed, this is where you head to the market.")
+                     : "Once you've activated your LEZ account (step "
+                       + SetupSteps.stepNumber("activateLez", setupRoot.faucetless)
+                       + ") and test-ETH has landed, this is where you head to the market.")
                   : (setupRoot.isReady
                      ? "You're set up — LEZ funded and gas in the tank. Head to the market to browse offers."
                      : "Once both LEZ and test-ETH have landed, this is where you head to the market.")
@@ -731,6 +791,183 @@ PageScaffold {
             Layout.fillWidth: true
             Layout.preferredHeight: 42
             onClicked: setupRoot.finished()
+        }
+    }
+
+    // --- The faucet's home in the app (faucet-less flow only) ---
+    //
+    // A peer of the numbered flow, not a step in it. A buyer never needs this:
+    // LEZ charges no fees, so you can buy LEZ with a zero LEZ balance, and the
+    // market is where LEZ is supposed to come from (issue #166). Asking every
+    // new user to decide about a "faucet" — a word they have no reason to know
+    // — before they have even seen the market is exactly what that argument is
+    // against.
+    //
+    // But it cannot be an environment variable either. A SELLER needs LEZ
+    // inventory before they can offer any, and that is a real, ordinary thing
+    // to want from inside the app. So: collapsed by default (the primary path
+    // stays four short cards), sitting in the open where it can be found,
+    // labelled for what the user gets rather than for the mechanism, and
+    // leading with who does NOT need it so nobody opens it out of worry.
+    //
+    // Hidden under the legacy SWAP_UI_LEZ_FAUCET_MODE=on flow, where this same
+    // claim IS step 3 — one claim affordance per flow, never two.
+    Disclosure {
+        id: otherWaysToGetLez
+        visible: setupRoot.faucetless
+        label: "Get test LEZ without trading"
+
+        // Admit in the collapsed header what happened to a claim started
+        // here, so collapsing the section is never how you lose track of it.
+        // That is the difference between progressive disclosure and simply
+        // hiding things — see Disclosure.qml's own note on the badge.
+        readonly property string claimState: {
+            if (setupRoot.setupOrigin !== "claim") return ""
+            if (swapBackend.setupRunning) return "claiming…"
+            if (swapBackend.setupError !== "") return "claim failed"
+            if (swapBackend.setupStep === "Done") return "claimed"
+            return ""
+        }
+        badge: claimState
+        badgeTone: claimState === "claim failed" ? Theme.toneAttention : Theme.toneLive
+
+        Text {
+            Layout.fillWidth: true
+            text: "You don't need this to buy LEZ. Buying is the whole point of the app: "
+                  + "you pay Sepolia ETH on the Market tab and the LEZ arrives — an empty "
+                  + "LEZ balance is fine, because LEZ charges no fees."
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSmall
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+        Text {
+            Layout.fillWidth: true
+            text: "You do need it to SELL LEZ. A sell offer has to be backed by LEZ you "
+                  + "already hold, and on a test network the only other source is this "
+                  + "faucet: it hands out free test LEZ, up to "
+                  + (swapBackend.setupTarget !== "" ? swapBackend.setupTarget : "150")
+                  + " per run. Each claim solves a small puzzle and then waits for the "
+                  + "network, so it can take a few minutes."
+            color: Theme.textSecondary
+            font.pixelSize: Theme.fontSmall
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+
+        GhostButton {
+            text: swapBackend.setupRunning && setupRoot.setupOrigin === "claim"
+                  ? "Claiming…"
+                  : "Claim test LEZ"
+            // Claiming credits an account, and the network silently drops
+            // actions against a never-initialized one — so this needs the same
+            // account step 3 activates. The funding job initializes first
+            // anyway; requiring the account only keeps the button honest about
+            // what it needs.
+            enabled: setupRoot.hasLezAccount && !swapBackend.setupRunning
+                     && !setupRoot.anyRunning
+            Layout.preferredHeight: 38
+            onClicked: {
+                setupRoot.setupOrigin = "claim"
+                swapBackend.setupStartFunding()
+            }
+        }
+
+        Text {
+            visible: !setupRoot.hasLezAccount
+            Layout.fillWidth: true
+            text: "Finish step " + SetupSteps.stepNumber("lezAccount", setupRoot.faucetless)
+                  + " first — a claim needs a LEZ account to arrive in."
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+
+        // Live progress for a claim started HERE, with the same per-phase
+        // elapsed ticker the numbered steps use — a slow chain phase has to
+        // visibly tick rather than look hung.
+        RowLayout {
+            visible: setupRoot.setupOrigin === "claim"
+                     && (swapBackend.setupRunning || swapBackend.setupStep !== "")
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot {
+                status: swapBackend.setupRunning ? "working" : "live"
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+                text: {
+                    var parts = [setupRoot.humanSetupStep(swapBackend.setupStep)]
+                    if (swapBackend.setupRunning && setupRoot.setupStepElapsedSeconds > 0)
+                        parts[0] += " " + setupRoot.setupStepElapsedSeconds + "s"
+                    if (swapBackend.setupBalance !== "")
+                        parts.push(Number(swapBackend.setupBalance) >= Number(swapBackend.setupTarget)
+                                   ? swapBackend.setupBalance + " LEZ"
+                                   : swapBackend.setupBalance + " / " + swapBackend.setupTarget + " LEZ")
+                    if (swapBackend.setupClaims > 0)
+                        parts.push(swapBackend.setupClaims + " claim"
+                                   + (swapBackend.setupClaims === 1 ? "" : "s") + " confirmed")
+                    return parts.join(" — ")
+                }
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+            }
+        }
+
+        ColumnLayout {
+            visible: setupRoot.setupOrigin === "claim" && swapBackend.setupError !== ""
+            Layout.fillWidth: true
+            spacing: 4
+
+            Text {
+                Layout.fillWidth: true
+                text: "That claim didn't land. Your account is fine — nothing was lost, "
+                      + "and your setup steps above are unaffected. Press Claim test LEZ "
+                      + "to try again."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: swapBackend.setupError
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.monoFont
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.Wrap
+            }
+        }
+
+        Text {
+            visible: setupRoot.hasLezBalance
+            Layout.fillWidth: true
+            text: "You hold " + swapBackend.lezBalance + " LEZ."
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
+        }
+
+        // The way back. Progressive disclosure owes the reader an exit, and
+        // "none of this changed your steps" is the reassurance someone who
+        // opened it by accident actually needs.
+        Text {
+            Layout.fillWidth: true
+            text: "None of this changes the steps above — collapse this section and carry "
+                  + "on where you left off."
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontCaption
+            horizontalAlignment: Text.AlignLeft
+            wrapMode: Text.WordWrap
         }
     }
 
@@ -775,51 +1012,6 @@ PageScaffold {
             font.pixelSize: Theme.fontCaption
             horizontalAlignment: Text.AlignLeft
             wrapMode: Text.WordWrap
-        }
-
-        // Faucet-less flow only: the pinata claim, out of the numbered flow.
-        // A taker never needs it, but a maker still needs LEZ inventory to
-        // sell — that is the market's supply side — so the claim stays one
-        // click away here rather than as a step every new user walks through.
-        // Same job as the default flow's step 3 (initialize, then claim).
-        ColumnLayout {
-            id: sellerFunding
-            visible: setupRoot.faucetless
-            Layout.fillWidth: true
-            Layout.topMargin: Theme.spacingSmall
-            spacing: Theme.spacingSmall
-
-            SectionHeader {
-                label: "Test LEZ for sellers"
-                hairline: false
-            }
-            Text {
-                Layout.fillWidth: true
-                text: "Buying LEZ? You don't need this. Selling it? Claim free test LEZ, up to "
-                      + (swapBackend.setupTarget !== "" ? swapBackend.setupTarget : "150")
-                      + " per run, to have something to sell. Each claim solves a small puzzle "
-                      + "and then waits for the network."
-                color: Theme.textMuted
-                font.pixelSize: Theme.fontCaption
-                horizontalAlignment: Text.AlignLeft
-                wrapMode: Text.WordWrap
-            }
-            GhostButton {
-                text: swapBackend.setupRunning ? "Working…" : "Claim test LEZ"
-                enabled: setupRoot.hasLezAccount && !swapBackend.setupRunning
-                         && !setupRoot.anyRunning
-                Layout.preferredHeight: 38
-                onClicked: swapBackend.setupStartFunding()
-            }
-            Text {
-                visible: setupRoot.hasLezBalance
-                Layout.fillWidth: true
-                text: "Balance — " + swapBackend.lezBalance + " LEZ"
-                color: Theme.textMuted
-                font.pixelSize: Theme.fontCaption
-                horizontalAlignment: Text.AlignLeft
-                wrapMode: Text.WordWrap
-            }
         }
 
         ConfigForm {}

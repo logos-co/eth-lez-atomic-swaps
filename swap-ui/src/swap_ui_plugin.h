@@ -73,6 +73,17 @@ public:
     void setupInitializeAccount() override;
 
 private:
+    // Issue #171: one attempt at LEZ activation, and what to make of its
+    // answer. `rechecked` marks the single extra attempt
+    // swap_ui::classifyActivation asks for before any answer may be called a
+    // failure, so the pair cannot loop. See setupInitializeAccount().
+    void runLezActivation(bool rechecked);
+    // `activatedKey` is the lez_signing_key this attempt asked about, so an
+    // answer that arrives after the user generated a NEW account is discarded
+    // rather than applied to it.
+    void handleLezActivationResult(const QString& result, const QString& activatedKey,
+                                   bool rechecked);
+
     QString configJson() const;
     QString messagingConfigJson() const;
     void applyConfigObject(const QJsonObject& obj);
@@ -255,6 +266,9 @@ private:
     LogosAPI* m_logosAPI = nullptr;
     Swap* m_swap = nullptr;
     LogosObject* m_eventObject = nullptr;
+    // Single shot that gives the (silent, up-to-five-minute) LEZ activation
+    // call a visible "waiting for the network to confirm" phase — issue #171.
+    QTimer m_lezActivateTimer;
     QTimer m_messagingPollTimer;
     QTimer m_coordinationPollTimer;
     QTimer m_balanceSettleTimer;
