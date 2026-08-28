@@ -139,11 +139,14 @@ class SwapUi
     PROP(QString setupBalance READWRITE)
     PROP(QString setupTarget READWRITE)
     PROP(int setupClaims READWRITE)
-    // Hidden developer flag SWAP_UI_LEZ_FAUCET_MODE=off (issue #166): the
-    // faucet-less taker Setup, where step 3 only INITIALIZES the LEZ account
-    // (free, one signed transaction) instead of initialize-and-claim-150.
-    // Resolved once at startup from the environment (swap-ui/src/setup_flow.h);
-    // false — today's flow — unless the value is exactly "off".
+    // Which Setup flow the page runs (issue #166). TRUE by default: the
+    // faucet-less Setup, where step 3 only INITIALIZES the LEZ account (free,
+    // one signed transaction) and LEZ is something you buy on the market. The
+    // faucet is still reachable in the app, as its own section on the Setup
+    // page — not through this flag. Resolved once at startup from the
+    // environment (swap-ui/src/setup_flow.h); only the developer override
+    // SWAP_UI_LEZ_FAUCET_MODE=on makes it false and restores the legacy
+    // initialize-and-claim-150 step 3.
     PROP(bool setupFaucetless READWRITE)
     // True once this session has seen the LEZ account initialized on-chain,
     // by either path (setupInitializeAccount's outcome, or the funding job's
@@ -151,7 +154,10 @@ class SwapUi
     // reset when a different account is generated and NOT persisted, so a
     // relaunch shows the (fast, idempotent) activate step again rather than
     // guessing. A positive LEZ balance does NOT imply initialized — a credit
-    // lands on a never-initialized account too — so it is never inferred.
+    // lands on a never-initialized account too — so it is never inferred;
+    // guessing wrong costs a swap the sequencer silently drops. SetupView says
+    // so on the card instead, since with the faucet-less flow now the default
+    // a returning 0.4.5 user meets that step on their first relaunch.
     PROP(bool setupInitialized READWRITE)
 
     SLOT(void setRole(const QString& role))

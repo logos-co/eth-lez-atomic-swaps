@@ -45,6 +45,20 @@ make basecamp-dev ARGS=--skip-build   # relaunch without rebuilding
 Each build is stamped `-dev.<sha>` so you can verify which build is live. See
 [local-dev-harness.md](local-dev-harness.md).
 
+### `SWAP_UI_LEZ_FAUCET_MODE` — the legacy Setup screens
+
+The guided Setup ships **faucet-less** (issue #166): step 3 activates the LEZ
+account and nothing else, and a new user gets LEZ by buying it on the market.
+The pinata claim is still in the app for sellers, as the Setup page's
+"Get test LEZ without trading" section — not behind an environment variable.
+
+`SWAP_UI_LEZ_FAUCET_MODE=on` is a developer override that restores the legacy
+screens (step 3 = initialize *and* claim 150 LEZ), for tooling and recorded
+demo scripts that expect them. Only an exact, case-insensitive `on` selects
+it; unset, `off`, and anything unrecognised give the shipped faucet-less flow.
+It is read once at startup — see `swap-ui/src/setup_flow.h`, unit-tested by
+`make swap-ui-unit`.
+
 ## Two-peer manual flow (maker + taker)
 
 ```bash

@@ -149,6 +149,9 @@ swap-ui-unit:
 	@balance_error_bin=$$(mktemp /tmp/atomic-swaps-balance-error-policy.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/balance_error_policy_test.cpp -o "$$balance_error_bin"; \
 		"$$balance_error_bin"
+	@lez_activation_bin=$$(mktemp /tmp/atomic-swaps-lez-activation.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/lez_activation_test.cpp -o "$$lez_activation_bin"; \
+		"$$lez_activation_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
