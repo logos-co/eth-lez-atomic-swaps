@@ -176,6 +176,16 @@ jobs:
           path: .canary-tools
           sparse-checkout: canary
 
+      # Issue #165: the content scan below grades against the HIGHEST map
+      # entry. Refuse to treat an older version's markers as this build's
+      # description — the map must cover the version inputs.ref declares.
+      # Must run BEFORE the sentinel stamp rewrites metadata.json to 0.99.N.
+      # .canary-tools is a sparse checkout (canary/ only); the metadata.json
+      # files live in the inputs.ref workspace at `.`.
+      - name: Verify release-content expectations cover metadata.json versions
+        shell: bash
+        run: python3 .canary-tools/canary/check-expectations-coverage.py --root .
+
       # Pin to the same immutable Nix installer SHA build-modules.yml uses.
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
         with:
@@ -234,12 +244,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Issue #165: the scan below grades against the HIGHEST map entry.
-          # Refuse to treat an older version's markers as this build's
-          # description — the map must cover the version being built.
-          # .canary-tools is a sparse checkout (canary/ only); the
-          # metadata.json files live in the inputs.ref workspace at `.`.
-          python3 .canary-tools/canary/check-expectations-coverage.py --root .
           python3 .canary-tools/canary/canary-content-scan.py \
             --lgx "${{ steps.build.outputs.lgx }}" \
             --module "${{ matrix.logical }}" \
