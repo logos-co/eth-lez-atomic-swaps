@@ -1629,6 +1629,15 @@ void SwapUiPlugin::setRole(const QString& role)
 
 void SwapUiPlugin::setConfigValue(const QString& key, const QString& value)
 {
+    static const QStringList kBalanceReadInputs = {
+        QStringLiteral("eth_rpc_url"),
+        QStringLiteral("eth_private_key"),
+        QStringLiteral("eth_htlc_address"),
+        QStringLiteral("lez_sequencer_url"),
+        QStringLiteral("lez_signing_key"),
+        QStringLiteral("lez_wallet_home"),
+        QStringLiteral("lez_account_id"),
+    };
     if (key == QStringLiteral("eth_rpc_url")) setEthRpcUrl(value);
     else if (key == QStringLiteral("eth_private_key")) setEthPrivateKey(value);
     else if (key == QStringLiteral("eth_htlc_address")) setEthHtlcAddress(value);
@@ -1649,12 +1658,19 @@ void SwapUiPlugin::setConfigValue(const QString& key, const QString& value)
         setStatus(errorMessage());
         return;
     }
-    // A config edit is a new chance: the failures on screen may well belong to
-    // the endpoint the user just replaced, so drop them rather than holding
-    // the old URL's history against the new one. The next read re-earns any
-    // message from scratch (issue #169).
-    m_balanceErrors.reset();
-    publishBalanceErrors();
+    // A config edit is a new chance — but only an edit to something a balance
+    // read actually consumes: the same seven inputs balanceReadGate() takes.
+    // A new endpoint or a new account may well be what the failures on screen
+    // belonged to, so drop them rather than holding the old value's history
+    // against the new one; the next read re-earns any message from scratch.
+    // Typing an amount, a timelock or the poll interval changes nothing about
+    // whether the chain is reachable, and resetting on those would silently
+    // clear a standing dead-endpoint notice the user needs to be able to find
+    // (issue #169).
+    if (kBalanceReadInputs.contains(key)) {
+        m_balanceErrors.reset();
+        publishBalanceErrors();
+    }
     validateConfig();
     scheduleConfigSave();
 }
@@ -1714,7 +1730,12 @@ void SwapUiPlugin::fetchBalancesFromLoadedEnv()
         return;
     }
 
-    setErrorMessage(QString{});
+    // Deliberately does NOT clear errorMessage, for the same reason
+    // fetchBalances() does not: nothing in the balance path writes that
+    // property any more (issue #169), so clearing it from an automatic refresh
+    // can only erase the failure of something the user actually did. The
+    // refund-completion paths are exactly that case — setResultStatus() writes
+    // the failure and the very next statement calls this function.
     setBalancesLoading(true);
     setStatus(QStringLiteral("Fetching balances..."));
     m_swap->fetchBalancesFromEnvAsync(m_loadedEnvPath, [this](QString result) {

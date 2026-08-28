@@ -18,9 +18,11 @@
 //      that would otherwise promise the app is watching a chain it cannot
 //      reach.
 //
-// Layers 2 and 3 are pinned here, evaluated straight out of the shipped QML
+// Layers 2 and 3 are tested here, evaluated straight out of the shipped QML
 // (brace-matched, not hand-copied) so the shipped rule and the test cannot
-// drift apart. The one-place-per-failure rule of layer 2 is the same one
+// drift apart. Layer 1's wording is NOT pinned here — the QML helpers treat
+// the sentence as an opaque string, so representative values are the right
+// input. The one-place-per-failure rule of layer 2 is the same one
 // tests/insufficient-eth-guard.test.mjs pins for the receipt strip.
 //
 // Run: node tests/balance-notice.test.mjs
@@ -38,7 +40,6 @@ function source(...parts) {
 
 const shellQml = source("swap-ui", "src", "qml", "AtomicSwapView.qml");
 const setupQml = source("swap-ui", "src", "qml", "SetupView.qml");
-const policyHeader = source("swap-ui", "src", "balance_error_policy.h");
 
 function extractFunction(src, name, file) {
   const startRe = new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{`);
@@ -62,7 +63,12 @@ const balanceNoticeText = load(shellQml, "balanceNoticeText", "AtomicSwapView.qm
 const balanceNoticeShows = load(shellQml, "balanceNoticeShows", "AtomicSwapView.qml");
 const ethArrivalLine = load(setupQml, "ethArrivalLine", "SetupView.qml");
 
-// The real sentences, so the test exercises what ships rather than a stand-in.
+// Representative sentences. The authoritative wording lives in
+// balanceErrorCopy() in swap-ui/src/balance_error_policy.h, and its behaviour
+// (names the right chain, never carries raw RPC text, differs per side) is
+// covered executably by swap-ui/tests/balance_error_policy_test.cpp. The QML
+// helpers below treat whatever the policy publishes as an opaque string, so
+// these only need to be plausible, not identical.
 const ETH_DOWN =
   "Can't reach Ethereum right now, so the ETH balance may be out of date. "
   + "The app keeps trying.";
@@ -72,20 +78,6 @@ const LEZ_DOWN =
 
 const MARKET_TAB = 0;
 const SETUP_TAB = 5;
-
-test("the two sentences the C++ policy publishes are the ones tested here", () => {
-  // If balanceErrorCopy() is reworded, this test must be reworded with it —
-  // otherwise the strings below drift into fiction while still passing.
-  const collapsed = policyHeader.replace(/"\s*\n\s*"/g, "");
-  assert.ok(
-    collapsed.includes(ETH_DOWN),
-    "balance_error_policy.h no longer contains the ETH sentence used here",
-  );
-  assert.ok(
-    collapsed.includes(LEZ_DOWN),
-    "balance_error_policy.h no longer contains the LEZ sentence used here",
-  );
-});
 
 test("a healthy app shows no balance notice at all", () => {
   assert.equal(balanceNoticeText("", ""), "");
