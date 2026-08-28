@@ -100,9 +100,10 @@ test("the notice is visible on the Market surface — that is the point of it", 
 });
 
 test("it stands down on Setup, which shows the same sentences in its steps", () => {
-  // One failure, one place. Setup step 3 renders lezBalanceError and step 4
-  // renders ethBalanceError; a strip repeating them above would read as two
-  // separate problems.
+  // One failure, one place. Setup step 3 renders lezBalanceError in both of
+  // its forms ("Fund LEZ", or the faucet-less "Activate your LEZ account")
+  // and step 4 renders ethBalanceError; a strip repeating them above would
+  // read as two separate problems.
   assert.equal(balanceNoticeShows(ETH_DOWN, SETUP_TAB, SETUP_TAB), false);
   assert.equal(
     balanceNoticeShows(`${ETH_DOWN} ${LEZ_DOWN}`, SETUP_TAB, SETUP_TAB),
