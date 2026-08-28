@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "balance_error_policy.h"
 #include "balance_read_gate.h"
 #include "swap_ui_interface.h"
 #include "balance_refresh_coordinator.h"
@@ -108,6 +109,9 @@ private:
     // The balance-read gate: endpoint + account per chain, nothing from the
     // swap form. See balance_read_gate.h and fetchBalances().
     swap_ui::BalanceReadGate balanceReadGate() const;
+    // Copy m_balanceErrors' current per-side verdict onto the
+    // ethBalanceError/lezBalanceError PROPs the views read.
+    void publishBalanceErrors();
 
     // Config persistence (config.json under the per-profile swap_ui dir; see
     // writableModuleDir()). Holds two private keys (eth_private_key,
@@ -262,6 +266,12 @@ private:
     QString m_loadedEnvPath;
     QString m_setupFundingKey;
     BalanceRefreshCoordinator m_balanceRefreshCoordinator;
+    // Per-side balance-read failure state (issue #169). Automatic refreshes
+    // never publish into errorMessage; they feed this, and the visible
+    // sentence it decides on lands in ethBalanceError/lezBalanceError for the
+    // Setup step and account strip that own each chain. See
+    // balance_error_policy.h and publishBalanceErrors().
+    swap_ui::BalanceErrors m_balanceErrors;
     QString m_coordinationRole;
     bool m_coordinationTakerPublished = false;
     bool m_swapEventsSubscribed = false;

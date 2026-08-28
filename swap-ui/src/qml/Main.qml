@@ -74,6 +74,12 @@ Item {
         readonly property string ethBalance: root.backend ? root.backend.ethBalance : ""
         readonly property string lezAccount: root.backend ? root.backend.lezAccount : ""
         readonly property string lezBalance: root.backend ? root.backend.lezBalance : ""
+        // Per-side balance-read failures (issue #169). Safe "" defaults per the
+        // facade contract: an unbridged property reads as undefined and every
+        // `x !== ""` test would be permanently true, painting a permanent
+        // failure over both chains.
+        readonly property string ethBalanceError: root.backend ? root.backend.ethBalanceError : ""
+        readonly property string lezBalanceError: root.backend ? root.backend.lezBalanceError : ""
 
         readonly property bool makerRunning: root.backend ? root.backend.makerRunning : false
         readonly property string makerJobId: root.backend ? root.backend.makerJobId : ""
