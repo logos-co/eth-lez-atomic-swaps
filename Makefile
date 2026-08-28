@@ -1,7 +1,7 @@
 .PHONY: contracts demo infra \
        setup localnet-start localnet-stop test basecamp-ui-smoke swap-ui-unit \
        basecamp-dev \
-       preflight preflight-full preflight-qmllint preflight-node-tests \
+       preflight preflight-full preflight-qmllint preflight-node-tests preflight-expectations-coverage \
        preflight-rust-check preflight-rust-anvil install-hooks
 
 .DEFAULT_GOAL := contracts
@@ -140,6 +140,9 @@ swap-ui-unit:
 	@eth_funds_bin=$$(mktemp /tmp/atomic-swaps-eth-funds-guard.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/eth_funds_guard_test.cpp -o "$$eth_funds_bin"; \
 		"$$eth_funds_bin"
+	@balance_gate_bin=$$(mktemp /tmp/atomic-swaps-balance-read-gate.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/balance_read_gate_test.cpp -o "$$balance_gate_bin"; \
+		"$$balance_gate_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
@@ -212,6 +215,11 @@ NODE_PREFLIGHT_TESTS := \
 	offer-publisher/rfq.test.mjs \
 	offer-publisher/fleet.test.mjs
 
+# Issue #165: the release-content map must have an entry for the version each
+# metadata.json declares (see canary/check-expectations-coverage.py).
+preflight-expectations-coverage:
+	@python3 canary/check-expectations-coverage.py
+
 preflight-node-tests:
 	@for f in $(NODE_PREFLIGHT_TESTS); do \
 		echo "==> node $$f"; \
@@ -234,7 +242,7 @@ preflight-qmllint:
 		echo "==> qmllint: skipped (not on PATH — brew install qt on macOS, or use a nix profile/shell that provides qt6.qtdeclarative, to enable this check)"; \
 	fi
 
-preflight: preflight-qmllint swap-ui-unit preflight-node-tests preflight-rust-check preflight-rust-anvil
+preflight: preflight-qmllint swap-ui-unit preflight-node-tests preflight-expectations-coverage preflight-rust-check preflight-rust-anvil
 	@echo "==> preflight: all fast checks passed"
 
 # Adds the one CI job with no fast local equivalent, as far as it goes:

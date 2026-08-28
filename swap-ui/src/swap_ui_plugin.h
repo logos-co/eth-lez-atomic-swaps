@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "balance_read_gate.h"
 #include "swap_ui_interface.h"
 #include "balance_refresh_coordinator.h"
 #include "LogosViewPluginBase.h"
@@ -103,6 +104,9 @@ private:
     // auto-accept, refund) still requires. See feat/browse-before-config.
     bool validateForBrowse() const;
     bool validateForTrade();
+    // The balance-read gate: endpoint + account per chain, nothing from the
+    // swap form. See balance_read_gate.h and fetchBalances().
+    swap_ui::BalanceReadGate balanceReadGate() const;
 
     // Config persistence (config.json under the per-profile swap_ui dir; see
     // writableModuleDir()). Holds two private keys (eth_private_key,

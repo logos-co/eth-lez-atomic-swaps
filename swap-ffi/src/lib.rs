@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -163,11 +163,22 @@ struct FfiConfig {
     /// Scaffold wallet account ID (base58). Required when lez_wallet_home is set.
     #[serde(default)]
     lez_account_id: Option<String>,
+    // The fields below are `#[serde(default)]` so a config JSON from a form
+    // the user has not finished (Setup tab, balance-only reads) still parses.
+    // `parse_config` (the swap path) stays strict: an empty string fails the
+    // typed parse with the same "invalid …" error a missing key used to give.
+    // Only `parse_balance_config` tolerates them.
+    #[serde(default)]
     lez_htlc_program_id: String,
+    #[serde(default)]
     lez_amount: String,
+    #[serde(default)]
     eth_amount: String,
+    #[serde(default)]
     lez_timelock_minutes: String,
+    #[serde(default)]
     eth_timelock_minutes: String,
+    #[serde(default)]
     eth_recipient_address: String,
     /// OPTIONAL designated counterparty (base58). A maker no longer requires it
     /// — the taker publishes its own LEZ account in its ETH lock and the maker
@@ -260,6 +271,104 @@ fn parse_config(json_str: &str) -> Result<SwapConfig, String> {
         eth_recipient_address,
         lez_taker_account_id,
         poll_interval: Duration::from_millis(poll_interval_ms),
+    })
+}
+
+/// Balance-read config: the LENIENT counterpart of `parse_config`.
+///
+/// A balance read needs an RPC endpoint and an account per chain — nothing
+/// else. It must not demand the swap-only fields (amounts, timelocks,
+/// recipient, program ID): on a fresh install the GUI refreshes balances
+/// while the user is still on the Setup tab, long before those exist, and a
+/// strict parse turned that refresh into a red "fix validation errors" banner
+/// over a Setup screen that was working fine.
+///
+/// Per-chain readiness is reported, not enforced: a missing ETH key or LEZ
+/// account leaves that side's `Option` as `None` and `swap_ffi_fetch_balances`
+/// reports a per-side error for it, so the other chain still reads. The
+/// swap-only fields are filled with inert placeholders — this config is never
+/// handed to a swap; every swap entry point calls the strict `parse_config`.
+#[derive(Debug)]
+struct BalanceConfig {
+    /// Full config for the ETH read (`EthClient::new`), `None` when the ETH
+    /// side is not set up yet (empty RPC URL, key, or HTLC address).
+    eth: Option<SwapConfig>,
+    /// Full config for the LEZ read (`LezClient::new`), `None` when the LEZ
+    /// side is not set up yet (empty sequencer URL or no auth at all).
+    lez: Option<SwapConfig>,
+}
+
+fn parse_balance_config(json_str: &str) -> Result<BalanceConfig, String> {
+    let c: FfiConfig =
+        serde_json::from_str(json_str).map_err(|e| format!("bad config JSON: {e}"))?;
+
+    let has_wallet = matches!(
+        (&c.lez_wallet_home, &c.lez_account_id),
+        (Some(h), Some(a)) if !h.trim().is_empty() && !a.trim().is_empty()
+    );
+    let has_raw_key = c
+        .lez_signing_key
+        .as_deref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+
+    let eth_ready = !c.eth_rpc_url.trim().is_empty()
+        && !c.eth_private_key.trim().is_empty()
+        && !c.eth_htlc_address.trim().is_empty();
+    let lez_ready = !c.lez_sequencer_url.trim().is_empty() && (has_wallet || has_raw_key);
+
+    if !eth_ready && !lez_ready {
+        return Err(
+            "no chain is set up for a balance read yet: need an ETH RPC URL \
+                    plus key, or a LEZ sequencer URL plus account"
+                .into(),
+        );
+    }
+
+    // Inert placeholders for everything a balance read never touches.
+    let eth_htlc_address: alloy::primitives::Address = if eth_ready {
+        c.eth_htlc_address
+            .parse()
+            .map_err(|e| format!("invalid eth_htlc_address: {e}"))?
+    } else {
+        alloy::primitives::Address::ZERO
+    };
+    let lez_htlc_program_id = if c.lez_htlc_program_id.trim().is_empty() {
+        // All-zero placeholder; a balance read never touches the program.
+        parse_program_id(&"00".repeat(32)).map_err(|e| e.to_string())?
+    } else {
+        parse_program_id(&c.lez_htlc_program_id).map_err(|e| e.to_string())?
+    };
+    let lez_auth = if has_wallet {
+        LezAuth::Wallet {
+            home: std::path::PathBuf::from(c.lez_wallet_home.clone().unwrap_or_default()),
+            account_id: parse_base58_account_id(c.lez_account_id.as_deref().unwrap_or(""))
+                .map_err(|e| e.to_string())?,
+        }
+    } else {
+        LezAuth::RawKey(c.lez_signing_key.clone().unwrap_or_default())
+    };
+    let now = now_unix();
+    let base = SwapConfig {
+        eth_rpc_url: c.eth_rpc_url,
+        eth_private_key: c.eth_private_key,
+        eth_htlc_address,
+        lez_sequencer_url: c.lez_sequencer_url.clone(),
+        lez_sequencer_url_explicit: !c.lez_sequencer_url.is_empty(),
+        lez_auth,
+        lez_htlc_program_id,
+        lez_amount: 0,
+        eth_amount: 0,
+        lez_timelock: now,
+        eth_timelock: now,
+        eth_recipient_address: alloy::primitives::Address::ZERO,
+        lez_taker_account_id: None,
+        poll_interval: Duration::from_millis(2000),
+    };
+
+    Ok(BalanceConfig {
+        eth: eth_ready.then(|| base.clone()),
+        lez: lez_ready.then_some(base),
     })
 }
 
@@ -625,28 +734,49 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
         None => return json_err("null or invalid config_json"),
     };
 
-    let config = match parse_config(json_str) {
+    // Lenient on purpose — see parse_balance_config. The swap-only fields are
+    // not needed to read a balance and must not block one.
+    let BalanceConfig {
+        eth: eth_config,
+        lez: lez_config,
+    } = match parse_balance_config(json_str) {
         Ok(c) => c,
         Err(e) => return json_err(&e),
     };
 
+    const ETH_NOT_SET_UP: &str = "Ethereum key not set up yet";
+    const LEZ_NOT_SET_UP: &str = "LEZ account not set up yet";
+
     // Derive ETH address from private key.
-    let eth_signer: std::result::Result<PrivateKeySigner, _> = config.eth_private_key.parse();
-    let eth_address = eth_signer.as_ref().ok().map(|s| format!("{}", s.address()));
+    let eth_signer: Option<std::result::Result<PrivateKeySigner, String>> =
+        eth_config.as_ref().map(|c| {
+            c.eth_private_key
+                .parse()
+                .map_err(|e| format!("invalid ETH private key: {e}"))
+        });
+    let eth_address = eth_signer
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|s| format!("{}", s.address()));
 
     // Derive LEZ account ID.
-    let lez_client_result = LezClient::new(&config);
+    let lez_client_result = lez_config.as_ref().map(LezClient::new);
     let lez_account = lez_client_result
         .as_ref()
-        .ok()
+        .and_then(|r| r.as_ref().ok())
         .map(|c| account_id_to_base58(&c.account_id()));
 
     runtime().block_on(async {
         // Fetch ETH balance.
         let eth_fut = async {
-            let signer = eth_signer.map_err(|e| format!("invalid ETH private key: {e}"))?;
+            let config = eth_config
+                .as_ref()
+                .ok_or_else(|| ETH_NOT_SET_UP.to_string())?;
+            let signer = eth_signer
+                .clone()
+                .ok_or_else(|| ETH_NOT_SET_UP.to_string())??;
             let addr = signer.address();
-            let eth_client = EthClient::new(&config).await.map_err(|e| e.to_string())?;
+            let eth_client = EthClient::new(config).await.map_err(|e| e.to_string())?;
             let balance = eth_client
                 .provider()
                 .get_balance(addr)
@@ -657,7 +787,11 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
         // Fetch LEZ balance.
         let lez_fut = async {
-            let client = lez_client_result.as_ref().map_err(|e| e.to_string())?;
+            let client = lez_client_result
+                .as_ref()
+                .ok_or_else(|| LEZ_NOT_SET_UP.to_string())?
+                .as_ref()
+                .map_err(|e| e.to_string())?;
             let balance = client
                 .get_balance(&client.account_id())
                 .await
@@ -717,7 +851,7 @@ fn resolve_maker_state_file(
              launches. Either set MAKER_STATE_FILE to an absolute path, or configure a LEZ \
              wallet home (lez_wallet_home + lez_account_id, env LEZ_WALLET_HOME + \
              LEZ_ACCOUNT_ID) so the journal can live there."
-            .into(),
+                .into(),
         ),
     }
 }
@@ -1114,6 +1248,87 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
         let _ = fs::remove_file(path);
     }
 
+    /// A form holding only the two things a balance read actually uses on the
+    /// ETH side — an RPC URL and a key — must clear the balance path.
+    const BALANCE_ONLY_CONFIG: &str = r#"{
+        "eth_rpc_url": "ws://127.0.0.1:8545",
+        "eth_private_key": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "eth_htlc_address": "0x2222222222222222222222222222222222222222",
+        "lez_sequencer_url": "http://127.0.0.1:3040",
+        "lez_signing_key": "",
+        "lez_wallet_home": "",
+        "lez_account_id": "",
+        "lez_htlc_program_id": "",
+        "lez_amount": "",
+        "eth_amount": "",
+        "lez_timelock_minutes": "",
+        "eth_timelock_minutes": "",
+        "eth_recipient_address": "",
+        "lez_taker_account_id": "",
+        "poll_interval_ms": ""
+    }"#;
+
+    #[test]
+    fn balance_only_config_passes_the_balance_path() {
+        let cfg = parse_balance_config(BALANCE_ONLY_CONFIG).expect("balance parse");
+        let eth = cfg.eth.expect("ETH side is set up");
+        assert_eq!(eth.eth_rpc_url, "ws://127.0.0.1:8545");
+        assert!(
+            cfg.lez.is_none(),
+            "no LEZ account yet -> LEZ side reported as not set up"
+        );
+    }
+
+    #[test]
+    fn balance_only_config_still_fails_the_swap_path() {
+        // The same JSON must NOT be accepted by the strict swap parse: the
+        // lenient defaults exist for balances only.
+        let err = parse_config(BALANCE_ONLY_CONFIG).unwrap_err();
+        assert!(
+            err.contains("invalid eth_recipient_address")
+                || err.contains("program ID")
+                || err.contains("invalid lez_amount"),
+            "swap path must reject a balance-only form, got: {err}"
+        );
+    }
+
+    #[test]
+    fn balance_config_with_lez_only_reads_lez_side() {
+        let json = BALANCE_ONLY_CONFIG
+            .replace(r#""eth_private_key": "0x1111111111111111111111111111111111111111111111111111111111111111""#,
+                     r#""eth_private_key": """#)
+            .replace(r#""lez_signing_key": """#,
+                     r#""lez_signing_key": "3333333333333333333333333333333333333333333333333333333333333333""#);
+        let cfg = parse_balance_config(&json).expect("balance parse");
+        assert!(cfg.eth.is_none(), "no ETH key -> ETH side not set up");
+        let lez = cfg.lez.expect("LEZ side is set up");
+        assert!(matches!(lez.lez_auth, LezAuth::RawKey(ref k) if k.len() == 64));
+    }
+
+    #[test]
+    fn balance_config_with_nothing_set_up_is_rejected() {
+        let json = BALANCE_ONLY_CONFIG.replace(
+            r#""eth_private_key": "0x1111111111111111111111111111111111111111111111111111111111111111""#,
+            r#""eth_private_key": """#,
+        );
+        let err = parse_balance_config(&json).unwrap_err();
+        assert!(err.contains("no chain is set up"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_swap_keys_are_tolerated_by_serde_but_not_by_the_swap_parse() {
+        // Keys absent entirely (not just empty): the GUI always sends every
+        // key, but a hand-written config may not.
+        let json = r#"{
+            "eth_rpc_url": "ws://127.0.0.1:8545",
+            "eth_private_key": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "eth_htlc_address": "0x2222222222222222222222222222222222222222",
+            "lez_sequencer_url": "http://127.0.0.1:3040"
+        }"#;
+        assert!(parse_balance_config(json).is_ok());
+        assert!(parse_config(json).is_err());
+    }
+
     #[test]
     fn dotenv_config_json_reports_missing_file() {
         let path =
@@ -1158,8 +1373,14 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
         // ui-host launches (unstable CWD), voiding crash recovery — refuse to
         // start rather than default, and name both remedies.
         let err = resolve_maker_state_file(None, &LezAuth::RawKey("aa".into())).unwrap_err();
-        assert!(err.contains("MAKER_STATE_FILE"), "missing env remedy: {err}");
-        assert!(err.contains("lez_wallet_home"), "missing wallet remedy: {err}");
+        assert!(
+            err.contains("MAKER_STATE_FILE"),
+            "missing env remedy: {err}"
+        );
+        assert!(
+            err.contains("lez_wallet_home"),
+            "missing wallet remedy: {err}"
+        );
     }
 
     // ---------------------------------------------------------------------

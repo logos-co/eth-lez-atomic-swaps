@@ -26,9 +26,11 @@
 #                      history has both commits (fetched on demand), else the
 #                      GitHub compare API
 #
-# Versions without an exact map entry fall back to the HIGHEST mapped version
-# <= the released one (markers accumulate), so an unmapped 0.4.1 still asserts
-# 0.4.0's markers instead of passing vacuously; see the map's _doc.
+# Versions without an exact map entry assert the HIGHEST mapped version <= the
+# released one (markers accumulate) AND fail for the missing entry: a release
+# must describe its own content (issue #165; see the map's _doc and
+# canary/check-expectations-coverage.py, which keeps the map from falling
+# behind metadata.json in the first place).
 #
 # PASS  = every marker present in every variant + every ancestor confirmed.
 # FAIL  = a marker or ancestor missing — the released CONTENT is stale/wrong.
@@ -242,8 +244,17 @@ for module in modules:
         exp = {}
         exp_note = "predates expectations map, structural checks only"
     elif exp_version != version:
-        log(f"NOTE {module}@{version}: no exact map entry — falling back to {exp_version}'s markers")
-        exp_note = f"markers from {exp_version} (fallback)"
+        # Issue #165: the fallback used to be silent, so a map frozen at
+        # 0.4.2 graded 0.4.3-0.4.5 against stale markers with nothing saying
+        # the map was behind. Still assert the older markers (they
+        # accumulate), but the missing entry is itself a content defect: a
+        # release must describe its own content.
+        log(f"FAIL {module}@{version}: no exact entry in release-content-expectations.json "
+            f"— asserting {exp_version}'s markers, but grading the missing entry as a failure")
+        problems.append(f"{module} {version}: no entry in canary/release-content-expectations.json "
+                        f"(highest mapped <= {version} is {exp_version}); add one describing what "
+                        f"{version} ships — see canary/check-expectations-coverage.py")
+        exp_note = f"markers from {exp_version}; NO exact entry (FAIL)"
     else:
         exp_note = None
 

@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "release-content-expectations.json \u2014 content markers a PUBLISHED release",
+    "release-content-expectations.json — content markers a PUBLISHED release",
     "artifact must actually contain, keyed module -> version -> markers.",
     "Consumed by canary/leg-release-content.sh (see its header for the two",
     "stale-release incidents this exists to prevent).",
@@ -10,20 +10,25 @@
     "                     EVERY shipped variant of the .lgx (swap_ui ships its",
     "                     QML sources inside the artifact).",
     "  binary_strings     strings that must appear in the native plugin",
-    "                     libraries (.so/.dylib) of EVERY shipped variant \u2014",
+    "                     libraries (.so/.dylib) of EVERY shipped variant —",
     "                     asserted via a `strings`-equivalent byte scan.",
     "  required_ancestors git commit SHAs that must be ancestors of the release",
     "                     tag's target commit (catches a release dispatched on",
     "                     a stale ref even before looking inside the artifact).",
     "",
-    "FALLBACK SEMANTIC (important): when a released version has no exact entry",
-    "here, the leg uses the entry for the HIGHEST mapped version <= the released",
-    "version. So a 0.4.1 cut without a map update still asserts 0.4.0's markers",
-    "instead of passing vacuously \u2014 markers only ever ACCUMULATE, so anything",
-    "0.4.0 shipped must still be present in 0.4.1. A release OLDER than every",
-    "mapped version predates this map entirely: the leg then runs structural",
-    "checks only (archive extracts, all variants present, manifest matches) and",
-    "says so loudly in its evidence.",
+    "NO SILENT FALLBACK (issue #165): every version in swap-module/metadata.json",
+    "and swap-ui/metadata.json MUST have an exact entry here — canary/",
+    "check-expectations-coverage.py enforces that in CI (rust-checks), in `make",
+    "preflight`, and before every canary-channel build. When a PUBLISHED version",
+    "still has no exact entry, leg-release-content.sh asserts the HIGHEST mapped",
+    "version <= the released one AND grades the release FAIL for the missing",
+    "entry: a release must assert its own content. The map froze at 0.4.2 while",
+    "0.4.3-0.4.5 shipped, and two of 0.4.2's markers described UI text #140/#145",
+    "had already replaced, so every release after 0.4.2 was graded against a",
+    "stale description — and nothing said the map was behind. A release OLDER",
+    "than every mapped version predates this map entirely: the leg then runs",
+    "structural checks only (archive extracts, all variants present, manifest",
+    "matches) and says so loudly in its evidence.",
     "",
     "When you add a feature worth guarding, add (or extend) the entry for the",
     "NEXT version to be released, using literals verified to exist in the",
@@ -71,6 +76,17 @@
         "required_ancestors": [
           "d9db65facfc095a3d9f668eed9b52e99478990e7",
           "e94bdbf6d15f2e30fe0eb1f1a5b4bd1294868868"
+        ]
+      },
+      "0.4.5": {
+        "binary_strings": [
+          "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702",
+          "maker-ops.jsonl",
+          "swap persistence root (per-profile)"
+        ],
+        "required_ancestors": [
+          "b7386d81c2e507595e8f082f8723611effd6387f",
+          "67e600cd709185d1d773d8ae30542b1cc686ad6d"
         ]
       }
     },
@@ -125,6 +141,31 @@
         "required_ancestors": [
           "d9db65facfc095a3d9f668eed9b52e99478990e7",
           "e94bdbf6d15f2e30fe0eb1f1a5b4bd1294868868"
+        ]
+      },
+      "0.4.5": {
+        "qml_grep": [
+          "trial-evidence/1",
+          "Copy safe evidence",
+          "feedbackUrl",
+          "safeEvidenceJson",
+          "Four steps, then you're trading. No keys to type.",
+          "Start trading",
+          "Get test ETH",
+          "Sell to one buyer only (optional)",
+          "Your ETH balance is too low to pay for this swap",
+          "Add Sepolia test ETH from the Setup tab"
+        ],
+        "binary_strings": [
+          "swap_ui persistence root (per-profile)",
+          "Your ETH balance is too low to pay for this swap (amount + gas). Add Sepolia test ETH from the Setup tab and try again."
+        ],
+        "required_ancestors": [
+          "0a638cb305e30fd7195027eb0e578f6013f005c7",
+          "0acdbaa411c5a49d1bad0cfad19b5161fbae7baf",
+          "b7386d81c2e507595e8f082f8723611effd6387f",
+          "71c4d11ac5ed1733de4d9cf9a7df3d0c72de2e68",
+          "67e600cd709185d1d773d8ae30542b1cc686ad6d"
         ]
       }
     }

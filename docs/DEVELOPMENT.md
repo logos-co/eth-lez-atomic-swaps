@@ -98,7 +98,8 @@ surfaces after a full cycle. Most of that is checkable locally in seconds:
 
 ```bash
 make preflight   # cargo check/test, forge test, node contract/unit tests,
-                  # swap-ui-unit, qmllint — no nix build, no Basecamp launch
+                  # swap-ui-unit, qmllint, release-content map coverage —
+                  # no nix build, no Basecamp launch
 ```
 
 Cold (empty `target/`) it pays for compiling the Rust dependency tree once —
