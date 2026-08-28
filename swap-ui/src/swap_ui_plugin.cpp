@@ -1,5 +1,6 @@
 #include "swap_ui_plugin.h"
 
+#include "balance_error_policy.h"
 #include "balance_read_gate.h"
 #include "eth_funds_guard.h"
 #include "logos_api.h"
@@ -284,6 +285,8 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setEthBalance(QString{});
     setLezAccount(QString{});
     setLezBalance(QString{});
+    setEthBalanceError(QString{});
+    setLezBalanceError(QString{});
 
     setMakerRunning(false);
     setMakerJobId(QString{});
@@ -1013,6 +1016,10 @@ void SwapUiPlugin::resetConfig()
         });
     }
     setErrorMessage(QString{});
+    // Wiped config means the old endpoints' failures no longer describe
+    // anything on screen (issue #169).
+    m_balanceErrors.reset();
+    publishBalanceErrors();
     setStatus(QStringLiteral("App data reset to defaults"));
 }
 
@@ -1642,6 +1649,12 @@ void SwapUiPlugin::setConfigValue(const QString& key, const QString& value)
         setStatus(errorMessage());
         return;
     }
+    // A config edit is a new chance: the failures on screen may well belong to
+    // the endpoint the user just replaced, so drop them rather than holding
+    // the old URL's history against the new one. The next read re-earns any
+    // message from scratch (issue #169).
+    m_balanceErrors.reset();
+    publishBalanceErrors();
     validateConfig();
     scheduleConfigSave();
 }
@@ -1741,8 +1754,8 @@ void SwapUiPlugin::completeBalanceRefresh(const QString& resultJson)
     if (m_balanceRefreshCoordinator.finish(!m_loadedEnvPath.isEmpty())) {
         // Keep balancesLoading true across the coalesced follow-up. Otherwise
         // the header briefly re-enables and an older pre-sale result can look
-        // authoritative before the post-sale refresh starts.
-        setErrorMessage(QString{});
+        // authoritative before the post-sale refresh starts. errorMessage is
+        // left alone here for the same reason as in fetchBalances().
         setStatus(QStringLiteral("Fetching balances..."));
         m_swap->fetchBalancesFromEnvAsync(m_loadedEnvPath, [this](QString result) {
             completeBalanceRefresh(result);
@@ -1759,13 +1772,31 @@ void SwapUiPlugin::completeBalanceRefresh(const QString& resultJson)
     }
 }
 
+// Copy the policy's current verdict onto the PROPs the views bind to. Kept in
+// one place so the "which surface shows it" question has exactly one answer:
+// SetupView's step 3/4 and the account strip above the Market board read these
+// two properties, and nothing about a background balance read ever reaches
+// `errorMessage` or the global notice strip (issue #169).
+void SwapUiPlugin::publishBalanceErrors()
+{
+    setEthBalanceError(QString::fromStdString(m_balanceErrors.eth.message()));
+    setLezBalanceError(QString::fromStdString(m_balanceErrors.lez.message()));
+}
+
 void SwapUiPlugin::applyBalancesResult(const QString& resultJson)
 {
     setLastResultJson(resultJson);
 
     const auto error = jsonError(resultJson);
     if (!error.isEmpty()) {
-        setErrorMessage(error);
+        // The call itself failed, so neither side was read. NOT errorMessage:
+        // every caller of fetchBalances() is an automatic refresh, and a
+        // global red banner for a poll the user never asked for was the whole
+        // of issue #169. The raw text still reaches lastResultJson (set above)
+        // and the trace log for diagnostics.
+        swapUiTrace(QStringLiteral("balance read failed: %1").arg(error));
+        m_balanceErrors.recordCallFailure(error.toStdString());
+        publishBalanceErrors();
         setStatus(QStringLiteral("Balance fetch failed: %1").arg(error));
         return;
     }
@@ -1776,27 +1807,38 @@ void SwapUiPlugin::applyBalancesResult(const QString& resultJson)
     if (obj.contains(QStringLiteral("lez_account"))) setLezAccount(valueString(obj, QStringLiteral("lez_account")));
     if (obj.contains(QStringLiteral("lez_balance"))) setLezBalance(valueString(obj, QStringLiteral("lez_balance")));
 
-    // A side the gate skipped (see fetchBalances) comes back as a "not set up
-    // yet" error from swap-ffi. That is the expected shape mid-Setup — the
-    // ETH key exists, the LEZ account does not — and not a warning to show.
-    QStringList warnings;
+    // Per-side outcomes go to the per-side PROPs, never to errorMessage. The
+    // policy (balance_error_policy.h) decides whether a failure has earned a
+    // visible sentence yet: it stays silent through a single blip — public
+    // endpoints drop the odd request and the callers retry within seconds —
+    // and speaks up once a side has failed twice running, which is what a dead
+    // RPC looks like. A side the gate skipped comes back as a "not set up yet"
+    // error from swap-ffi; that is the expected shape mid-Setup (the ETH key
+    // exists, the LEZ account does not) and the policy treats it as a non-event.
     const auto ethError = valueString(obj, QStringLiteral("eth_error"));
     const auto lezError = valueString(obj, QStringLiteral("lez_error"));
-    if (!ethError.isEmpty() && !swap_ui::sideNotSetUp(ethError.toStdString())) {
-        warnings.append(QStringLiteral("ETH: %1").arg(ethError));
+    if (ethError.isEmpty()) {
+        m_balanceErrors.eth.recordSuccess();
+    } else {
+        swapUiTrace(QStringLiteral("ETH balance read failed: %1").arg(ethError));
+        m_balanceErrors.eth.recordFailure(ethError.toStdString());
     }
-    if (!lezError.isEmpty() && !swap_ui::sideNotSetUp(lezError.toStdString())) {
-        warnings.append(QStringLiteral("LEZ: %1").arg(lezError));
+    if (lezError.isEmpty()) {
+        m_balanceErrors.lez.recordSuccess();
+    } else {
+        swapUiTrace(QStringLiteral("LEZ balance read failed: %1").arg(lezError));
+        m_balanceErrors.lez.recordFailure(lezError.toStdString());
     }
+    publishBalanceErrors();
 
-    if (!warnings.isEmpty()) {
-        setErrorMessage(warnings.join(QStringLiteral("; ")));
-        setStatus(QStringLiteral("Balances fetched with warnings"));
-        return;
-    }
-
-    setErrorMessage(QString{});
-    setStatus(QStringLiteral("Balances fetched"));
+    // "with warnings" means something actually went wrong. A side that is
+    // merely not set up yet is the normal mid-Setup shape and must not put a
+    // warning in the status line on every poll of a fresh install.
+    const bool anyRealFailure =
+        (!ethError.isEmpty() && !swap_ui::sideNotSetUp(ethError.toStdString()))
+        || (!lezError.isEmpty() && !swap_ui::sideNotSetUp(lezError.toStdString()));
+    setStatus(anyRealFailure ? QStringLiteral("Balances fetched with warnings")
+                             : QStringLiteral("Balances fetched"));
 }
 
 // A balance read validates ONLY what it uses — an endpoint and an account per
@@ -1832,7 +1874,12 @@ void SwapUiPlugin::fetchBalances()
         return;
     }
 
-    setErrorMessage(QString{});
+    // Deliberately does NOT clear errorMessage. A background refresh neither
+    // writes that property (issue #169 — its failures go to
+    // ethBalanceError/lezBalanceError) nor owns it, and clearing it here wiped
+    // the failure of whatever the user had actually just done: the post-swap
+    // settle poll fires every 4s for 24s after a run ends, which is exactly
+    // when a swap failure needs to stay on screen.
     setBalancesLoading(true);
     setStatus(QStringLiteral("Fetching balances..."));
     m_swap->fetchBalancesAsync(configJson(), [this](QString result) {

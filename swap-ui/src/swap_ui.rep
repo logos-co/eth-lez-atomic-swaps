@@ -47,6 +47,15 @@ class SwapUi
     PROP(QString ethBalance READWRITE)
     PROP(QString lezAccount READWRITE)
     PROP(QString lezBalance READWRITE)
+    // Per-side balance-read failures (issue #169). Every fetchBalances() caller
+    // is an automatic refresh, so a failed read is published HERE — per chain,
+    // for the Setup step and the account strip that own that chain — instead of
+    // into `errorMessage`, which put a global red banner over a first-run app
+    // for a background poll the user never triggered. Empty unless that side
+    // has failed repeatedly; the policy (swap-ui/src/balance_error_policy.h)
+    // stays quiet through a single blip and clears on the first good read.
+    PROP(QString ethBalanceError READWRITE)
+    PROP(QString lezBalanceError READWRITE)
 
     // Maker state
     PROP(bool makerRunning READWRITE)

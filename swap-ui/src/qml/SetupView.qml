@@ -74,6 +74,15 @@ PageScaffold {
         var n = Number(swapBackend.ethBalance)
         return !isNaN(n) && n > 0
     }
+    // A chain the app cannot currently reach (issue #169). The backend only
+    // publishes these after a side has failed repeatedly — a single dropped
+    // request stays invisible — so when one is set it is worth interrupting
+    // the step's normal copy for. Never a readiness signal: an unreachable
+    // chain says nothing about whether the account is funded, so isReady below
+    // is deliberately untouched by it.
+    readonly property bool ethUnreachable: swapBackend.ethBalanceError !== ""
+    readonly property bool lezUnreachable: swapBackend.lezBalanceError !== ""
+
     // Setup is only truly ready when BOTH sides can transact. The app funds LEZ
     // (150 via the faucet) but cannot auto-fund Sepolia ETH — there is no free
     // programmatic faucet — so a fresh account with 150 LEZ and 0 Sepolia ETH
@@ -115,6 +124,25 @@ PageScaffold {
             "Done":               "LEZ funded",
         }
         return map[step] || step
+    }
+
+    // What the step-4 arrival line says, in priority order. PURE — everything
+    // it needs is an argument — so tests/balance-notice.test.mjs evaluates it
+    // straight out of this file rather than restating the rule in JavaScript.
+    //
+    // `unreachable` has to outrank the watching copy (issue #169): while the
+    // Sepolia RPC is down, "Watching for it… you don't need to do anything."
+    // is simply untrue, and being unable to read the chain is the whole reason
+    // the arriving test-ETH never shows up. This is the step the user is
+    // staring at, so the explanation belongs here rather than in a global
+    // banner they never asked for. An arrival that HAS been read still wins
+    // over both: a balance on screen is proof the endpoint answered.
+    function ethArrivalLine(arrived, unreachable, pollCount, pollMax) {
+        if (arrived) return arrived
+        if (unreachable) return unreachable
+        return pollCount < pollMax
+            ? "Watching for it… you don't need to do anything."
+            : "Still nothing. Press Add funds' refresh, or reopen this tab to look again."
     }
 
     // Elapsed-seconds ticker for the funding status line. Individual phases (an
@@ -483,6 +511,33 @@ PageScaffold {
             }
         }
 
+        // The LEZ side is unreachable (issue #169). Step 3's "done" mark and
+        // the confirmation line above both read from lezBalance, so while the
+        // sequencer cannot be reached this step is showing a number it cannot
+        // vouch for — say so here, in the step, instead of raising a global
+        // banner for a background poll the user never triggered. Amber, not
+        // red: nothing has failed, the app just cannot see right now, and this
+        // clears itself on the first good read.
+        RowLayout {
+            visible: setupRoot.lezUnreachable
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot {
+                status: "attention"
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                text: swapBackend.lezBalanceError
+                color: Theme.toneAttention
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+        }
+
         // Backend error text, framed rather than dumped raw.
         ColumnLayout {
             visible: swapBackend.setupError !== ""
@@ -604,7 +659,9 @@ PageScaffold {
             spacing: Theme.spacingSmall
 
             StatusDot {
-                status: setupRoot.hasEthBalance ? "live" : "working"
+                status: setupRoot.hasEthBalance
+                        ? "live"
+                        : (setupRoot.ethUnreachable ? "attention" : "working")
                 size: 6
                 Layout.alignment: Qt.AlignVCenter
             }
@@ -612,12 +669,15 @@ PageScaffold {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignLeft
                 wrapMode: Text.WordWrap
-                text: setupRoot.hasEthBalance
-                      ? "Arrived — " + Format.weiToEth(swapBackend.ethBalance)
-                      : (setupRoot.ethPollCount < setupRoot.ethPollMax
-                         ? "Watching for it… you don't need to do anything."
-                         : "Still nothing. Press Add funds' refresh, or reopen this tab to look again.")
-                color: setupRoot.hasEthBalance ? Theme.toneLive : Theme.textSecondary
+                text: setupRoot.ethArrivalLine(
+                          setupRoot.hasEthBalance
+                              ? "Arrived — " + Format.weiToEth(swapBackend.ethBalance)
+                              : "",
+                          swapBackend.ethBalanceError,
+                          setupRoot.ethPollCount, setupRoot.ethPollMax)
+                color: setupRoot.hasEthBalance
+                       ? Theme.toneLive
+                       : (setupRoot.ethUnreachable ? Theme.toneAttention : Theme.textSecondary)
                 font.pixelSize: Theme.fontSmall
             }
         }

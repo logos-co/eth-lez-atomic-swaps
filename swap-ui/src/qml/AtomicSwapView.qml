@@ -184,15 +184,18 @@ Item {
     }
 
     // --- Sticky error notice ---------------------------------------------
-    // The strip cannot bind straight to swapBackend.errorMessage, because
-    // fetchBalances() opens with setErrorMessage("") (swap_ui_plugin.cpp:1697)
-    // and the settle loop above calls it every 4s for 24s after any run ends.
-    // A failed swap sets takerRunning=false (arming the settle window) and THEN
-    // writes the failure into errorMessage — so the message the user most needs
-    // would appear and then be silently erased four seconds later.
+    // The strip does not bind straight to swapBackend.errorMessage. It used to
+    // be unable to: fetchBalances() opened with setErrorMessage(""), and the
+    // settle loop above calls it every 4s for 24s after any run ends — a failed
+    // swap sets takerRunning=false (arming the settle window) and THEN writes
+    // the failure into errorMessage, so the message the user most needs
+    // appeared and was silently erased four seconds later. Issue #169 removed
+    // that clear (a background refresh has no business touching a property it
+    // no longer writes), but the latch stays: errors about money should survive
+    // any other path that clears the field, and should not evaporate on a timer.
     //
-    // Latching it keeps the failure on screen until the user dismisses it or a
-    // new run starts. Errors about money should not evaporate on a timer.
+    // Latching keeps the failure on screen until the user dismisses it or a
+    // new run starts.
     property string noticeError: ""
 
     Connections {
@@ -266,6 +269,43 @@ Item {
             tabBar.currentIndex,
             root.indexOfTab("swap"),
             Copy.friendlyError(root.resultError(swapBackend.takerResultJson)))
+
+    // --- Stale-balance notice (issue #169) --------------------------------
+    // Nobody asks for a balance read: the timers above, the Setup tab's
+    // Sepolia poll and the post-swap settle loop all fire on their own. So a
+    // failed one is NOT an error strip — a global red alarm for a background
+    // poll was the bug — but it cannot be silence either, or a genuinely dead
+    // RPC just leaves stale numbers on screen with no explanation.
+    //
+    // It belongs on the surface that is wrong, so it sits directly under the
+    // balances it describes: amber, not red; no dismiss, because it goes away
+    // by itself on the first good read; and only after a side has failed twice
+    // running (swap-ui/src/balance_error_policy.h), so a single dropped
+    // request never surfaces at all.
+    //
+    // Setup owns its own copy of these sentences inside the step for each
+    // chain, so this one stands down while that tab is the one being read —
+    // the same "one failure, one place" rule the receipt strip above follows.
+    // Both helpers are PURE — everything they need is an argument — so
+    // tests/balance-notice.test.mjs evaluates them straight out of this file
+    // rather than restating the rule in JavaScript.
+    function balanceNoticeText(ethError, lezError) {
+        var parts = []
+        if (ethError) parts.push(ethError)
+        if (lezError) parts.push(lezError)
+        return parts.join(" ")
+    }
+
+    function balanceNoticeShows(noticeText, currentTabIndex, setupTabIndex) {
+        if (noticeText === "") return false
+        return currentTabIndex !== setupTabIndex
+    }
+
+    readonly property string balanceNotice:
+        root.balanceNoticeText(swapBackend.ethBalanceError, swapBackend.lezBalanceError)
+    readonly property bool balanceNoticeVisible:
+        root.balanceNoticeShows(root.balanceNotice, tabBar.currentIndex,
+                                root.indexOfTab("setup"))
 
     Connections {
         target: swapBackend
@@ -529,6 +569,43 @@ Item {
             Layout.fillWidth: true
             Layout.preferredHeight: 1
             color: Theme.border
+        }
+
+        // --- Stale-balance notice -------------------------------------------
+        // See `balanceNotice` above for why this is not the error strip below.
+        Rectangle {
+            id: balanceNoticeStrip
+            Layout.fillWidth: true
+            visible: root.balanceNoticeVisible
+            implicitHeight: visible ? balanceNoticeRow.implicitHeight + Theme.spacingNormal : 0
+            color: Qt.rgba(Theme.toneAttention.r, Theme.toneAttention.g,
+                           Theme.toneAttention.b, 0.10)
+
+            RowLayout {
+                id: balanceNoticeRow
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    verticalCenter: parent.verticalCenter
+                    leftMargin: Theme.spacingLarge
+                    rightMargin: Theme.spacingLarge
+                }
+                spacing: Theme.spacingSmall
+
+                StatusDot {
+                    status: "attention"
+                    size: 6
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: root.balanceNotice
+                    color: Theme.toneAttention
+                    font.pixelSize: Theme.fontSmall
+                    horizontalAlignment: Text.AlignLeft
+                    wrapMode: Text.WordWrap
+                }
+            }
         }
 
         // --- Error strip ----------------------------------------------------
