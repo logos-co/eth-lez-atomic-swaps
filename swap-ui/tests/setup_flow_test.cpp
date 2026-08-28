@@ -69,8 +69,9 @@ int main()
     expect("\"on!\" -> Off (unrecognised)", parseLezFaucetMode("on!") == LezFaucetMode::Off, true);
     expect("\"on on\" -> Off (unrecognised)",
            parseLezFaucetMode("on on") == LezFaucetMode::Off, true);
-    // The value the pre-default-flip tooling and demo scripts pass. It still
-    // means faucet-less, so nothing that set it breaks.
+    // "off" is the value the pre-default-flip tooling and demo scripts pass;
+    // it still means faucet-less even with stray whitespace, so nothing that
+    // set it breaks.
     expect("\" off \" -> Off (trimmed)", parseLezFaucetMode(" off ") == LezFaucetMode::Off, true);
     expect("\"off\\n\" -> Off (trimmed)", parseLezFaucetMode("off\n") == LezFaucetMode::Off, true);
 

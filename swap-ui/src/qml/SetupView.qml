@@ -123,6 +123,11 @@ PageScaffold {
     // and its errors inside step 3's card, under a heading that has nothing to
     // do with either.
     property string setupOrigin: ""
+    // Everything that means "THIS card's job is running" binds through these,
+    // never through the shared setupRunning directly; the button guards keep
+    // the bare setupRunning because no setup job may start while any runs.
+    readonly property bool activating: swapBackend.setupRunning && setupRoot.setupOrigin !== "claim"
+    readonly property bool claiming: swapBackend.setupRunning && setupRoot.setupOrigin === "claim"
 
     // Bounded auto-poll for ETH arrival while the test-ETH step is active (see
     // the ethBalancePoll Timer): count of polls issued, capped so a user who
@@ -351,14 +356,14 @@ PageScaffold {
     Card {
         visible: setupRoot.faucetless
         tone: swapBackend.setupInitialized ? "done"
-                                           : (swapBackend.setupRunning ? "active" : "neutral")
+                                           : (setupRoot.activating ? "active" : "neutral")
 
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
             StatusDot {
                 status: swapBackend.setupInitialized ? "live"
-                                                     : (swapBackend.setupRunning ? "working" : "waiting")
+                                                     : (setupRoot.activating ? "working" : "waiting")
                 size: 6
                 Layout.alignment: Qt.AlignVCenter
             }
@@ -403,7 +408,7 @@ PageScaffold {
         }
 
         PrimaryButton {
-            text: swapBackend.setupRunning
+            text: setupRoot.activating
                   ? "Activating…"
                   : (swapBackend.setupInitialized ? "Check again" : "Activate account")
             enabled: setupRoot.hasLezAccount && !swapBackend.setupRunning
@@ -417,13 +422,13 @@ PageScaffold {
         }
 
         RowLayout {
-            visible: setupRoot.setupOrigin !== "claim"
-                     && (swapBackend.setupRunning || swapBackend.setupStep !== "")
+            visible: setupRoot.activating
+                     || (setupRoot.setupOrigin !== "claim" && swapBackend.setupStep !== "")
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
 
             StatusDot {
-                status: swapBackend.setupRunning ? "working" : "live"
+                status: setupRoot.activating ? "working" : "live"
                 size: 6
                 Layout.alignment: Qt.AlignVCenter
             }
@@ -433,7 +438,7 @@ PageScaffold {
                 wrapMode: Text.WordWrap
                 text: {
                     var line = setupRoot.humanSetupStep(swapBackend.setupStep)
-                    if (swapBackend.setupRunning && setupRoot.setupStepElapsedSeconds > 0)
+                    if (setupRoot.activating && setupRoot.setupStepElapsedSeconds > 0)
                         line += " " + setupRoot.setupStepElapsedSeconds + "s"
                     return line
                 }
@@ -823,7 +828,7 @@ PageScaffold {
         // hiding things — see Disclosure.qml's own note on the badge.
         readonly property string claimState: {
             if (setupRoot.setupOrigin !== "claim") return ""
-            if (swapBackend.setupRunning) return "claiming…"
+            if (setupRoot.claiming) return "claiming…"
             if (swapBackend.setupError !== "") return "claim failed"
             if (swapBackend.setupStep === "Done") return "claimed"
             return ""
@@ -856,7 +861,7 @@ PageScaffold {
         }
 
         GhostButton {
-            text: swapBackend.setupRunning && setupRoot.setupOrigin === "claim"
+            text: setupRoot.claiming
                   ? "Claiming…"
                   : "Claim test LEZ"
             // Claiming credits an account, and the network silently drops
@@ -888,13 +893,13 @@ PageScaffold {
         // elapsed ticker the numbered steps use — a slow chain phase has to
         // visibly tick rather than look hung.
         RowLayout {
-            visible: setupRoot.setupOrigin === "claim"
-                     && (swapBackend.setupRunning || swapBackend.setupStep !== "")
+            visible: setupRoot.claiming
+                     || (setupRoot.setupOrigin === "claim" && swapBackend.setupStep !== "")
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
 
             StatusDot {
-                status: swapBackend.setupRunning ? "working" : "live"
+                status: setupRoot.claiming ? "working" : "live"
                 size: 6
                 Layout.alignment: Qt.AlignVCenter
             }
@@ -904,7 +909,7 @@ PageScaffold {
                 wrapMode: Text.WordWrap
                 text: {
                     var parts = [setupRoot.humanSetupStep(swapBackend.setupStep)]
-                    if (swapBackend.setupRunning && setupRoot.setupStepElapsedSeconds > 0)
+                    if (setupRoot.claiming && setupRoot.setupStepElapsedSeconds > 0)
                         parts[0] += " " + setupRoot.setupStepElapsedSeconds + "s"
                     if (swapBackend.setupBalance !== "")
                         parts.push(Number(swapBackend.setupBalance) >= Number(swapBackend.setupTarget)
