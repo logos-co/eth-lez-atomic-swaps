@@ -10,26 +10,40 @@
 # said "you cut a version without describing it". This check makes that gap
 # a PR-time failure: bump metadata.json and the map in the same change.
 #
-# Cheap and dependency-free (python3 stdlib). Runs from any cwd.
+# Cheap and dependency-free (python3 stdlib). Runs from any cwd. The
+# expectations map is always read from next to this script; --root <dir>
+# says where the checkout holding swap-module/ and swap-ui/ lives (default:
+# the parent of this script's directory). canary-channel.yml runs this from
+# a sparse `.canary-tools` checkout that has only canary/, so it must pass
+# --root pointing at the workspace of the ref being built.
 #
 # EXIT 0 = every module's metadata.json version has an exact map entry.
 #      1 = at least one is missing (message names the module + version).
 #      2 = a file could not be read.
+import argparse
 import json
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+DEFAULT_ROOT = os.path.dirname(HERE)
 
-# expectations-map key -> the metadata.json that declares its version
+# expectations-map key -> the metadata.json (relative to --root) that
+# declares its version
 MODULES = {
-    "swap": os.path.join(ROOT, "swap-module", "metadata.json"),
-    "swap_ui": os.path.join(ROOT, "swap-ui", "metadata.json"),
+    "swap": os.path.join("swap-module", "metadata.json"),
+    "swap_ui": os.path.join("swap-ui", "metadata.json"),
 }
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=DEFAULT_ROOT,
+                    help="checkout containing swap-module/ and swap-ui/ "
+                         "(default: parent of this script's directory)")
+    args = ap.parse_args()
+    root = os.path.abspath(args.root)
+
     exp_path = os.path.join(HERE, "release-content-expectations.json")
     try:
         with open(exp_path) as fh:
@@ -39,7 +53,8 @@ def main():
         return 2
 
     missing = []
-    for module, meta_path in MODULES.items():
+    for module, rel_path in MODULES.items():
+        meta_path = os.path.join(root, rel_path)
         try:
             with open(meta_path) as fh:
                 version = json.load(fh)["version"]
