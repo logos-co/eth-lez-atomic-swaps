@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -318,9 +318,11 @@ fn parse_balance_config(json_str: &str) -> Result<BalanceConfig, String> {
     let lez_ready = !c.lez_sequencer_url.trim().is_empty() && (has_wallet || has_raw_key);
 
     if !eth_ready && !lez_ready {
-        return Err("no chain is set up for a balance read yet: need an ETH RPC URL \
+        return Err(
+            "no chain is set up for a balance read yet: need an ETH RPC URL \
                     plus key, or a LEZ sequencer URL plus account"
-            .into());
+                .into(),
+        );
     }
 
     // Inert placeholders for everything a balance read never touches.
@@ -734,7 +736,10 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
 
     // Lenient on purpose — see parse_balance_config. The swap-only fields are
     // not needed to read a balance and must not block one.
-    let BalanceConfig { eth: eth_config, lez: lez_config } = match parse_balance_config(json_str) {
+    let BalanceConfig {
+        eth: eth_config,
+        lez: lez_config,
+    } = match parse_balance_config(json_str) {
         Ok(c) => c,
         Err(e) => return json_err(&e),
     };
@@ -743,9 +748,12 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
     const LEZ_NOT_SET_UP: &str = "LEZ account not set up yet";
 
     // Derive ETH address from private key.
-    let eth_signer: Option<std::result::Result<PrivateKeySigner, String>> = eth_config
-        .as_ref()
-        .map(|c| c.eth_private_key.parse().map_err(|e| format!("invalid ETH private key: {e}")));
+    let eth_signer: Option<std::result::Result<PrivateKeySigner, String>> =
+        eth_config.as_ref().map(|c| {
+            c.eth_private_key
+                .parse()
+                .map_err(|e| format!("invalid ETH private key: {e}"))
+        });
     let eth_address = eth_signer
         .as_ref()
         .and_then(|r| r.as_ref().ok())
@@ -761,8 +769,12 @@ pub unsafe extern "C" fn swap_ffi_fetch_balances(config_json: *const c_char) -> 
     runtime().block_on(async {
         // Fetch ETH balance.
         let eth_fut = async {
-            let config = eth_config.as_ref().ok_or_else(|| ETH_NOT_SET_UP.to_string())?;
-            let signer = eth_signer.clone().ok_or_else(|| ETH_NOT_SET_UP.to_string())??;
+            let config = eth_config
+                .as_ref()
+                .ok_or_else(|| ETH_NOT_SET_UP.to_string())?;
+            let signer = eth_signer
+                .clone()
+                .ok_or_else(|| ETH_NOT_SET_UP.to_string())??;
             let addr = signer.address();
             let eth_client = EthClient::new(config).await.map_err(|e| e.to_string())?;
             let balance = eth_client
@@ -839,7 +851,7 @@ fn resolve_maker_state_file(
              launches. Either set MAKER_STATE_FILE to an absolute path, or configure a LEZ \
              wallet home (lez_wallet_home + lez_account_id, env LEZ_WALLET_HOME + \
              LEZ_ACCOUNT_ID) so the journal can live there."
-            .into(),
+                .into(),
         ),
     }
 }
@@ -1261,7 +1273,10 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
         let cfg = parse_balance_config(BALANCE_ONLY_CONFIG).expect("balance parse");
         let eth = cfg.eth.expect("ETH side is set up");
         assert_eq!(eth.eth_rpc_url, "ws://127.0.0.1:8545");
-        assert!(cfg.lez.is_none(), "no LEZ account yet -> LEZ side reported as not set up");
+        assert!(
+            cfg.lez.is_none(),
+            "no LEZ account yet -> LEZ side reported as not set up"
+        );
     }
 
     #[test]
@@ -1358,8 +1373,14 @@ LEZ_TAKER_ACCOUNT_ID=8ZZq9G
         // ui-host launches (unstable CWD), voiding crash recovery — refuse to
         // start rather than default, and name both remedies.
         let err = resolve_maker_state_file(None, &LezAuth::RawKey("aa".into())).unwrap_err();
-        assert!(err.contains("MAKER_STATE_FILE"), "missing env remedy: {err}");
-        assert!(err.contains("lez_wallet_home"), "missing wallet remedy: {err}");
+        assert!(
+            err.contains("MAKER_STATE_FILE"),
+            "missing env remedy: {err}"
+        );
+        assert!(
+            err.contains("lez_wallet_home"),
+            "missing wallet remedy: {err}"
+        );
     }
 
     // ---------------------------------------------------------------------
