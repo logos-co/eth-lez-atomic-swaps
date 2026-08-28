@@ -1123,7 +1123,8 @@ void SwapUiPlugin::setupStartFunding()
     setSetupTarget(QStringLiteral("150"));
     setStatus(QStringLiteral("Setting up your LEZ account..."));
 
-    m_swap->startLezFundingJobAsync(lezSequencerUrl(), lezSigningKey(), setupTarget(),
+    m_setupFundingKey = lezSigningKey();
+    m_swap->startLezFundingJobAsync(lezSequencerUrl(), m_setupFundingKey, setupTarget(),
                                     [this](QString result) {
         const auto error = jsonError(result);
         if (!error.isEmpty()) {
@@ -1932,7 +1933,9 @@ void SwapUiPlugin::handleSetupFundingFinished(const QString& resultJson)
     // The funding job initializes before it claims (startLezFundingJob's
     // ordering guarantee), so a successful job also satisfies the
     // faucet-less path's "account initialized" gate.
-    setSetupInitialized(true);
+    if (m_setupFundingKey == lezSigningKey()) {
+        setSetupInitialized(true);
+    }
     setStatus(QStringLiteral("LEZ account ready"));
     // Refresh the header's ethAddress/lezAccount/lezBalance display now that
     // the account actually has funds — SetupView's own PROPs above only
@@ -2434,7 +2437,8 @@ void SwapUiPlugin::handleProgressEvent(const QString& eventName, const QJsonObje
         // from the same commit read, so the claims counter and the balance
         // readout can never contradict each other.
         setSetupStep(step);
-        if (step == QStringLiteral("Initialized") || step == QStringLiteral("AlreadyInitialized")) {
+        if ((step == QStringLiteral("Initialized") || step == QStringLiteral("AlreadyInitialized"))
+            && m_setupFundingKey == lezSigningKey()) {
             setSetupInitialized(true);
         }
         if (data.contains(QStringLiteral("balance"))) {
