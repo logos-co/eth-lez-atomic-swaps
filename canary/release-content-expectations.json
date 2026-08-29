@@ -88,6 +88,21 @@
           "b7386d81c2e507595e8f082f8723611effd6387f",
           "67e600cd709185d1d773d8ae30542b1cc686ad6d"
         ]
+      },
+      "0.4.6": {
+        "binary_strings": [
+          "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702",
+          "maker-ops.jsonl",
+          "swap persistence root (per-profile)",
+          "no chain is set up for a balance read yet: need an ETH RPC URL"
+        ],
+        "required_ancestors": [
+          "d433323bddb71b031d9d3d317c88853b767bd36e",
+          "1d0077f94c7718f744b3e3505dbd2598f2e453f2",
+          "b23e3fbfd60b31108958ec7751255095c3508950",
+          "2b14aac7ace9c12d18002760ae34863192c56428",
+          "3dcfe5b5d1827dd4c2b2c50f6878dd031fde528c"
+        ]
       }
     },
     "swap_ui": {
@@ -166,6 +181,37 @@
           "b7386d81c2e507595e8f082f8723611effd6387f",
           "71c4d11ac5ed1733de4d9cf9a7df3d0c72de2e68",
           "67e600cd709185d1d773d8ae30542b1cc686ad6d"
+        ]
+      },
+      "0.4.6": {
+        "qml_grep": [
+          "trial-evidence/1",
+          "Copy safe evidence",
+          "feedbackUrl",
+          "safeEvidenceJson",
+          "Four steps, then you're trading. No keys to type.",
+          "Start trading",
+          "Get test ETH",
+          "Sell to one buyer only (optional)",
+          "Your ETH balance is too low to pay for this swap",
+          "Add Sepolia test ETH from the Setup tab",
+          "Activate your LEZ account",
+          "Activate account",
+          "Get test LEZ without trading",
+          "Claim test LEZ"
+        ],
+        "binary_strings": [
+          "swap_ui persistence root (per-profile)",
+          "Your ETH balance is too low to pay for this swap (amount + gas). Add Sepolia test ETH from the Setup tab and try again.",
+          "SWAP_UI_LEZ_FAUCET_MODE",
+          "The app didn't get an answer back while activating your account"
+        ],
+        "required_ancestors": [
+          "d433323bddb71b031d9d3d317c88853b767bd36e",
+          "1d0077f94c7718f744b3e3505dbd2598f2e453f2",
+          "b23e3fbfd60b31108958ec7751255095c3508950",
+          "2b14aac7ace9c12d18002760ae34863192c56428",
+          "3dcfe5b5d1827dd4c2b2c50f6878dd031fde528c"
         ]
       }
     }
