@@ -9,11 +9,14 @@ Trustlessly swap Sepolia ETH ↔ LEZ, peer-to-peer, inside Logos Basecamp — no
 
 1. In Basecamp, open **Settings → Repositories** and add this catalog:
    `https://raw.githubusercontent.com/logos-co/eth-lez-atomic-swaps/master/logos-repo.json`
-2. Install **swap**, then **swap_ui** (current version 0.4.5). Keep the built-in
+2. Install **swap**, then **swap_ui** (current version 0.4.6). Keep the built-in
    catalog enabled — it provides the `delivery_module` dependency.
 3. In the app, the **Setup** tab walks you through it: generate an Ethereum key,
-   create a LEZ account, fund it, get test ETH — then open **Market** and accept
-   an offer.
+   create a LEZ account, activate it, get test ETH — then open **Market** and
+   accept an offer. You do not claim LEZ from a faucet to get started: LEZ is
+   what you buy on the **Market** tab, and an empty LEZ balance is fine because
+   LEZ charges no fees. Sellers who need LEZ inventory up front can still claim
+   it from **Get test LEZ without trading** on the Setup page.
 
 Full walkthrough:
 [Swap ETH and LEZ tokens in Logos Basecamp](https://github.com/logos-co/logos-docs/blob/master/docs/basecamp/swap-eth-and-lez-tokens-in-logos-basecamp.md).
