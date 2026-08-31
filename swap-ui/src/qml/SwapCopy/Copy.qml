@@ -103,4 +103,9 @@ QtObject {
     // LEZ with their ETH.
     readonly property string bestRateCue:
         "Best rate on the board right now — the most LEZ per ETH."
+    // The same fact as a standing legend under the column header, where a
+    // demo audience reads it without hovering. Starts with "=" because it is
+    // rendered after a green ★ — the key and its meaning, not a sentence.
+    readonly property string bestRateLegend:
+        "= best rate on the board right now"
 }
