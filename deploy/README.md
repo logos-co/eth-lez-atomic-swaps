@@ -155,7 +155,7 @@ node watch-offers.mjs                        # logos.dev — where the market is
 SWAP_FLEET=logos.test node watch-offers.mjs  # the migration fleet
 ```
 
-Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 45s) showing
+Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 30s) showing
 the maker's LEZ/ETH amounts and `age=0s` on arrival. The first log line names
 the fleet being watched — check it before concluding a board is empty.
 
@@ -276,13 +276,15 @@ to port-shift between instances.
 > image freezes `offer-publisher/` at build time, so when the fleet migrated
 > cluster 2 → 3 the published image went stale — the live `eth-lez-maker` only
 > survived because its in-container `fleet.mjs` was hand-patched. Both compose
-> files therefore bind-mount the repo's `../offer-publisher/{fleet.mjs,
-> publish-offer.mjs,rfq.mjs}` over the image copies (`node_modules` stays from
-> the image), making the checked-out files the single source of truth: a fleet
-> change (e.g. logos.test, PR #125) **and** the RFQ on-demand responder
-> (`publish-offer.mjs` + `rfq.mjs`, feat/rfq-on-demand-offers) are picked up by a
-> plain `restart`, no image rebuild or hand-patch. Mounting only `fleet.mjs`
-> would run the image's older heartbeat-only publisher with no RFQ responder.
+> files therefore bind-mount the sidecar's modules — currently the repo's
+> `../offer-publisher/{fleet.mjs,heartbeat.mjs,publish-offer.mjs,rfq.mjs}` —
+> over the image copies (`node_modules` stays from the image), making the
+> checked-out files the single source of truth: a fleet change (e.g. logos.test,
+> PR #125), the RFQ on-demand responder (`publish-offer.mjs` + `rfq.mjs`,
+> feat/rfq-on-demand-offers) **and** the heartbeat resolver (`heartbeat.mjs`)
+> are picked up by a plain `restart`, no image rebuild or hand-patch. Mounting
+> only `fleet.mjs` would run the image's older heartbeat-only publisher with no
+> RFQ responder.
 > **Make sure your checkout's `offer-publisher/` is current before starting** (an
 > up-to-date `master` clone already is).
 

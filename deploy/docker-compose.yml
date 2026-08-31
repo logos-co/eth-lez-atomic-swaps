@@ -29,9 +29,10 @@ services:
       # cluster/peers (was previously hot-patched by hand in-container — see
       # docker-compose.multi.yml header); publish-offer.mjs + rfq.mjs ship the
       # RFQ on-demand responder (feat/rfq-on-demand-offers) without an image
-      # rebuild. publish-offer.mjs imports "./fleet.mjs" and "./rfq.mjs", both
-      # resolved by these mounts.
+      # rebuild. publish-offer.mjs imports "./fleet.mjs", "./heartbeat.mjs" and
+      # "./rfq.mjs", all resolved by these mounts.
       - ../offer-publisher/fleet.mjs:/app/offer-publisher/fleet.mjs:ro
+      - ../offer-publisher/heartbeat.mjs:/app/offer-publisher/heartbeat.mjs:ro
       - ../offer-publisher/publish-offer.mjs:/app/offer-publisher/publish-offer.mjs:ro
       - ../offer-publisher/rfq.mjs:/app/offer-publisher/rfq.mjs:ro
     # No ports published: the maker only makes outbound connections (Sepolia

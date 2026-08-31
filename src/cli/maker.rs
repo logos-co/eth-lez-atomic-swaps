@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Args;
 use tokio::sync::mpsc;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::config::{SwapConfig, account_id_to_base58};
 use crate::error::{Result, SwapError};
@@ -19,6 +19,11 @@ use super::{bot, create_clients, output};
 /// (repo checkout layout).
 const DEFAULT_PUBLISHER_SCRIPT: &str = "offer-publisher/publish-offer.mjs";
 
+/// Default offer-republish cadence, in seconds. Must match
+/// `DEFAULT_HEARTBEAT_SECS` in offer-publisher/heartbeat.mjs — a maker started
+/// without the env var and a sidecar run standalone have to agree.
+const DEFAULT_HEARTBEAT_SECS: u64 = 30;
+
 /// Boolish value parser for env/flag booleans (clap's default `bool` parser only
 /// accepts `true`/`false`, but operators reasonably set `RESTRICT_COUNTERPARTY=1`).
 /// Accepts `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off` (case-insensitive).
@@ -29,6 +34,73 @@ fn parse_boolish(s: &str) -> std::result::Result<bool, String> {
         other => Err(format!(
             "expected a boolean (1/0, true/false, yes/no, on/off), got '{other}'"
         )),
+    }
+}
+
+/// The resolved offer-republish cadence plus where it came from — one place
+/// decides it, so the health check, the log line and the sidecar can never
+/// disagree about the interval (issue: two env vars, two defaults, one of them
+/// silently dropped on the way to the sidecar).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Heartbeat {
+    /// Effective interval in seconds; 0 means publishing is disabled.
+    pub secs: u64,
+    /// Human-readable origin, for the startup log line.
+    pub source: &'static str,
+    /// Deprecation / ignored-value lines the caller must warn about.
+    pub warnings: Vec<String>,
+}
+
+/// Resolve the one heartbeat knob. `OFFER_HEARTBEAT_SECS` (canonical) wins
+/// whenever it is set; `FALLBACK_HEARTBEAT_SECS` (deprecated alias) applies
+/// only when it is not, and always warns; otherwise `DEFAULT_HEARTBEAT_SECS`.
+pub(crate) fn resolve_heartbeat(canonical: Option<u64>, alias: Option<u64>) -> Heartbeat {
+    let mut warnings = Vec::new();
+    match (canonical, alias) {
+        (Some(secs), Some(ignored)) => {
+            warnings.push(format!(
+                "FALLBACK_HEARTBEAT_SECS is DEPRECATED and was IGNORED ({ignored}s) — \
+                 OFFER_HEARTBEAT_SECS={secs} wins; drop FALLBACK_HEARTBEAT_SECS"
+            ));
+            Heartbeat {
+                secs,
+                source: "OFFER_HEARTBEAT_SECS",
+                warnings,
+            }
+        }
+        (Some(secs), None) => Heartbeat {
+            secs,
+            source: "OFFER_HEARTBEAT_SECS",
+            warnings,
+        },
+        (None, Some(secs)) => {
+            warnings.push(format!(
+                "FALLBACK_HEARTBEAT_SECS is DEPRECATED — rename it to OFFER_HEARTBEAT_SECS \
+                 (still honoured: heartbeat {secs}s)"
+            ));
+            Heartbeat {
+                secs,
+                source: "FALLBACK_HEARTBEAT_SECS (deprecated)",
+                warnings,
+            }
+        }
+        (None, None) => Heartbeat {
+            secs: DEFAULT_HEARTBEAT_SECS,
+            source: "default",
+            warnings,
+        },
+    }
+}
+
+impl MakerArgs {
+    /// Resolve the heartbeat and emit its warnings. Call this once per entry
+    /// point that needs the cadence, so every path logs the same value.
+    fn heartbeat(&self) -> Heartbeat {
+        let hb = resolve_heartbeat(self.heartbeat_secs, self.fallback_heartbeat_secs);
+        for warning in &hb.warnings {
+            warn!("{warning}");
+        }
+        hb
     }
 }
 
@@ -45,18 +117,22 @@ pub struct MakerArgs {
     loop_mode: bool,
 
     /// Heartbeat interval (seconds) for republishing the offer over Waku
-    /// lightpush. The fleet runs store=false, so late-joining subscribers
-    /// only see live messages — keep this at 30-60s. 0 disables publishing.
-    #[arg(long, env = "OFFER_HEARTBEAT_SECS", default_value_t = 45)]
-    heartbeat_secs: u64,
+    /// lightpush — the ONE knob for the offer-republish cadence, resolved here
+    /// and injected into the offer-publisher sidecar. The fleet runs
+    /// store=false, so late-joining subscribers only see live messages; RFQ is
+    /// the fast path and this is the slow reliable baseline, so 30-60s is the
+    /// sane range. 0 disables publishing (the sidecar is not spawned at all).
+    /// Defaults to 30s (`DEFAULT_HEARTBEAT_SECS`) when unset.
+    #[arg(long, env = "OFFER_HEARTBEAT_SECS")]
+    heartbeat_secs: Option<u64>,
 
-    /// Fallback (reliable-baseline) republish interval in seconds. The
-    /// offer-publisher uses `FALLBACK_HEARTBEAT_SECS || OFFER_HEARTBEAT_SECS ||
-    /// 30` as its actual cadence (RFQ is the fast path; this is the slow
-    /// baseline). The health check must threshold on that SAME effective
-    /// interval — otherwise a 30s fallback cadence gets flagged unhealthy by a
-    /// smaller OFFER_HEARTBEAT_SECS (the exact regression the RFQ rollout hit).
-    #[arg(long, env = "FALLBACK_HEARTBEAT_SECS")]
+    /// DEPRECATED alias for `--heartbeat-secs` / `OFFER_HEARTBEAT_SECS`. Kept
+    /// working for deployments that already set it (it warns at startup and
+    /// only applies when the canonical knob is unset), and will be removed.
+    /// It exists because the RFQ rollout introduced it as a second name for
+    /// the same slow baseline; two names for one cadence is what let a health
+    /// check threshold on a different interval than the publisher used.
+    #[arg(long, env = "FALLBACK_HEARTBEAT_SECS", hide = true)]
     fallback_heartbeat_secs: Option<u64>,
 
     /// Node.js offer publisher script (long-lived @waku/sdk lightpush
@@ -255,12 +331,14 @@ fn cmd_maker_status(args: &MakerArgs) -> Result<()> {
     // Offer-publish freshness — only meaningful when publishing is enabled
     // (`--heartbeat-secs 0` disables it deliberately, e.g. for a restricted
     // test deployment with no board presence). Threshold on the SAME effective
-    // interval the publisher uses (fallback preferred over the legacy heartbeat,
-    // mirroring FALLBACK_HEARTBEAT_SECS || OFFER_HEARTBEAT_SECS), so a healthy
-    // 30s fallback cadence is not flagged by a smaller OFFER_HEARTBEAT_SECS.
-    let effective_heartbeat_secs = args
-        .fallback_heartbeat_secs
-        .unwrap_or(args.heartbeat_secs);
+    // interval the publisher was given: both come out of `resolve_heartbeat`,
+    // so a healthy cadence can never be flagged unhealthy by a second knob
+    // holding a different number (the exact regression the RFQ rollout hit).
+    // Resolved without re-emitting the deprecation warnings: this subcommand is
+    // the container healthcheck and runs every ~30s, so the startup-only lines
+    // belong to `cmd_maker_loop` (which logs the effective value once).
+    let effective_heartbeat_secs =
+        resolve_heartbeat(args.heartbeat_secs, args.fallback_heartbeat_secs).secs;
     if effective_heartbeat_secs > 0 {
         if !status.publisher_alive {
             return Err(SwapError::InvalidConfig(
@@ -519,13 +597,19 @@ async fn cmd_maker_loop(
         });
     }
 
-    // Heartbeat offer publisher (best-effort sidecar).
-    let publisher_handle = if args.heartbeat_secs == 0 {
+    // Heartbeat offer publisher (best-effort sidecar). One resolved cadence,
+    // logged here and injected into the sidecar verbatim.
+    let heartbeat = args.heartbeat();
+    let publisher_handle = if heartbeat.secs == 0 {
         warn!(
             "offer heartbeat disabled (--heartbeat-secs 0) — subscribers will not see this offer"
         );
         None
     } else {
+        info!(
+            "offer republish heartbeat: {}s (from {})",
+            heartbeat.secs, heartbeat.source
+        );
         let script = args
             .publisher_script
             .clone()
@@ -541,7 +625,7 @@ async fn cmd_maker_loop(
                 Some(bot::spawn_offer_publisher(
                     script,
                     env,
-                    args.heartbeat_secs,
+                    heartbeat.secs,
                     cancel.clone(),
                     status.clone(),
                 ))
@@ -839,8 +923,61 @@ fn describe(event: &SwapProgress) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_boolish;
+    use super::{DEFAULT_HEARTBEAT_SECS, parse_boolish, resolve_heartbeat};
     use clap::Parser;
+
+    // One knob decides the offer-republish cadence. These pin the precedence
+    // that replaced the old two-variable setup, where the CLI defaulted to 45,
+    // the sidecar to 30, and the sidecar preferred the alias the CLI never
+    // forwarded — so the health check and the publisher could disagree.
+    #[test]
+    fn heartbeat_defaults_to_30_when_nothing_is_set() {
+        let hb = resolve_heartbeat(None, None);
+        assert_eq!(hb.secs, DEFAULT_HEARTBEAT_SECS);
+        assert_eq!(hb.secs, 30, "must match offer-publisher/heartbeat.mjs");
+        assert_eq!(hb.source, "default");
+        assert!(hb.warnings.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_canonical_is_used_silently() {
+        let hb = resolve_heartbeat(Some(45), None);
+        assert_eq!(hb.secs, 45);
+        assert_eq!(hb.source, "OFFER_HEARTBEAT_SECS");
+        assert!(hb.warnings.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_deprecated_alias_still_works_but_warns() {
+        let hb = resolve_heartbeat(None, Some(20));
+        assert_eq!(
+            hb.secs, 20,
+            "alias must keep working for existing deployments"
+        );
+        assert!(hb.source.contains("FALLBACK_HEARTBEAT_SECS"));
+        assert_eq!(hb.warnings.len(), 1);
+        assert!(hb.warnings[0].contains("DEPRECATED"));
+        assert!(hb.warnings[0].contains("OFFER_HEARTBEAT_SECS"));
+    }
+
+    #[test]
+    fn heartbeat_canonical_wins_over_alias_and_says_so() {
+        let hb = resolve_heartbeat(Some(30), Some(45));
+        assert_eq!(hb.secs, 30);
+        assert_eq!(hb.source, "OFFER_HEARTBEAT_SECS");
+        assert_eq!(hb.warnings.len(), 1);
+        assert!(hb.warnings[0].contains("IGNORED"));
+    }
+
+    #[test]
+    fn heartbeat_zero_disables_publishing_through_either_name() {
+        assert_eq!(resolve_heartbeat(Some(0), None).secs, 0);
+        assert_eq!(
+            resolve_heartbeat(None, Some(0)).secs,
+            0,
+            "0 means disabled, not unset — the alias must not fall through to the default"
+        );
+    }
 
     // P2-3: the docs advertise RESTRICT_COUNTERPARTY=1, but clap's default bool
     // parser only accepts true/false. The boolish parser accepts 1/0, true/false,

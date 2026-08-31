@@ -224,7 +224,8 @@ NODE_PREFLIGHT_TESTS := \
 	tests/balance-notice.test.mjs \
 	tests/basecamp-ui-process-match.test.mjs \
 	offer-publisher/rfq.test.mjs \
-	offer-publisher/fleet.test.mjs
+	offer-publisher/fleet.test.mjs \
+	offer-publisher/heartbeat.test.mjs
 
 # Issue #165: the release-content map must have an entry for the version each
 # metadata.json declares (see canary/check-expectations-coverage.py).
