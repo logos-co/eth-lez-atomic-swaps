@@ -103,6 +103,19 @@
           "2b14aac7ace9c12d18002760ae34863192c56428",
           "3dcfe5b5d1827dd4c2b2c50f6878dd031fde528c"
         ]
+      },
+      "0.5.0": {
+        "binary_strings": [
+          "9eb88f51aae87a58fb74b8d2dc7327b39333585e63280e3f9cf8d86dac0ed702",
+          "maker-ops.jsonl",
+          "swap persistence root (per-profile)",
+          "no chain is set up for a balance read yet: need an ETH RPC URL"
+        ],
+        "required_ancestors": [
+          "a78675b007e353b57e511f939c66179e9f75fcb0",
+          "bb62c85a650938cb6f9592e8242e9fbe3c96f47d",
+          "fff5302293949cce9cdaf806dd8be4fe9dff6f0b"
+        ]
       }
     },
     "swap_ui": {
@@ -212,6 +225,37 @@
           "b23e3fbfd60b31108958ec7751255095c3508950",
           "2b14aac7ace9c12d18002760ae34863192c56428",
           "3dcfe5b5d1827dd4c2b2c50f6878dd031fde528c"
+        ]
+      },
+      "0.5.0": {
+        "qml_grep": [
+          "trial-evidence/1",
+          "Copy safe evidence",
+          "feedbackUrl",
+          "safeEvidenceJson",
+          "Four steps, then you're trading. No keys to type.",
+          "Start trading",
+          "Get test ETH",
+          "Sell to one buyer only (optional)",
+          "Your ETH balance is too low to pay for this swap",
+          "Add Sepolia test ETH from the Setup tab",
+          "Activate your LEZ account",
+          "Activate account",
+          "Get test LEZ without trading",
+          "Claim test LEZ",
+          "Best rate on the board right now",
+          "= best rate on the board right now"
+        ],
+        "binary_strings": [
+          "swap_ui persistence root (per-profile)",
+          "Your ETH balance is too low to pay for this swap (amount + gas). Add Sepolia test ETH from the Setup tab and try again.",
+          "SWAP_UI_LEZ_FAUCET_MODE",
+          "The app didn't get an answer back while activating your account"
+        ],
+        "required_ancestors": [
+          "a78675b007e353b57e511f939c66179e9f75fcb0",
+          "bb62c85a650938cb6f9592e8242e9fbe3c96f47d",
+          "fff5302293949cce9cdaf806dd8be4fe9dff6f0b"
         ]
       }
     }

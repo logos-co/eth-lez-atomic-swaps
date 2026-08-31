@@ -10,8 +10,8 @@ Basecamp — no official-catalog listing required.
 > and rapidsnark hashes). Intel macOS is not supported — upstream ships
 > no `macos-x86_64` circuits bundle.
 
-> **Current release (as of 2026-08-29): `swap v0.4.6` / `swap_ui v0.4.6`**,
-> both published 2026-08-29. Both sidecars report
+> **Current release (as of 2026-09-01): `swap v0.5.0` / `swap_ui v0.5.0`**,
+> both published 2026-09-01. Both sidecars report
 > `builtVariants: [darwin-arm64, linux-amd64, linux-arm64]` and
 > `missingVariants: []` — all three platforms are built and published, and
 > `.github/workflows/build-modules.yml` compiles both modules on
