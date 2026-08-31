@@ -77,6 +77,12 @@ SWAP_FLEET=logos.test npm run smoke  # the migration fleet
 ## Files
 
 - `publish-offer.mjs` — the heartbeat sidecar (spawned by `swap-cli maker --loop`).
+- `heartbeat.mjs` — resolves the one republish-interval knob (`OFFER_HEARTBEAT_SECS`, deprecated alias `FALLBACK_HEARTBEAT_SECS`, default 30).
+- `heartbeat.test.mjs` — pure unit tests pinning that precedence (`node heartbeat.test.mjs`, no network).
+- `rfq.mjs` — pure RFQ (request-for-quote) helpers for the on-demand responder.
+- `rfq.test.mjs` — pure unit tests for the RFQ logic (`node --test`, no network).
 - `fleet.mjs` — the `SWAP_FLEET` fleet table (logos.dev / logos.test) + TCP node/dial helpers (Node.js only).
 - `fleet.test.mjs` — contract tests for that table and the selector (`node fleet.test.mjs`, no network).
 - `smoke.mjs` — standalone fleet-connectivity check (`npm run smoke`).
+- `smoke-rfq.mjs` — live end-to-end RFQ check against the selected fleet (`npm run smoke-rfq`).
+- `watch-offers.mjs` — external liveness check subscribing to the offers topic.
