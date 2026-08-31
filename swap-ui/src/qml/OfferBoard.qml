@@ -92,6 +92,14 @@ Item {
     // fetchOffers during the round-trip window on a fresh install.
     property bool validationSettled: false
     property real bestRate: 0           // best LEZ-per-ETH on the board
+    // Is any row currently wearing the green ★? Gates the legend under the
+    // column header, so the board never explains a mark it isn't showing.
+    //
+    // This deliberately repeats the delegate's `bestDeal` gate rather than
+    // refactoring it: `bestRate` is the max over NON-blocked rows, so
+    // `bestRate > 0` already implies some non-blocked row carries it. Keep
+    // the two in sync — if `bestDeal` ever grows a condition, add it here.
+    readonly property bool hasBestDeal: offersModel.count > 1 && bestRate > 0
     // How many "blocked — unsafe" ghost rows are currently on the board
     // (recomputed on every model change). Drives the subtle header counter —
     // the calm "the app is protecting you" signal — no addresses, no styling.
@@ -899,6 +907,48 @@ Item {
                         }
                     }
 
+                    // Best-rate legend. The hover tip on the ★ cell only
+                    // reaches someone already pointing at it; a demo audience
+                    // watching a shared screen never hovers, which is exactly
+                    // how the mark went unread during the public trial. So the
+                    // key is also stated in the open — but only while a ★ is
+                    // actually on the board (`hasBestDeal`), so it never
+                    // explains an absent mark on a one-offer board.
+                    //
+                    // Two Texts, not one rich-text string: the glyph has to be
+                    // Theme.success to show the colour half of the cue, and
+                    // every other label on this board is PlainText.
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: board.hasBestDeal ? 22 : 0
+                        visible: board.hasBestDeal
+                        color: Theme.background
+
+                        RowLayout {
+                            anchors {
+                                left: parent.left
+                                verticalCenter: parent.verticalCenter
+                                leftMargin: Theme.spacingLarge
+                            }
+                            spacing: 4
+
+                            Text {
+                                textFormat: Text.PlainText
+                                text: "★"
+                                color: Theme.success
+                                font.pixelSize: Theme.fontCaption
+                                font.family: Theme.monoFont
+                                font.bold: true
+                            }
+                            Text {
+                                textFormat: Text.PlainText
+                                text: Copy.bestRateLegend
+                                color: Theme.textMuted
+                                font.pixelSize: Theme.fontCaption
+                            }
+                        }
+                    }
+
                     ListView {
                         id: offerList
                         Layout.fillWidth: true
@@ -1100,6 +1150,32 @@ Item {
                                     font.pixelSize: Theme.fontSmall
                                     font.family: Theme.monoFont
                                     font.bold: offerRow.bestDeal || model.blocked
+
+                                    // The green + ★ was the only mark on the
+                                    // board with no words anywhere to decode
+                                    // it (public-trial demo feedback: viewers
+                                    // guessed). A hover tip explains it in
+                                    // place, leaving the 96px cell unchanged.
+                                    //
+                                    // HoverHandler, not a nested MouseArea:
+                                    // rowContent is declared after rowMouse,
+                                    // so a MouseArea here would sit on top and
+                                    // swallow the hover, killing the row
+                                    // highlight over this one cell. A
+                                    // HoverHandler is non-blocking by default,
+                                    // so rowMouse still sees the cursor.
+                                    //
+                                    // The guard is `!model.blocked`, mirroring
+                                    // the text binding above rather than
+                                    // `bestDeal`: a ghosted row is excluded
+                                    // from the max but can still tie it, and
+                                    // it renders "blocked" with no ★.
+                                    HoverHandler { id: rateHover }
+                                    ToolTip.visible: rateHover.hovered
+                                                     && offerRow.bestDeal
+                                                     && !model.blocked
+                                    ToolTip.delay: 400
+                                    ToolTip.text: Copy.bestRateCue
                                 }
 
                                 // Maker

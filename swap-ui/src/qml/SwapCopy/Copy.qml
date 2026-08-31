@@ -94,4 +94,18 @@ QtObject {
         + "the timer runs out."
     readonly property string nothingLockedYet:
         "Nothing has left your wallet yet."
+
+    // What the offer board's green + ★ rate means. The board marks the row
+    // with the highest LEZ-per-ETH and never re-sorts to surface it, so the
+    // colour is the only signal — and until this string existed it was an
+    // unlabelled one. "Rate" and "LEZ per ETH" match the board's own column
+    // header ("RATE LEZ/ETH"); bigger is better because the reader is buying
+    // LEZ with their ETH.
+    readonly property string bestRateCue:
+        "Best rate on the board right now — the most LEZ per ETH."
+    // The same fact as a standing legend under the column header, where a
+    // demo audience reads it without hovering. Starts with "=" because it is
+    // rendered after a green ★ — the key and its meaning, not a sentence.
+    readonly property string bestRateLegend:
+        "= best rate on the board right now"
 }
