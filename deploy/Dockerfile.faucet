@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1.7
+#
+# In-house Sepolia ETH drip faucet (PoC) — see README-poc.md.
+#
+# Much smaller than the maker image next door: the faucet is one Rust binary
+# with no Node sidecar, no risc0 guest, and an alloy feature set that carries
+# neither the HTLC contract bindings nor the WebSocket transport. It signs
+# plain value transfers and nothing else.
+#
+# Why a container rather than a systemd unit: the same argument deploy/README.md
+# makes for the maker — a reproducible image beats a hand-installed toolchain
+# drifting on the VPS — plus one that matters more here, because this process
+# holds a funded key: the container gets a read-only root filesystem, a
+# non-root user, and exactly one writable path (the state volume).
+
+########################################
+# Stage 1: build
+########################################
+FROM rust:1.93-bookworm AS builder
+WORKDIR /build
+
+# ca-certificates + pkg-config/libssl-dev: the workspace's dependency tree
+# fetches over HTTPS at build time and links native TLS transitively, exactly
+# as the maker image documents. python3-dev: risc0-zkvm's tree links pyo3 while
+# the workspace is evaluated, even with RISC0_SKIP_BUILD.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        pkg-config \
+        libssl-dev \
+        python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cargo parses EVERY workspace member's manifest during resolution — even
+# though only the eth-faucet bin target is built here — so all of them must be
+# present or the build fails before compilation starts. Same reason the maker
+# image copies trees it never compiles.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src ./src
+COPY swap-ffi ./swap-ffi
+COPY lez-mcp ./lez-mcp
+COPY programs ./programs
+COPY tests ./tests
+COPY examples ./examples
+COPY eth-faucet-pow ./eth-faucet-pow
+COPY eth-faucet ./eth-faucet
+
+ENV RISC0_SKIP_BUILD=1
+RUN cargo build --release --locked --bin eth-faucet
+
+########################################
+# Stage 2: runtime
+########################################
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10002 --shell /usr/sbin/nologin faucet
+
+COPY --from=builder /build/target/release/eth-faucet /usr/local/bin/eth-faucet
+
+# Named volume mount point for the rate-limit journal. This is not optional
+# state: losing it resets every address and IP cooldown, which turns the rate
+# limits into suggestions until the ledger refills.
+RUN mkdir -p /app/state && chown -R faucet:faucet /app
+VOLUME ["/app/state"]
+
+WORKDIR /app
+USER faucet
+
+ENV FAUCET_BIND=0.0.0.0:8787 \
+    FAUCET_STATE_FILE=/app/state/faucet-ledger.json \
+    RUST_LOG=info
+
+EXPOSE 8787
+
+# curl, not the binary: /health is the same answer the app and any uptime
+# monitor get, so the container's notion of healthy cannot drift from theirs.
+# It reports 503 when the balance is under one day's budget or the RPC is
+# unreachable — the two conditions an operator must act on.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8787/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/eth-faucet"]

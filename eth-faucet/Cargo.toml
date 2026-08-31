@@ -1,0 +1,31 @@
+[package]
+name = "eth-faucet"
+version = "0.1.0"
+edition = "2024"
+description = "In-house Sepolia ETH drip faucet (PoC) — PoW-gated, rate-limited, one funded hot key"
+
+[[bin]]
+name = "eth-faucet"
+path = "src/main.rs"
+
+[dependencies]
+eth-faucet-pow = { path = "../eth-faucet-pow" }
+
+# Ethereum. Only a plain value transfer over HTTP is needed, so this is a much
+# smaller alloy feature set than the orchestrator's (no ws, no contract, no
+# node-bindings) — the faucet never touches the HTLC.
+alloy = { version = "1", features = ["provider-http", "signer-local", "network", "rpc-types"] }
+
+# HTTP server. axum 0.7 is already in the workspace lock (via the LEZ
+# dependency tree), so this adds no new major version to vendor.
+axum = "0.7"
+tower-http = { version = "0.6", features = ["trace"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+rand = { version = "0.8", features = ["std", "std_rng"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"

@@ -327,7 +327,10 @@
             # apart: identical `got:`). It DOES change whenever the workspace
             # Cargo.toml/Cargo.lock gains/drops a dependency — e.g. bumped
             # 2026-08-04 when the native-LEZ-faucet lift added `system_accounts`
-            # + `getrandom` to the root Cargo.toml. Bump it here (and re-check
+            # + `getrandom` to the root Cargo.toml, and again 2026-09-01 when
+            # the in-house ETH drip faucet PoC (README-poc.md) added the
+            # `eth-faucet-pow` / `eth-faucet` workspace members and gave
+            # swap-ffi an explicit `reqwest` dependency. Bump it here (and re-check
             # the whole repo for any other pinned `cargoHash`/`cargoDeps`/
             # `outputHash` — this is currently the only Rust vendor hash) any
             # time a workspace crate's dependency set changes; the build's own
@@ -340,7 +343,7 @@
             cargoDeps = fetchCargoVendorUA {
               name = "swap-ffi-0.1.0";
               src = swapFfiSource;
-              hash = "sha256-uZwBWt0kQZunoocu3ah84bpKp1cV/HWozNgf7JlnMBc=";
+              hash = "sha256-MIbpSTm2Eh1+bhqWxsXRPlt3xYGkeQNeSXerGAjsMgA=";
             };
             # --no-default-features: the `demo` feature only adds the risc0
             # guest build (needs the rzup toolchain + a nested cargo build the

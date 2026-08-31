@@ -404,6 +404,11 @@ std::string SwapImpl::lezEnsureInitialized(const std::string& sequencerUrl,
     return takeAndFree(swap_ffi_lez_ensure_initialized(sequencerUrl.c_str(), signingKeyHex.c_str()));
 }
 
+std::string SwapImpl::faucetRequestEth(const std::string& faucetUrl,
+                                       const std::string& address) {
+    return takeAndFree(swap_ffi_faucet_request_eth(faucetUrl.c_str(), address.c_str()));
+}
+
 std::string SwapImpl::runMaker(const std::string& configJson, const std::string& hashlockHex) {
     return runBlockingJob("maker", configJson, hashlockHex);
 }

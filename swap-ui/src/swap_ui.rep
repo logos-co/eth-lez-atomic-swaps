@@ -159,6 +159,27 @@ class SwapUi
     // so on the card instead, since with the faucet-less flow now the default
     // a returning 0.4.5 user meets that step on their first relaunch.
     PROP(bool setupInitialized READWRITE)
+    // In-house Sepolia drip faucet (PoC — see README-poc.md and eth-faucet/).
+    // Resolved once at startup from swap-ui/src/eth_faucet_config.h
+    // (SWAP_UI_ETH_FAUCET_URL, compiled default a local instance). EMPTY means
+    // "no faucet is configured for this build": SetupView then shows only the
+    // external-faucet copy-link path, exactly as 0.4.6 did. Not persisted and
+    // not user-editable — a URL the app sends an address to and trusts to send
+    // money back is a deployment decision, not a preference.
+    PROP(QString ethFaucetUrl READWRITE)
+    // The drip transaction, once one lands. Cleared at the start of every
+    // request so a retry can never show the previous attempt's hash, and
+    // cleared on a failure for the same reason.
+    PROP(QString setupFaucetTxHash READWRITE)
+    // What the faucet actually sent, decimal ETH, as IT reported it — the
+    // service owns the drip size and can change it without an app release, so
+    // the card must never state a figure of its own.
+    PROP(QString setupFaucetAmountEth READWRITE)
+    // The chain the drip landed on, as the FAUCET reported it — so the card's
+    // explorer link is derived from an on-chain fact rather than from a config
+    // field, the same rule SwapLinks/Links.qml applies to receipts. 0 until a
+    // drip lands, which resolves to no link rather than a wrong-network one.
+    PROP(int setupFaucetChainId READWRITE)
 
     SLOT(void setRole(const QString& role))
     SLOT(void setConfigValue(const QString& key, const QString& value))
@@ -209,4 +230,10 @@ class SwapUi
     // setupError PROPs. Idempotent: an already-initialized account reports
     // AlreadyInitialized without a transaction.
     SLOT(void setupInitializeAccount())
+    // Step 4's "Get test ETH" button: ask the in-house drip faucet for Sepolia
+    // gas (fetch a proof-of-work challenge, solve it, claim). Reported through
+    // the same setupRunning/setupStep/setupError PROPs as the other setup
+    // jobs; SetupView's `setupOrigin` keeps its progress and errors inside
+    // step 4's card rather than step 3's (the lesson of #173).
+    SLOT(void setupRequestTestEth())
 }

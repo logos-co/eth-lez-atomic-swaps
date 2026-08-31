@@ -71,6 +71,7 @@ public:
     void setupGenerateLezAccount() override;
     void setupStartFunding() override;
     void setupInitializeAccount() override;
+    void setupRequestTestEth() override;
 
 private:
     // Issue #171: one attempt at LEZ activation, and what to make of its
@@ -83,6 +84,14 @@ private:
     // rather than applied to it.
     void handleLezActivationResult(const QString& result, const QString& activatedKey,
                                    bool rechecked);
+
+    // The drip faucet's answer to setupRequestTestEth(). `requestedAddress` is
+    // the address THIS request asked to fund, so an answer that arrives after
+    // the user generated a new ETH key is discarded rather than reported
+    // against the wrong account — the same guard handleLezActivationResult
+    // applies to a swapped LEZ account, and the same reason: the call can run
+    // for minutes (PoW solve plus a Sepolia inclusion wait).
+    void handleFaucetResult(const QString& result, const QString& requestedAddress);
 
     QString configJson() const;
     QString messagingConfigJson() const;

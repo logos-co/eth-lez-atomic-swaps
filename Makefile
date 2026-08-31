@@ -1,6 +1,7 @@
 .PHONY: contracts demo infra \
        setup localnet-start localnet-stop test basecamp-ui-smoke swap-ui-unit \
        basecamp-dev \
+       faucet-poc-genkey faucet-poc-run faucet-poc-demo faucet-poc-test \
        preflight preflight-full preflight-qmllint preflight-node-tests preflight-expectations-coverage \
        preflight-rust-check preflight-rust-anvil install-hooks
 
@@ -152,6 +153,9 @@ swap-ui-unit:
 	@lez_activation_bin=$$(mktemp /tmp/atomic-swaps-lez-activation.XXXXXX); \
 		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/lez_activation_test.cpp -o "$$lez_activation_bin"; \
 		"$$lez_activation_bin"
+	@eth_faucet_config_bin=$$(mktemp /tmp/atomic-swaps-eth-faucet-config.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/eth_faucet_config_test.cpp -o "$$eth_faucet_config_bin"; \
+		"$$eth_faucet_config_bin"
 
 # The grep guard turns a scaffold-side layout change into a hard error instead
 # of a silently-wrong-directory launch (which looks like "the app opened but my
@@ -162,6 +166,64 @@ basecamp-launch-%:
 	  || { echo "basecamp layout drift: scaffold's modules_dir for profile '$*' is not $(BASECAMP_USER_DIR)/modules"; \
 	       echo "compare 'lgs basecamp paths $* --json' with BASECAMP_USER_DIR in the Makefile"; exit 1; }
 	LOGOS_USER_DIR=$(BASECAMP_USER_DIR) lgs basecamp launch $*
+
+# --- In-house Sepolia drip faucet, PoC (see README-poc.md) ---
+#
+# Local-only: everything here runs the service on this machine against real
+# Sepolia with a key YOU generated. Nothing touches a deployed faucet, and no
+# target here can read a key it was not given.
+#
+# `.faucet-poc/` is gitignored and holds the throwaway env file + the
+# rate-limit journal.
+FAUCET_POC_DIR := $(CURDIR)/.faucet-poc
+FAUCET_POC_ENV := $(FAUCET_POC_DIR)/faucet.env
+FAUCET_POC_URL ?= http://127.0.0.1:8787
+
+# Generate a THROWAWAY key and write a ready-to-run env file. Refuses to
+# clobber an existing one: overwriting the key of a faucet you already funded
+# would strand that ETH at an address nothing holds the key for any more.
+faucet-poc-genkey:
+	@mkdir -p $(FAUCET_POC_DIR)
+	@if [ -f "$(FAUCET_POC_ENV)" ]; then \
+		echo "$(FAUCET_POC_ENV) already exists — refusing to overwrite a funded key."; \
+		echo "Delete it yourself if you are sure it holds nothing."; \
+		exit 1; \
+	fi
+	@umask 077 && { \
+		cargo run --release --quiet -p eth-faucet -- --genkey; \
+		echo "FAUCET_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com"; \
+		echo "FAUCET_STATE_FILE=$(FAUCET_POC_DIR)/faucet-ledger.json"; \
+		echo "FAUCET_BIND=127.0.0.1:8787"; \
+		echo "# Low difficulty so a demo solves in well under a second."; \
+		echo "FAUCET_POW_DIFFICULTY_BITS=18"; \
+		echo "RUST_LOG=info"; \
+	} > "$(FAUCET_POC_ENV)"
+	@echo
+	@echo "Wrote $(FAUCET_POC_ENV) (mode 600, gitignored)."
+	@grep '^# address:' "$(FAUCET_POC_ENV)" | sed 's/^# /Fund this address with a little Sepolia ETH: /'
+	@echo "Then: make faucet-poc-run"
+
+# Run the service in the foreground against real Sepolia.
+faucet-poc-run:
+	@test -f "$(FAUCET_POC_ENV)" || { echo "No $(FAUCET_POC_ENV) — run 'make faucet-poc-genkey' first."; exit 1; }
+	set -a && . "$(FAUCET_POC_ENV)" && set +a && cargo run --release -p eth-faucet
+
+# Drive a full claim against a RUNNING service: challenge -> solve -> drip.
+# The solve is done by the same crate the app and the service share, so this
+# demonstrates the real round trip rather than a mock of it.
+faucet-poc-demo:
+	@test -n "$(ADDRESS)" || { echo "usage: make faucet-poc-demo ADDRESS=0x<your address>"; exit 1; }
+	scripts/faucet-poc-demo.sh "$(ADDRESS)" "$(FAUCET_POC_URL)"
+
+# The faucet's own unit tests (PoW verify, cooldowns, budget, journal) plus
+# the swap-ui URL-resolution test. No network, no key, no chain.
+faucet-poc-test:
+	@echo "==> cargo test -p eth-faucet-pow -p eth-faucet"
+	@cargo test -p eth-faucet-pow -p eth-faucet --locked
+	@echo "==> eth_faucet_config_test"
+	@bin=$$(mktemp /tmp/atomic-swaps-eth-faucet-config.XXXXXX); \
+		$(CXX) -std=c++17 -Iswap-ui/src swap-ui/tests/eth_faucet_config_test.cpp -o "$$bin"; \
+		"$$bin"
 
 # --- Preflight (fast local checks — see docs/DEVELOPMENT.md "Before you push") ---
 #

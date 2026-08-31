@@ -2,6 +2,7 @@
 
 #include "balance_error_policy.h"
 #include "balance_read_gate.h"
+#include "eth_faucet_config.h"
 #include "eth_funds_guard.h"
 #include "logos_api.h"
 #include "logos_api_client.h"
@@ -237,6 +238,26 @@ bool defaultSetupFaucetless()
         qEnvironmentVariable(swap_ui::kLezFaucetModeEnv).toStdString());
 }
 
+// Where step 4's "Get test ETH" button sends its request (PoC — see
+// README-poc.md, eth-faucet/ and swap-ui/src/eth_faucet_config.h). Read once at
+// startup like the other overrides; not persisted and not user-editable,
+// because a URL the app hands an address to and trusts to send money back is a
+// deployment decision rather than a preference.
+//
+// UNSET gives the compiled default (a locally-run PoC service); set-and-EMPTY
+// disables the button, leaving step 4 exactly as 0.4.6 shipped it — the
+// external faucet link and its copy button. qEnvironmentVariableIsSet is what
+// keeps those two cases apart.
+QString defaultEthFaucetUrl()
+{
+    const bool isSet = qEnvironmentVariableIsSet(swap_ui::kEthFaucetUrlEnv);
+    const auto resolved = swap_ui::ethFaucetUrl(
+        qEnvironmentVariable(swap_ui::kEthFaucetUrlEnv).toStdString(), isSet);
+    // A value that is not an http(s) URL is treated as "no faucet" rather than
+    // stored and failed on later with a transport error nobody can act on.
+    return swap_ui::isUsableFaucetUrl(resolved) ? QString::fromStdString(resolved) : QString{};
+}
+
 } // namespace
 
 // Reset every config PROP back to its built-in default. Shared by the
@@ -356,6 +377,10 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     setSetupClaims(0);
     setSetupFaucetless(defaultSetupFaucetless());
     setSetupInitialized(false);
+    setEthFaucetUrl(defaultEthFaucetUrl());
+    setSetupFaucetTxHash(QString{});
+    setSetupFaucetAmountEth(QString{});
+    setSetupFaucetChainId(0);
     connect(this, &SwapUiPlugin::lezSigningKeyChanged,
             this, [this] { setSetupInitialized(false); });
 
@@ -1286,6 +1311,113 @@ void SwapUiPlugin::handleLezActivationResult(const QString& result,
     // point (issue #171's blank "Unexpected activation result: ").
     setSetupError(QString::fromStdString(decision.detail));
     setStatus(QStringLiteral("LEZ account activation failed"));
+}
+
+// Step 4's "Get test ETH": ask the in-house drip faucet for Sepolia gas.
+//
+// One blocking call in the swap module does the whole flow (challenge -> PoW
+// solve -> claim), so there is nothing to report between "asked" and
+// "answered" — hence one phase rather than the LEZ funding job's stream of
+// them. What that phase says is still worth saying: the wait is a real
+// proof-of-work solve plus a chain inclusion, tens of seconds of it, and
+// SetupView's elapsed ticker keeps it visibly moving.
+void SwapUiPlugin::setupRequestTestEth()
+{
+    if (!m_swap || setupRunning()) {
+        return;
+    }
+
+    const auto address = ethRecipientAddress().trimmed();
+    if (address.isEmpty()) {
+        setSetupError(QStringLiteral("Generate an Ethereum key first — the faucet needs an "
+                                     "address to send to"));
+        setStatus(setupError());
+        return;
+    }
+    const auto faucet = ethFaucetUrl().trimmed();
+    if (faucet.isEmpty()) {
+        // Reachable only if the PROP were cleared after startup; the button is
+        // hidden when no faucet is configured. Answer honestly rather than
+        // sending a request to an empty URL.
+        setSetupError(QStringLiteral("No faucet is configured for this build — use one of the "
+                                     "faucet links below"));
+        setStatus(setupError());
+        return;
+    }
+
+    setSetupRunning(true);
+    setSetupJobId(QString{});
+    setSetupError(QString{});
+    setSetupBalance(QString{});
+    setSetupClaims(0);
+    // Clear the previous attempt's result BEFORE starting: a retry that still
+    // showed the last hash would read as though this request had already
+    // succeeded.
+    setSetupFaucetTxHash(QString{});
+    setSetupFaucetAmountEth(QString{});
+    setSetupFaucetChainId(0);
+    setSetupStep(QString::fromLatin1(swap_ui::kStepFaucetRequesting));
+    setStatus(QStringLiteral("Asking the faucet for test ETH..."));
+
+    m_swap->faucetRequestEthAsync(
+        faucet, address,
+        [this, address](QString result) { handleFaucetResult(result, address); },
+        Timeout(swap_ui::kFaucetRequestTimeoutMs));
+}
+
+void SwapUiPlugin::handleFaucetResult(const QString& result, const QString& requestedAddress)
+{
+    setSetupRunning(false);
+    setSetupStep(QString{});
+
+    if (requestedAddress != ethRecipientAddress().trimmed()) {
+        // The user generated a new ETH key while this was in flight. The drip
+        // (if any) went to the OLD address, so reporting it against the new one
+        // would be a lie in either direction.
+        setStatus(QStringLiteral("Ethereum address changed during the faucet request; press "
+                                 "Get test ETH again"));
+        return;
+    }
+
+    if (result.trimmed().isEmpty()) {
+        // An empty answer is how the Async wrapper reports its Timeout
+        // expiring (issue #171) — never a success, and never a blank error.
+        setSetupError(QStringLiteral("The faucet didn't answer within %1 minutes. If it was "
+                                     "already sending, the ETH may still arrive — the line "
+                                     "below is watching for it.")
+                          .arg(swap_ui::kFaucetRequestTimeoutMs / 60000));
+        setStatus(QStringLiteral("Faucet request timed out"));
+        return;
+    }
+
+    const auto error = jsonError(result);
+    if (!error.isEmpty()) {
+        // The faucet authors its own refusals (only it knows how long a
+        // cooldown has left, or what its daily budget is), so show its sentence
+        // verbatim rather than restating it from a code.
+        setSetupError(error);
+        setStatus(QStringLiteral("The faucet couldn't send test ETH"));
+        return;
+    }
+
+    const auto obj = parseObject(result);
+    const auto txHash = valueString(obj, QStringLiteral("tx_hash"));
+    if (txHash.isEmpty()) {
+        setSetupError(QStringLiteral("Unexpected answer from the faucet: %1").arg(result));
+        setStatus(QStringLiteral("The faucet couldn't send test ETH"));
+        return;
+    }
+
+    setSetupFaucetTxHash(txHash);
+    setSetupFaucetAmountEth(valueString(obj, QStringLiteral("amount_eth")));
+    setSetupFaucetChainId(obj.value(QStringLiteral("chain_id")).toInt(0));
+    setSetupError(QString{});
+    setSetupStep(QString::fromLatin1(swap_ui::kStepFaucetDripped));
+    setStatus(QStringLiteral("Test ETH sent"));
+    // The faucet waits for its own receipt before answering, so the balance is
+    // already there to be read — no need to rely on step 4's arrival poller
+    // catching up on its next tick.
+    fetchBalances();
 }
 
 QString SwapUiPlugin::canonicalLezHtlcProgramId() const

@@ -1,0 +1,10 @@
+[package]
+name = "eth-faucet-pow"
+version = "0.1.0"
+edition = "2024"
+description = "Shared proof-of-work challenge scheme for the in-house Sepolia drip faucet"
+
+[dependencies]
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+hex = "0.4"

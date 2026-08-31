@@ -58,6 +58,11 @@ char *swap_ffi_lez_claim_to_target(const char *sequencer_url,
                                    ProgressCallback cb,
                                    void *user_data);
 
+/* In-house Sepolia drip faucet client (see swap-ffi/src/faucet_client.rs). */
+
+char *swap_ffi_faucet_request_eth(const char *faucet_url,
+                                  const char *address);
+
 void swap_ffi_free_string(char *ptr);
 
 #ifdef __cplusplus

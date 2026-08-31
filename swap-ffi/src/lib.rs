@@ -32,6 +32,7 @@ use swap_orchestrator::{
     },
 };
 
+mod faucet_client;
 mod lez_htlc_program_id;
 use lez_htlc_program_id::LEZ_HTLC_PROGRAM_ID_HEX;
 
@@ -1174,6 +1175,48 @@ pub unsafe extern "C" fn swap_ffi_lez_claim_to_target(
         drain_progress_forwarder(progress_forwarder).await;
         result
     })
+}
+
+/// Ask the in-house Sepolia drip faucet (`eth-faucet/`) for test ETH.
+///
+/// Does the whole three-step flow — fetch a proof-of-work challenge, solve it
+/// (CPU-bound, seconds), post the answer — and blocks until the faucet has
+/// either sent a transaction or refused. Callers on a UI thread must run this
+/// on a worker thread, exactly like `swap_ffi_run_maker`/`swap_ffi_run_taker`.
+///
+/// `faucet_url` is the service's base URL (e.g. `http://127.0.0.1:8787`);
+/// `address` is the 0x-prefixed Ethereum address to fund.
+///
+/// Returns JSON, one of:
+/// - `{"outcome":"Dripped","tx_hash":"0x…","address":"0x…","amount_eth":"0.02",
+///   "chain_id":11155111}`
+/// - `{"error":"<sentence for the user>","code":"<stable tag>"}` — the code is
+///   the faucet's own refusal tag (`address_cooldown`, `ip_cooldown`,
+///   `lifetime_cap`, `daily_budget`, `already_funded`, …) or a client-side one
+///   (`not_configured`, `unreachable`, `pow_failed`, `bad_response`), so the UI
+///   can branch without matching on prose.
+///
+/// # Safety
+/// `faucet_url` and `address` must be valid null-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swap_ffi_faucet_request_eth(
+    faucet_url: *const c_char,
+    address: *const c_char,
+) -> *mut c_char {
+    let faucet_url = match unsafe { c_str_to_str(faucet_url) } {
+        Some(s) => s,
+        None => return json_err("null or invalid faucet_url"),
+    };
+    let address = match unsafe { c_str_to_str(address) } {
+        Some(s) => s,
+        None => return json_err("null or invalid address"),
+    };
+
+    let result = runtime().block_on(faucet_client::request_eth(faucet_url, address));
+    match serde_json::to_string(&result) {
+        Ok(json) => to_c_string(&json),
+        Err(e) => json_err(&format!("failed to serialize faucet result: {e}")),
+    }
 }
 
 /// Free a string previously returned by any `swap_ffi_*` function.

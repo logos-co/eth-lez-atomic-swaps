@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "swap-ffi", "lez-mcp"]
+members = [".", "swap-ffi", "lez-mcp", "eth-faucet-pow", "eth-faucet"]
 resolver = "2"
 
 [package]

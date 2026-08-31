@@ -3,6 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import SwapTheme
 import SwapFormat
+import SwapLinks
 import "SetupSteps.js" as SetupSteps
 
 // The single place you set this app up.
@@ -122,12 +123,18 @@ PageScaffold {
     // without this a faucet claim would render "Solving the faucet's puzzle…"
     // and its errors inside step 3's card, under a heading that has nothing to
     // do with either.
+    // ...or "faucet" (step 4's Get test ETH button, which reports through the
+    // same shared PROPs and would otherwise render "Solving the faucet's
+    // puzzle…" inside step 3's card — the exact bug #173 fixed for claims).
     property string setupOrigin: ""
     // Everything that means "THIS card's job is running" binds through these,
     // never through the shared setupRunning directly; the button guards keep
     // the bare setupRunning because no setup job may start while any runs.
-    readonly property bool activating: swapBackend.setupRunning && setupRoot.setupOrigin !== "claim"
+    readonly property bool activating: swapBackend.setupRunning
+                                       && setupRoot.setupOrigin !== "claim"
+                                       && setupRoot.setupOrigin !== "faucet"
     readonly property bool claiming: swapBackend.setupRunning && setupRoot.setupOrigin === "claim"
+    readonly property bool requestingEth: swapBackend.setupRunning && setupRoot.setupOrigin === "faucet"
 
     // Bounded auto-poll for ETH arrival while the test-ETH step is active (see
     // the ethBalancePoll Timer): count of polls issued, capped so a user who
@@ -156,6 +163,13 @@ PageScaffold {
             // Honest: step 3 funds LEZ only. Never say "and ready" here — the
             // test-ETH step below decides that.
             "Done":               "LEZ funded",
+            // Step 4's in-house drip faucet (see the Get test ETH button).
+            // One phase covers the whole round trip — the app solves a puzzle,
+            // then the faucet waits for its own transaction to be mined before
+            // it answers — so the copy names both halves rather than promising
+            // a progression that never arrives.
+            "FaucetRequesting":   "Solving the faucet's puzzle, then waiting for the transaction…",
+            "FaucetDripped":      "Sent",
         }
         return map[step] || step
     }
@@ -423,7 +437,8 @@ PageScaffold {
 
         RowLayout {
             visible: setupRoot.activating
-                     || (setupRoot.setupOrigin !== "claim" && swapBackend.setupStep !== "")
+                     || (setupRoot.setupOrigin !== "claim" && setupRoot.setupOrigin !== "faucet"
+                         && swapBackend.setupStep !== "")
             Layout.fillWidth: true
             spacing: Theme.spacingSmall
 
@@ -478,7 +493,8 @@ PageScaffold {
         }
 
         ColumnLayout {
-            visible: setupRoot.setupOrigin !== "claim" && swapBackend.setupError !== ""
+            visible: setupRoot.setupOrigin !== "claim" && setupRoot.setupOrigin !== "faucet"
+                     && swapBackend.setupError !== ""
             Layout.fillWidth: true
             spacing: 4
 
@@ -717,13 +733,127 @@ PageScaffold {
             font.pixelSize: Theme.fontCaption
         }
 
+        // --- In-house drip faucet (PoC) ---
+        // The whole point of the button: the app already knows the address, so
+        // this collapses "copy link -> browser -> mine in a tab -> paste
+        // address -> come back" into one press. Hidden entirely when no faucet
+        // is configured for the build (ethFaucetUrl empty), leaving the card
+        // exactly as 0.4.6 shipped it.
+        PrimaryButton {
+            visible: swapBackend.ethFaucetUrl !== ""
+            text: setupRoot.requestingEth ? "Getting test ETH…" : "Get test ETH"
+            // Needs an address to send to, and no other setup job may be
+            // running — the backend serializes them through one setupRunning.
+            enabled: setupRoot.hasEthKey && !swapBackend.setupRunning && !setupRoot.anyRunning
+            Layout.preferredHeight: 38
+            onClicked: {
+                setupRoot.setupOrigin = "faucet"
+                swapBackend.setupRequestTestEth()
+            }
+        }
+
+        // Live progress for a request started HERE, with the same per-phase
+        // elapsed ticker the numbered steps use. The wait is a real
+        // proof-of-work solve plus a chain inclusion — tens of seconds — so a
+        // moving number is the difference between "working" and "hung".
+        RowLayout {
+            visible: setupRoot.requestingEth
+            Layout.fillWidth: true
+            spacing: Theme.spacingSmall
+
+            StatusDot {
+                status: "working"
+                size: 6
+                Layout.alignment: Qt.AlignVCenter
+            }
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+                text: {
+                    var line = setupRoot.humanSetupStep(swapBackend.setupStep)
+                    if (setupRoot.setupStepElapsedSeconds > 0)
+                        line += " " + setupRoot.setupStepElapsedSeconds + "s"
+                    return line
+                }
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+            }
+        }
+
+        // The drip that landed. The amount comes from the FAUCET, never from a
+        // figure compiled into the app: the service owns its drip size and can
+        // change it without an app release.
+        ColumnLayout {
+            visible: swapBackend.setupFaucetTxHash !== "" && !setupRoot.requestingEth
+            Layout.fillWidth: true
+            spacing: 4
+
+            Text {
+                Layout.fillWidth: true
+                text: swapBackend.setupFaucetAmountEth !== ""
+                      ? "The faucet sent " + swapBackend.setupFaucetAmountEth
+                        + " ETH. It's on-chain already — the line below confirms it arrived."
+                      : "The faucet sent your test ETH. It's on-chain already — the line below "
+                        + "confirms it arrived."
+                color: Theme.toneLive
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+            HexValue {
+                label: "Faucet tx"
+                value: swapBackend.setupFaucetTxHash
+                // Derived from the chain id the FAUCET reported, so an unknown
+                // chain resolves to no link rather than to the wrong network's
+                // explorer (SwapLinks/Links.qml's rule).
+                link: Links.ethTx(swapBackend.setupFaucetTxHash, swapBackend.setupFaucetChainId)
+            }
+        }
+
+        // A refused or failed request, in THIS card. The faucet writes its own
+        // refusals — only it knows how long a cooldown has left — so its
+        // sentence is shown verbatim under a fixed lead-in.
+        ColumnLayout {
+            visible: setupRoot.setupOrigin === "faucet" && swapBackend.setupError !== ""
+            Layout.fillWidth: true
+            spacing: 4
+
+            Text {
+                Layout.fillWidth: true
+                text: "The faucet couldn't send test ETH. Nothing was lost, and the faucet "
+                      + "links below still work."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSmall
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.WordWrap
+            }
+            Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: swapBackend.setupError
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                font.family: Theme.monoFont
+                horizontalAlignment: Text.AlignLeft
+                wrapMode: Text.Wrap
+            }
+        }
+
+        // --- Fallback: external faucets ---
+        // Kept whether or not the in-house one is configured. It is a single
+        // hot key on one VPS with a daily budget; when it is empty, refusing,
+        // or down, this is the path that still works.
+        //
         // Copy-only, never a clickable open: Basecamp silently no-ops
         // module-owned external navigation (#84). Same idiom as HexValue's
         // explorer links.
         Text {
             Layout.fillWidth: true
             Layout.topMargin: Theme.spacingSmall
-            text: "A faucet that gives it away — copy this and paste it in your browser:"
+            text: swapBackend.ethFaucetUrl !== ""
+                  ? "Faucet busy, empty, or unreachable? Copy this and paste it in your browser:"
+                  : "A faucet that gives it away — copy this and paste it in your browser:"
             color: Theme.textMuted
             font.pixelSize: Theme.fontCaption
             horizontalAlignment: Text.AlignLeft

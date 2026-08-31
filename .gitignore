@@ -13,6 +13,19 @@ deploy/maker.env
 deploy/maker*.env
 deploy/taker.env
 !deploy/maker.env.example
+# The faucet env file holds a LIVE, FUNDED hot key — the one this repo's
+# threat model most expects someone to try to take. Same rule, same
+# enforcement. Keep only the example committed.
+deploy/faucet.env
+deploy/faucet*.env
+!deploy/faucet.env.example
+
+# The faucet's rate-limit journal, if a local run is pointed at the repo
+# instead of a volume (`make faucet-poc-run` writes it under .faucet-poc/).
+# It records which addresses and IPs claimed and when — never source, and
+# never something to publish.
+.faucet-poc/
+faucet-ledger.json
 
 # Maker crash-recovery journal (src/cli/maker.rs MAKER_STATE_FILE) and any
 # status file the bot writes — CWD-relative by default, so a repo checkout

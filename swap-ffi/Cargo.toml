@@ -18,6 +18,13 @@ alloy-primitives = "1"
 dotenvy = "0.15"
 sha2 = "0.10"
 rand = { version = "0.8", features = ["std", "std_rng"] }
+# In-house Sepolia drip faucet client (swap_ffi_faucet_request_eth). The PoW
+# solver/verifier is shared with the service so the two cannot drift; reqwest
+# is already in this crate's tree via alloy-provider's HTTP transport, so
+# naming it here adds a feature flag, not a dependency (and no second TLS
+# stack — rustls either way).
+eth-faucet-pow = { path = "../eth-faucet-pow" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 
 # Demo-only: builds the LEZ HTLC risc0 guest so the demo-gated drift test can
 # assert the checked-in program ID constant (src/lez_htlc_program_id.rs, see

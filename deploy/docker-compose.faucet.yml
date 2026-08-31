@@ -1,0 +1,53 @@
+# In-house Sepolia ETH drip faucet (PoC) — see README-poc.md.
+#
+# A SEPARATE compose file, not a service added to docker-compose.yml: the
+# faucet and the makers have nothing to do with each other, they fail
+# independently, and during the PoC the faucet will be restarted far more often
+# than a maker holding an in-flight swap should be. `docker compose -f
+# docker-compose.faucet.yml up -d` touches only this.
+#
+#   cd deploy
+#   cp faucet.env.example faucet.env      # then fill in a THROWAWAY key
+#   docker compose -f docker-compose.faucet.yml up -d --build
+#   curl -fsS localhost:8787/health
+
+services:
+  faucet:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.faucet
+    image: eth-lez-atomic-swaps-faucet:latest
+    container_name: eth-lez-faucet
+    restart: unless-stopped
+    env_file:
+      - faucet.env
+    ports:
+      # Bound to LOCALHOST on the VPS. The app needs to reach this from the
+      # public internet, but it must do so through a reverse proxy that
+      # terminates TLS and sets X-Forwarded-For — the per-IP limit reads that
+      # header, and an unencrypted faucet would hand every address a user funds
+      # to anything on the path. See README-poc.md's deployment notes.
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Named volume, NOT a bind mount: the rate-limit journal must survive
+      # image upgrades and container recreation. Losing it resets every
+      # cooldown, which is the one failure that turns the limits into
+      # suggestions.
+      - faucet-state:/app/state
+    read_only: true
+    tmpfs:
+      # The journal is written temp-then-rename inside /app/state (the volume);
+      # nothing else needs to write, so the rest of the filesystem stays
+      # read-only. This process holds a funded key — the smaller its writable
+      # surface, the better.
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  faucet-state:

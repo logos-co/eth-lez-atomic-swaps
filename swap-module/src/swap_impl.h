@@ -167,6 +167,25 @@ public:
     // needs many claims.
     std::string startLezFundingJob(const std::string& sequencerUrl, const std::string& signingKeyHex, const std::string& targetLez);
 
+    // Ask the in-house Sepolia drip faucet for test ETH (PoC — see
+    // README-poc.md and eth-faucet/). Fetches a proof-of-work challenge from
+    // `faucetUrl`, solves it (CPU-bound, seconds), and posts the answer; the
+    // faucet sends the drip and waits for its receipt before answering, so a
+    // successful return means the ETH is in a block, not merely submitted.
+    //
+    // BLOCKING for as long as the whole round trip takes (PoW solve plus a
+    // Sepolia inclusion wait — tens of seconds is normal), which is well past
+    // the generated *Async wrapper's default 20s Timeout: callers must pass an
+    // explicit longer Timeout or the answer arrives as an empty QString and
+    // reads as a failure (the shape of issue #171). See
+    // SwapUiPlugin::setupRequestTestEth.
+    //
+    // Returns JSON {"outcome":"Dripped","tx_hash":...,"amount_eth":...,
+    // "chain_id":...} or {"error":"<sentence for the user>","code":"<tag>"}.
+    // The faucet authors its own refusal sentences (only it knows how long a
+    // cooldown has left), so the UI shows `error` verbatim.
+    std::string faucetRequestEth(const std::string& faucetUrl, const std::string& address);
+
     // ---- Long-running flows ----
     //
     // These call into the Rust orchestrator which performs multi-step on-chain

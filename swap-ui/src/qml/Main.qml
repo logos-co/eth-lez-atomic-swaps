@@ -140,6 +140,18 @@ Item {
         // override SWAP_UI_LEZ_FAUCET_MODE=on makes this false. See swap_ui.rep.
         readonly property bool setupFaucetless: root.backend ? root.backend.setupFaucetless : false
         readonly property bool setupInitialized: root.backend ? root.backend.setupInitialized : false
+        // In-house Sepolia drip faucet (PoC — see README-poc.md). An EMPTY URL
+        // means no faucet is configured for this build, and step 4 hides its
+        // "Get test ETH" button — so the safe default here is "" for the same
+        // reason it is the disabling value in eth_faucet_config.h: a facade
+        // that guessed a URL before the backend arrived would offer a button
+        // that cannot work.
+        readonly property string ethFaucetUrl: root.backend ? root.backend.ethFaucetUrl : ""
+        readonly property string setupFaucetTxHash: root.backend ? root.backend.setupFaucetTxHash : ""
+        readonly property string setupFaucetAmountEth: root.backend ? root.backend.setupFaucetAmountEth : ""
+        // 0 = unknown chain, which SwapLinks resolves to no explorer link
+        // rather than to the wrong network's.
+        readonly property int setupFaucetChainId: root.backend ? root.backend.setupFaucetChainId : 0
 
         signal offersFetched(string offersJson)
         signal offerPublished(string resultJson)
@@ -260,6 +272,11 @@ Item {
         function setupInitializeAccount() {
             if (!root.ready) return
             root.watch(root.backend.setupInitializeAccount())
+        }
+
+        function setupRequestTestEth() {
+            if (!root.ready) return
+            root.watch(root.backend.setupRequestTestEth())
         }
     }
 
