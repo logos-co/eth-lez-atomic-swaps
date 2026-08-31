@@ -1100,6 +1100,32 @@ Item {
                                     font.pixelSize: Theme.fontSmall
                                     font.family: Theme.monoFont
                                     font.bold: offerRow.bestDeal || model.blocked
+
+                                    // The green + ★ was the only mark on the
+                                    // board with no words anywhere to decode
+                                    // it (public-trial demo feedback: viewers
+                                    // guessed). A hover tip explains it in
+                                    // place, leaving the 96px cell unchanged.
+                                    //
+                                    // HoverHandler, not a nested MouseArea:
+                                    // rowContent is declared after rowMouse,
+                                    // so a MouseArea here would sit on top and
+                                    // swallow the hover, killing the row
+                                    // highlight over this one cell. A
+                                    // HoverHandler is non-blocking by default,
+                                    // so rowMouse still sees the cursor.
+                                    //
+                                    // The guard is `!model.blocked`, mirroring
+                                    // the text binding above rather than
+                                    // `bestDeal`: a ghosted row is excluded
+                                    // from the max but can still tie it, and
+                                    // it renders "blocked" with no ★.
+                                    HoverHandler { id: rateHover }
+                                    ToolTip.visible: rateHover.hovered
+                                                     && offerRow.bestDeal
+                                                     && !model.blocked
+                                    ToolTip.delay: 400
+                                    ToolTip.text: Copy.bestRateCue
                                 }
 
                                 // Maker
