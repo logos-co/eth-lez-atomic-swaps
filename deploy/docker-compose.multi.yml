@@ -51,8 +51,9 @@
 # that lands in fleet.mjs (e.g. logos.test, PR #125) is picked up by every
 # maker on a plain `restart`, no image rebuild and no per-container hand-patch.
 # The offer-publisher SOURCE is overlaid (node_modules stays from the image);
-# publish-offer.mjs imports "./fleet.mjs" and "./rfq.mjs", which resolve to the
-# mounts. Overlaying publish-offer.mjs + rfq.mjs (not just fleet.mjs) is what
+# publish-offer.mjs imports "./fleet.mjs", "./heartbeat.mjs" and "./rfq.mjs",
+# which resolve to the mounts. Overlaying publish-offer.mjs + heartbeat.mjs +
+# rfq.mjs (not just fleet.mjs) is what
 # ships the RFQ on-demand responder (feat/rfq-on-demand-offers) to the fleet
 # without an image rebuild — the published image bakes an older publish-offer.mjs
 # with no responder and no rfq.mjs at all, so a fleet.mjs-only mount would run
@@ -88,10 +89,12 @@
 
 # Repo offer-publisher source overlaid on the image's stale baked copies (see
 # header). Paths are relative to this compose file (deploy/). fleet.mjs pins the
-# current fleet cluster/peers; publish-offer.mjs + rfq.mjs ship the RFQ responder.
-# Three scalar anchors (YAML cannot splice a list anchor into a list, and Docker
+# current fleet cluster/peers; publish-offer.mjs + heartbeat.mjs + rfq.mjs ship
+# the RFQ responder and the heartbeat resolver.
+# Four scalar anchors (YAML cannot splice a list anchor into a list, and Docker
 # Compose does not merge sequence anchors), referenced together per maker.
 x-fleet-mount: &fleet-mount ../offer-publisher/fleet.mjs:/app/offer-publisher/fleet.mjs:ro
+x-heartbeat-mount: &heartbeat-mount ../offer-publisher/heartbeat.mjs:/app/offer-publisher/heartbeat.mjs:ro
 x-publish-mount: &publish-mount ../offer-publisher/publish-offer.mjs:/app/offer-publisher/publish-offer.mjs:ro
 x-rfq-mount: &rfq-mount ../offer-publisher/rfq.mjs:/app/offer-publisher/rfq.mjs:ro
 
@@ -126,6 +129,7 @@ services:
     volumes:
       - maker-2-state:/app/state
       - *fleet-mount
+      - *heartbeat-mount
       - *publish-mount
       - *rfq-mount
 
@@ -141,6 +145,7 @@ services:
     volumes:
       - maker-3-state:/app/state
       - *fleet-mount
+      - *heartbeat-mount
       - *publish-mount
       - *rfq-mount
 
@@ -156,6 +161,7 @@ services:
     volumes:
       - maker-4-state:/app/state
       - *fleet-mount
+      - *heartbeat-mount
       - *publish-mount
       - *rfq-mount
 
@@ -171,6 +177,7 @@ services:
     volumes:
       - maker-5-state:/app/state
       - *fleet-mount
+      - *heartbeat-mount
       - *publish-mount
       - *rfq-mount
 
