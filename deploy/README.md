@@ -155,7 +155,7 @@ node watch-offers.mjs                        # logos.dev — where the market is
 SWAP_FLEET=logos.test node watch-offers.mjs  # the migration fleet
 ```
 
-Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 45s) showing
+Expect one line per heartbeat (`OFFER_HEARTBEAT_SECS`, default 30s) showing
 the maker's LEZ/ETH amounts and `age=0s` on arrival. The first log line names
 the fleet being watched — check it before concluding a board is empty.
 

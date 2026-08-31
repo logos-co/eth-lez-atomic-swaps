@@ -14,7 +14,7 @@
 //     isolated: any error in it never stops the fallback heartbeat below.
 //
 //  2. Fallback heartbeat (the reliable baseline): republishes the offer every
-//     FALLBACK_HEARTBEAT_SECS with fresh absolute timelocks, so a taker who
+//     OFFER_HEARTBEAT_SECS with fresh absolute timelocks, so a taker who
 //     missed the RFQ response (or whose request the maker coalesced away) still
 //     sees an offer. If a light node cannot filter-subscribe on this fleet, the
 //     heartbeat alone keeps the board filling — just without the instant fill.
@@ -29,9 +29,11 @@
 //   OFFER_ETH_TIMELOCK_MINUTES   long (taker) timelock duration
 //   OFFER_LEZ_HTLC_PROGRAM_ID    64-hex LEZ HTLC program id
 //   OFFER_ETH_HTLC_ADDRESS       0x... EthHTLC contract address
-//   FALLBACK_HEARTBEAT_SECS      fallback republish interval (default 30;
-//                                falls back to the legacy OFFER_HEARTBEAT_SECS
-//                                that swap-cli still sets, else 30)
+//   OFFER_HEARTBEAT_SECS         republish interval, the ONE heartbeat knob
+//                                (default 30; swap-cli injects the resolved
+//                                value). FALLBACK_HEARTBEAT_SECS is a
+//                                DEPRECATED alias that still works but warns —
+//                                see heartbeat.mjs.
 //   RESPONSE_COOLDOWN_SECS       min seconds between RFQ responses (default 8)
 //   SWAP_FLEET                   which fleet to publish on: unset/logos.dev
 //                                (default) or logos.test. An unknown value
@@ -50,6 +52,7 @@ import {
   dialFleet,
 } from "./fleet.mjs";
 import { parseOfferRequest, createResponderGate } from "./rfq.mjs";
+import { resolveHeartbeatSecs } from "./heartbeat.mjs";
 
 const log = (msg) => console.log(`[offer-publisher] ${msg}`);
 
@@ -71,15 +74,20 @@ const cfg = {
   ethTimelockMinutes: Number(requireEnv("OFFER_ETH_TIMELOCK_MINUTES")),
   lezHtlcProgramId: requireEnv("OFFER_LEZ_HTLC_PROGRAM_ID"),
   ethHtlcAddress: requireEnv("OFFER_ETH_HTLC_ADDRESS"),
-  // The fallback heartbeat supersedes the old 5s/45s heartbeat: RFQ is now the
-  // fast path, this is the slow reliable baseline. Prefer the new env name but
-  // honour the legacy OFFER_HEARTBEAT_SECS that swap-cli still injects so
-  // deployed makers keep a sane interval without a swap-cli change.
-  fallbackHeartbeatSecs: Number(
-    process.env.FALLBACK_HEARTBEAT_SECS || process.env.OFFER_HEARTBEAT_SECS || "30"
-  ),
   responseCooldownSecs: Number(process.env.RESPONSE_COOLDOWN_SECS || "8"),
 };
+
+// The fallback heartbeat supersedes the old 5s/45s heartbeat: RFQ is now the
+// fast path, this is the slow reliable baseline. One knob decides its cadence
+// — OFFER_HEARTBEAT_SECS — with FALLBACK_HEARTBEAT_SECS honoured as a
+// deprecated alias; heartbeat.mjs owns the precedence and the warnings.
+const heartbeat = resolveHeartbeatSecs(process.env);
+for (const warning of heartbeat.warnings) {
+  log(`WARNING: ${warning}`);
+}
+log(
+  `offer republish heartbeat: ${heartbeat.secs}s (from ${heartbeat.source})`
+);
 
 // Offer schema per swap-module/src/swap_delivery_adapter.cpp (offerKeys):
 // hashlock is empty in offers — takers generate the preimage after discovery.
@@ -108,7 +116,7 @@ const encoder = createEncoder({ contentTopic: OFFERS_CONTENT_TOPIC, routingInfo 
 log(
   `connecting to ${FLEET_NAME} fleet ` +
     `(cluster ${NETWORK_CONFIG.clusterId} -> ${routingInfo.pubsubTopic}, ` +
-    `fallback heartbeat ${cfg.fallbackHeartbeatSecs}s, ` +
+    `fallback heartbeat ${heartbeat.secs}s, ` +
     `RFQ response cooldown ${cfg.responseCooldownSecs}s)...`
 );
 const node = await createFleetNode();
@@ -150,7 +158,7 @@ async function publish() {
 }
 
 await publish();
-const interval = setInterval(publish, cfg.fallbackHeartbeatSecs * 1000);
+const interval = setInterval(publish, heartbeat.secs * 1000);
 
 // --- RFQ responder ---------------------------------------------------------
 // Filter-subscribe to the anonymous offer-requests topic and respond by

@@ -3,7 +3,12 @@
 A **headless Node.js daemon** — not a website — spawned and supervised by the
 liquidity bot (`swap-cli maker --loop`). It connects once to a delivery fleet
 (over raw TCP via `@libp2p/tcp`) and **republishes the maker's offer** every
-`OFFER_HEARTBEAT_SECS` seconds with fresh absolute timelocks.
+`OFFER_HEARTBEAT_SECS` seconds (default 30) with fresh absolute timelocks.
+That is the single heartbeat knob end to end: `swap-cli maker` resolves it and
+injects the resolved value here. `FALLBACK_HEARTBEAT_SECS` is a **deprecated**
+alias that still works, warns at startup, and only applies when
+`OFFER_HEARTBEAT_SECS` is unset — `heartbeat.mjs` owns that precedence and
+`heartbeat.test.mjs` pins it.
 
 ## Which fleet: `SWAP_FLEET`
 

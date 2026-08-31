@@ -1298,6 +1298,11 @@ impl OfferPublisherEnv {
                 "OFFER_ETH_HTLC_ADDRESS".into(),
                 self.eth_htlc_address.clone(),
             ),
+            // The ONE heartbeat knob, already resolved by `MakerArgs::heartbeat`
+            // (canonical env, deprecated alias, or the default). The sidecar
+            // reads this and nothing else — see `spawn_offer_publisher`, which
+            // strips the deprecated alias out of the child's inherited env so
+            // this value cannot be second-guessed downstream.
             ("OFFER_HEARTBEAT_SECS".into(), heartbeat_secs.to_string()),
         ]
     }
@@ -1345,6 +1350,13 @@ pub fn spawn_offer_publisher(
             let mut cmd = tokio::process::Command::new("node");
             cmd.arg(&script)
                 .envs(env_vars.iter().cloned())
+                // The child inherits our env, so a FALLBACK_HEARTBEAT_SECS set
+                // on the parent would still reach the sidecar and could name a
+                // different cadence than the one we resolved and logged. We
+                // already honoured it (with a deprecation warning) when
+                // resolving `heartbeat_secs`; remove it here so exactly one
+                // variable decides the interval end to end.
+                .env_remove("FALLBACK_HEARTBEAT_SECS")
                 .stdout(std::process::Stdio::piped())
                 .kill_on_drop(true);
             match cmd.spawn() {
