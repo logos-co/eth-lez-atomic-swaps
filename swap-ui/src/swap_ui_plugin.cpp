@@ -1837,7 +1837,8 @@ void SwapUiPlugin::fetchBalancesFromLoadedEnv()
     // property any more (issue #169), so clearing it from an automatic refresh
     // can only erase the failure of something the user actually did. The
     // refund-completion paths are exactly that case — setResultStatus() writes
-    // the failure and the very next statement calls this function.
+    // the failure and the very next statement requests a refresh that can
+    // route here.
     setBalancesLoading(true);
     setStatus(QStringLiteral("Fetching balances..."));
     startBalanceRefreshRequest(BalanceRefreshCoordinator::Decision::StartFromEnv);
@@ -2349,7 +2350,7 @@ void SwapUiPlugin::refundLez(const QString& hashlockHex)
         setResultStatus(result,
                         QStringLiteral("LEZ refund finished"),
                         QStringLiteral("LEZ refund failed"));
-        fetchBalancesFromLoadedEnv();
+        requestAutomaticBalanceRefresh();
     });
 }
 
@@ -2396,7 +2397,7 @@ void SwapUiPlugin::refundEth(const QString& swapIdHex)
         setResultStatus(result,
                         QStringLiteral("ETH refund finished"),
                         QStringLiteral("ETH refund failed"));
-        fetchBalancesFromLoadedEnv();
+        requestAutomaticBalanceRefresh();
     });
 }
 

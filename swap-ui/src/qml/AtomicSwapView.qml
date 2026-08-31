@@ -98,7 +98,7 @@ Item {
     // The account strip has no Refresh button, so its balances have to be right
     // on their own.
     //
-    // The backend carries the long tail: five completion paths call
+    // The backend carries the long tail: four completion paths call
     // beginBalanceSettle(), which keeps refreshing until BOTH legs have moved
     // or its window closes. That path used to no-op for everyone —
     // requestAutomaticBalanceRefresh() only knew the env-file route, gated on
