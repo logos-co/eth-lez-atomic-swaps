@@ -6,13 +6,16 @@
 // gone, so the automatic path has to carry it, and these tests pin the pieces
 // that make that true.
 //
-// Background (issue #57): the C++ automatic path is env-only. Every completion
-// hook calls beginBalanceSettle() -> requestAutomaticBalanceRefresh(), which
-// calls fetchBalancesFromLoadedEnv() gated on `!m_loadedEnvPath.isEmpty()`.
+// Background (issue #57): the C++ automatic path used to be env-only. Every
+// completion hook calls beginBalanceSettle() -> requestAutomaticBalanceRefresh(),
+// which called fetchBalancesFromLoadedEnv() gated on `!m_loadedEnvPath.isEmpty()`.
 // m_loadedEnvPath is set in exactly one place — a successful loadEnvFile() — so
 // for anyone who configured through Setup it is empty and every automatic
-// refresh silently no-ops. The QML side drives fetchBalances() (the
-// config-backed route) instead of changing that C++ contract.
+// refresh silently no-opped. Two things carry it now: the QML ticks below for
+// the fast case, and the C++ path itself, which routes to the config-backed
+// fetchBalances() when there is no loaded env file. The C++ half is what covers
+// a leg that confirms a block after the swap reports finished — the taker's LEZ
+// claim, which is submitted, not committed, when run_taker returns.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -59,15 +62,45 @@ test("a completed swap keeps re-reading, not just once", () => {
   assert.match(settle, /repeat:\s*true/);
 });
 
-test("automatic refresh in C++ is still env-only (why the QML fix exists)", () => {
+test("automatic refresh in C++ reaches config-backed users too", () => {
+  // The inverse of what this file used to assert. While the automatic path
+  // knew only the env-file route, the post-swap settle poll reached nobody who
+  // configured through Setup, and a completed swap left the leg that lands
+  // late — the taker's received LEZ — stale until the app was restarted.
   const automatic = between(
     plugin,
     "void SwapUiPlugin::requestAutomaticBalanceRefresh()",
+    "BalanceSnapshot SwapUiPlugin::balanceSnapshot",
+  );
+  assert.match(automatic, /Decision::StartFromEnv/);
+  assert.match(automatic, /fetchBalancesFromLoadedEnv\(\)/);
+  assert.match(automatic, /Decision::StartFromConfig/);
+  assert.match(automatic, /[^m]fetchBalances\(\)/);
+});
+
+test("the post-swap settle poll waits for BOTH legs, not the first one", () => {
+  // Behaviour is covered in swap-ui/tests/balance_refresh_coordinator_test.cpp;
+  // this pins that the plugin actually hands the coordinator both sides and a
+  // window long enough for a LEZ block, rather than a joined key that any one
+  // side moving would satisfy.
+  const settle = between(
+    plugin,
+    "void SwapUiPlugin::beginBalanceSettle()",
     "void SwapUiPlugin::completeBalanceRefresh",
   );
-  assert.match(automatic, /!m_loadedEnvPath\.isEmpty\(\)/);
-  assert.match(automatic, /fetchBalancesFromLoadedEnv\(\)/);
-  assert.doesNotMatch(automatic, /[^m]fetchBalances\(\)/);
+  assert.match(settle, /beginSettle\(balanceSnapshot\(\)/);
+  assert.match(settle, /kBalanceSettleWindowMs/);
+
+  const header = readFileSync("swap-ui/src/swap_ui_plugin.h", "utf8");
+  const windowMs = Number(
+    header.match(/kBalanceSettleWindowMs\s*=\s*(\d+)/)?.[1] ?? 0,
+  );
+  // A LEZ block on the public testnet can be a minute or more apart, and the
+  // claim is only submitted when the swap reports finished.
+  assert.ok(
+    windowMs >= 120000,
+    `settle window ${windowMs}ms is too short for a LEZ claim to commit`,
+  );
 });
 
 test("maker availability remains reactive to refreshed LEZ balance", () => {

@@ -186,11 +186,16 @@ private:
 
     void setBusyState();
     // Start a bounded post-swap settle-poll (see BalanceRefreshCoordinator):
-    // snapshot the current balance and keep refreshing until it changes or the
-    // attempt cap is hit, so the header reflects a claim that confirms shortly
-    // after the swap "finishes" without a manual Refresh.
+    // snapshot BOTH balances and keep refreshing until each has moved or the
+    // window closes, so the header reflects a claim that confirms up to a
+    // block after the swap "finishes" without a manual Refresh.
     void beginBalanceSettle();
-    std::string balanceSnapshotKey() const;
+    BalanceSnapshot balanceSnapshot() const;
+    BalanceRefreshSources balanceRefreshSources() const;
+    void startBalanceRefreshRequest(BalanceRefreshCoordinator::Decision route);
+    // How long after a completion a still-unmoved side keeps earning refreshes.
+    // Matches the deadline LezClient allows a submitted action to land in.
+    static constexpr long long kBalanceSettleWindowMs = 300000;
     void updateRunning();
     void clearMakerProgress();
     void clearTakerProgress();

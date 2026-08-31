@@ -98,25 +98,27 @@ Item {
     // The account strip has no Refresh button, so its balances have to be right
     // on their own.
     //
-    // The backend already tries: five completion paths call beginBalanceSettle(),
-    // which re-arms requestAutomaticBalanceRefresh() up to eight times. But that
-    // function only ever calls fetchBalancesFromLoadedEnv(), gated on
-    // `!m_loadedEnvPath.isEmpty()` — a path set in exactly one place, a
-    // successful loadEnvFile(). Anyone who configured through Setup (i.e. every
-    // real user) has an empty m_loadedEnvPath, so every automatic refresh takes
-    // the Decision::Unavailable branch and no-ops with only a trace line. That
-    // is why the seller's "Available" never moved after a sale.
+    // The backend carries the long tail: five completion paths call
+    // beginBalanceSettle(), which keeps refreshing until BOTH legs have moved
+    // or its window closes. That path used to no-op for everyone —
+    // requestAutomaticBalanceRefresh() only knew the env-file route, gated on
+    // `!m_loadedEnvPath.isEmpty()`, and anyone who configured through Setup has
+    // that empty — so it now routes to the config-backed fetchBalances() too
+    // (BalanceRefreshCoordinator::route). That is what makes a swap's slow leg
+    // land on screen: the taker's LEZ claim commits a block AFTER the swap
+    // reports finished, which no fixed short window can cover.
     //
-    // Driving fetchBalances() — the config-backed route — from here fixes it for
-    // the config-backed majority without touching the C++ contract or the
-    // env-backed path.
+    // These ticks stay for the fast case: a burst of quick reads right after a
+    // job ends, so a leg that confirmed during the run appears at once instead
+    // of waiting on the backend's slower cadence.
     property int balanceSettleTicks: 0
 
     function refreshBalancesSoon() {
         if (!swapBackend.ready) return
         swapBackend.fetchBalances()
         // A chain write is not visible the instant a job reports done, so keep
-        // asking for a while rather than trusting a single read.
+        // asking for a while rather than trusting a single read. The backend
+        // settle poll takes over from here for the leg that lands later.
         root.balanceSettleTicks = 6
     }
 

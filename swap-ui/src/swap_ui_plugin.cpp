@@ -379,11 +379,13 @@ SwapUiPlugin::SwapUiPlugin(QObject* parent)
     connect(&m_coordinationPollTimer, &QTimer::timeout,
             this, &SwapUiPlugin::coordinationPollSwapEvents);
 
-    // Post-swap settle-poll: a LEZ claim confirms ~1 min after a swap finishes,
-    // so the balance refresh fired at completion reads the stale pre-claim
-    // amount. This single-shot timer re-refreshes on a delay; the coordinator
-    // decides (in completeBalanceRefresh) whether the balance has settled yet
-    // or another tick is warranted, up to a bounded cap.
+    // Post-swap settle-poll: a LEZ claim confirms up to a block (a minute or
+    // more on the public testnet) after a swap reports finished, so the balance
+    // refresh fired at completion reads the stale pre-claim amount on that leg
+    // while the ETH leg — confirmed near the start of the run — already shows
+    // the new figure. This single-shot timer re-refreshes on a delay; the
+    // coordinator decides (in completeBalanceRefresh) whether BOTH sides have
+    // settled yet or another tick is warranted, until its window closes.
     m_balanceSettleTimer.setInterval(15000);
     m_balanceSettleTimer.setSingleShot(true);
     connect(&m_balanceSettleTimer, &QTimer::timeout,
@@ -1795,6 +1797,35 @@ void SwapUiPlugin::loadEnvFile(const QString& path, const QString& role)
     });
 }
 
+void SwapUiPlugin::startBalanceRefreshRequest(BalanceRefreshCoordinator::Decision route)
+{
+    using Decision = BalanceRefreshCoordinator::Decision;
+    if (!m_swap) {
+        return;
+    }
+    if (route == Decision::StartFromEnv) {
+        m_swap->fetchBalancesFromEnvAsync(m_loadedEnvPath, [this](QString result) {
+            completeBalanceRefresh(result);
+        });
+    } else {
+        m_swap->fetchBalancesAsync(configJson(), [this](QString result) {
+            completeBalanceRefresh(result);
+        });
+    }
+}
+
+// Which routes can serve a refresh right now. A loaded env file is one; the
+// config the UI already holds is the other, and it is the ONLY one anybody who
+// configured through the guided Setup has (m_loadedEnvPath is written in
+// exactly one place, a successful loadEnvFile()).
+BalanceRefreshSources SwapUiPlugin::balanceRefreshSources() const
+{
+    BalanceRefreshSources sources;
+    sources.env = m_swap && !m_loadedEnvPath.isEmpty();
+    sources.config = m_swap && balanceReadGate().anyReady();
+    return sources;
+}
+
 void SwapUiPlugin::fetchBalancesFromLoadedEnv()
 {
     if (!m_swap || m_loadedEnvPath.isEmpty() || balancesLoading()) {
@@ -1809,57 +1840,78 @@ void SwapUiPlugin::fetchBalancesFromLoadedEnv()
     // the failure and the very next statement calls this function.
     setBalancesLoading(true);
     setStatus(QStringLiteral("Fetching balances..."));
-    m_swap->fetchBalancesFromEnvAsync(m_loadedEnvPath, [this](QString result) {
-        completeBalanceRefresh(result);
-    });
+    startBalanceRefreshRequest(BalanceRefreshCoordinator::Decision::StartFromEnv);
 }
 
 void SwapUiPlugin::requestAutomaticBalanceRefresh()
 {
     using Decision = BalanceRefreshCoordinator::Decision;
     const auto decision = m_balanceRefreshCoordinator.requestAutomatic(
-        !m_loadedEnvPath.isEmpty(), balancesLoading());
-    if (decision == Decision::Start) {
+        balanceRefreshSources(), balancesLoading());
+    switch (decision) {
+    case Decision::StartFromEnv:
         fetchBalancesFromLoadedEnv();
-    } else if (decision == Decision::Unavailable) {
-        swapUiTrace(QStringLiteral("automatic balance refresh skipped — no loaded env source"));
+        break;
+    case Decision::StartFromConfig:
+        // The config-backed route. Without it every automatic refresh — the
+        // post-swap settle poll above all — no-opped for Setup-configured
+        // users, which is why a completed swap left the received leg stale
+        // until the app was restarted.
+        fetchBalances();
+        break;
+    case Decision::Coalesced:
+        break;
+    case Decision::Unavailable:
+        swapUiTrace(QStringLiteral("automatic balance refresh skipped — no readable balance source"));
+        break;
     }
 }
 
-std::string SwapUiPlugin::balanceSnapshotKey() const
+BalanceSnapshot SwapUiPlugin::balanceSnapshot() const
 {
-    return (ethBalance() + QLatin1Char('|') + lezBalance()).toStdString();
+    return BalanceSnapshot{ethBalance().toStdString(), lezBalance().toStdString()};
 }
 
 void SwapUiPlugin::beginBalanceSettle()
 {
-    // Poll every 15s (m_balanceSettleTimer) for up to ~2 min after a swap
-    // finishes, stopping early the moment the balance changes vs this snapshot.
+    // Poll every 15s (m_balanceSettleTimer) after a swap finishes, stopping
+    // early once BOTH legs have moved vs this snapshot — never the moment the
+    // first one does. The taker's ETH leg confirmed near the START of the run,
+    // so it is already visible at completion while the LEZ claim it just
+    // submitted is still a block away.
+    //
+    // The window matches the deadline LezClient itself allows for a submitted
+    // action to land (src/lez/client.rs), because that is the same wait: block
+    // times on the public testnet run to a minute and more.
     m_balanceSettleTimer.stop();
-    m_balanceRefreshCoordinator.beginSettle(balanceSnapshotKey(), 8);
+    m_balanceRefreshCoordinator.beginSettle(balanceSnapshot(),
+                                            QDateTime::currentMSecsSinceEpoch(),
+                                            kBalanceSettleWindowMs);
     requestAutomaticBalanceRefresh();
 }
 
 void SwapUiPlugin::completeBalanceRefresh(const QString& resultJson)
 {
+    using Decision = BalanceRefreshCoordinator::Decision;
     applyBalancesResult(resultJson);
-    if (m_balanceRefreshCoordinator.finish(!m_loadedEnvPath.isEmpty())) {
+    const auto followUp = m_balanceRefreshCoordinator.finish(balanceRefreshSources());
+    if (followUp == Decision::StartFromEnv || followUp == Decision::StartFromConfig) {
         // Keep balancesLoading true across the coalesced follow-up. Otherwise
         // the header briefly re-enables and an older pre-sale result can look
         // authoritative before the post-sale refresh starts. errorMessage is
         // left alone here for the same reason as in fetchBalances().
         setStatus(QStringLiteral("Fetching balances..."));
-        m_swap->fetchBalancesFromEnvAsync(m_loadedEnvPath, [this](QString result) {
-            completeBalanceRefresh(result);
-        });
+        startBalanceRefreshRequest(followUp);
         return;
     }
     setBalancesLoading(false);
 
-    // If a post-swap settle-poll is active, decide whether the balance has
-    // moved yet. While it hasn't (and we're under the attempt cap), schedule
-    // another delayed refresh so the header catches the claim once it confirms.
-    if (m_balanceRefreshCoordinator.observeSettle(balanceSnapshotKey())) {
+    // If a post-swap settle-poll is active, decide whether the balances have
+    // moved yet. While either side is still stale (and the window is still
+    // open), schedule another delayed refresh so the header catches the claim
+    // once it confirms.
+    if (m_balanceRefreshCoordinator.observeSettle(balanceSnapshot(),
+                                                  QDateTime::currentMSecsSinceEpoch())) {
         m_balanceSettleTimer.start();
     }
 }
@@ -1956,8 +2008,16 @@ swap_ui::BalanceReadGate SwapUiPlugin::balanceReadGate() const
 
 void SwapUiPlugin::fetchBalances()
 {
-    if (!m_swap || balancesLoading()) {
+    if (!m_swap) {
         setStatus(QStringLiteral("Swap client not ready"));
+        return;
+    }
+    if (balancesLoading()) {
+        // A read is already in flight and its result lands on the same
+        // properties. Returning QUIETLY matters now that the QML settle ticks
+        // and the C++ settle poll both drive this after a completion: the two
+        // land within milliseconds of each other, and the loser used to
+        // overwrite the status line with "Swap client not ready".
         return;
     }
     if (!balanceReadGate().anyReady()) {
@@ -1974,9 +2034,7 @@ void SwapUiPlugin::fetchBalances()
     // when a swap failure needs to stay on screen.
     setBalancesLoading(true);
     setStatus(QStringLiteral("Fetching balances..."));
-    m_swap->fetchBalancesAsync(configJson(), [this](QString result) {
-        completeBalanceRefresh(result);
-    });
+    startBalanceRefreshRequest(BalanceRefreshCoordinator::Decision::StartFromConfig);
 }
 
 void SwapUiPlugin::handleMakerFinished(const QString& resultJson)
