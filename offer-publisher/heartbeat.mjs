@@ -14,8 +14,8 @@
 // `setInterval(fn, 0)`.
 //
 // Kept pure and separate from publish-offer.mjs so heartbeat.test.mjs can pin
-// the precedence rules without a Waku node (see AGENTS.md, "Fast local
-// checks").
+// the precedence rules without a Waku node (it runs in `make preflight` via
+// NODE_PREFLIGHT_TESTS in the Makefile).
 
 /** Default republish cadence, in seconds. Must match `DEFAULT_HEARTBEAT_SECS`
  * in src/cli/maker.rs — a maker started without the env var and a sidecar run
