@@ -348,7 +348,7 @@ try {
   // path — cluster-3 mesh -> delivery_module v0.2.0 typed messageReceived
   // event -> adapter payload decode -> offer-field validation -> offer cache
   // (the store fetchOffers serves the UI from). The real VPS maker publishes
-  // an offer on /atomic-swaps/1/offers/json every 45s, so the budget below
+  // an offer on /atomic-swaps/1/offers/json every 30s, so the budget below
   // covers two heartbeats plus cold gossipsub mesh formation.
   const receptionMarker = "offer cached from delivery";
   const receptionDropMarker = "SwapDeliveryAdapter: dropped offers-topic payload";
@@ -392,7 +392,7 @@ try {
     throw new Error(
       `no offer was received end-to-end within ${receptionTimeoutMs}ms — ` +
       `the marker "${receptionMarker}" never appeared in the host logs. ` +
-      `The real fleet maker publishes every 45s, so this means the ` +
+      `The real fleet maker publishes every 30s, so this means the ` +
       `fleet mesh, the delivery_module event path, or the swap adapter is broken.\n` +
       `Diagnostics:\n  ${diagnostics.join("\n  ")}\nSee ${deliveryLog}.`,
     );
